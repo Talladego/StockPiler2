@@ -1,0 +1,286 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Interface xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <Scripts>
+        <Script file="Source/View/StockPiler2TabPotions.lua" />
+    </Scripts>
+    <Windows>
+        <Window name="StockPiler2TabPotions" movable="false">
+            <Anchors>
+                <Anchor point="topleft" relativePoint="topleft" relativeTo="StockPiler2WindowSocket">
+                    <AbsPoint x="0" y="0" />
+                </Anchor>
+                <Anchor point="bottomright" relativePoint="bottomright" relativeTo="StockPiler2WindowSocket">
+                    <AbsPoint x="0" y="0" />
+                </Anchor>
+            </Anchors>
+            <EventHandlers>
+                <EventHandler event="OnInitialize" function="StockPiler2TabPotions.Initialize" />
+            </EventHandlers>
+            <Windows>
+                <Window name="$parentBanner">
+                    <Size>
+                        <AbsPoint x="500" y="70" />
+                    </Size>
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="0" y="0" />
+                        </Anchor>
+                        <Anchor point="topright" relativePoint="topright">
+                            <AbsPoint x="-20" y="0" />
+                        </Anchor>
+                    </Anchors>
+                    <Windows>
+                        <FullResizeImage name="$parentBackground" inherits="SettingsSectionBackground" />
+                        <Label name="$parentTitle" inherits="EA_Settings_SectionTitle">
+                            <Size>
+                                <AbsPoint x="400" y="22" />
+                            </Size>
+                            <Anchors>
+                                <Anchor point="topleft" relativePoint="topleft">
+                                    <AbsPoint x="12" y="4" />
+                                </Anchor>
+                            </Anchors>
+                        </Label>
+                        <Label name="$parentText" font="font_chat_text" maxchars="256" textalign="left" handleinput="false" wordwrap="true">
+                            <Size>
+                                <AbsPoint x="960" y="40" />
+                            </Size>
+                            <Anchors>
+                                <Anchor point="topleft" relativePoint="topleft">
+                                    <AbsPoint x="12" y="26" />
+                                </Anchor>
+                            </Anchors>
+                        </Label>
+                    </Windows>
+                </Window>
+
+                <!-- Filter row -->
+                <Label name="$parentSearchLabel" font="font_default_text_small" maxchars="12" textalign="rightcenter" handleinput="false">
+                    <Size>
+                        <AbsPoint x="56" y="28" />
+                    </Size>
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="0" y="74" />
+                        </Anchor>
+                    </Anchors>
+                </Label>
+                <EditBox name="$parentSearchBox" inherits="EA_EditBox_DefaultFrame" maxchars="48" input="text">
+                    <Size>
+                        <AbsPoint x="100" y="28" />
+                    </Size>
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="58" y="74" />
+                        </Anchor>
+                    </Anchors>
+                    <EventHandlers>
+                        <EventHandler event="OnTextChanged" function="StockPiler2TabPotions.OnSearchChanged" />
+                    </EventHandlers>
+                </EditBox>
+                <Label name="$parentEffectLabel" font="font_default_text_small" maxchars="12" textalign="rightcenter" handleinput="false">
+                    <Size>
+                        <AbsPoint x="52" y="28" />
+                    </Size>
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="162" y="74" />
+                        </Anchor>
+                    </Anchors>
+                </Label>
+                <ComboBox name="$parentEffectCombo" inherits="EA_ComboBox_DefaultResizableSmall" handleinput="true">
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="218" y="74" />
+                        </Anchor>
+                    </Anchors>
+                    <EventHandlers>
+                        <EventHandler event="OnSelChanged" function="StockPiler2TabPotions.OnEffectComboChanged" />
+                    </EventHandlers>
+                </ComboBox>
+                <Button name="$parentFilterKnownRecipe" inherits="EA_Button_DefaultCheckBox">
+                    <Size>
+                        <AbsPoint x="20" y="20" />
+                    </Size>
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="351" y="78" />
+                        </Anchor>
+                    </Anchors>
+                    <EventHandlers>
+                        <EventHandler event="OnLButtonUp" function="StockPiler2TabPotions.OnToggleKnownRecipeFilter" />
+                    </EventHandlers>
+                </Button>
+                <Label name="$parentFilterKnownRecipeLabel" font="font_default_text_small" maxchars="24" textalign="leftcenter" handleinput="false">
+                    <Size>
+                        <AbsPoint x="120" y="28" />
+                    </Size>
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="375" y="74" />
+                        </Anchor>
+                    </Anchors>
+                </Label>
+
+                <!-- Headers: x/width must match StockPiler2PotionRow (chrome spans Watch..Forget). -->
+                <Button name="$parentSortWatch" inherits="StockPiler2_SortHeader" id="8">
+                    <Size>
+                        <AbsPoint x="40" y="28" />
+                    </Size>
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="0" y="114" />
+                        </Anchor>
+                    </Anchors>
+                    <Windows>
+                        <DynamicImage name="$parentEye" texture="EA_HUD_01" slice="LookingFor-Eye-Rollover" textureScale="0.5" handleinput="false">
+                            <Size>
+                                <AbsPoint x="16" y="12" />
+                            </Size>
+                            <Anchors>
+                                <Anchor point="left" relativePoint="left">
+                                    <AbsPoint x="8" y="0" />
+                                </Anchor>
+                            </Anchors>
+                        </DynamicImage>
+                        <DynamicImage name="$parentUpArrow" inherits="EA_ListSortUpArrow">
+                            <Anchors>
+                                <Anchor point="right" relativePoint="right">
+                                    <AbsPoint x="-4" y="0" />
+                                </Anchor>
+                            </Anchors>
+                        </DynamicImage>
+                        <DynamicImage name="$parentDownArrow" inherits="EA_ListSortDownArrow">
+                            <Anchors>
+                                <Anchor point="center" relativePoint="center" relativeTo="$parentUpArrow">
+                                    <AbsPoint x="0" y="0" />
+                                </Anchor>
+                            </Anchors>
+                        </DynamicImage>
+                    </Windows>
+                </Button>
+                <Button name="$parentSortName" inherits="StockPiler2_SortHeader" id="1" textalign="left">
+                    <Size>
+                        <AbsPoint x="348" y="28" />
+                    </Size>
+                    <TextOffset x="8" y="4" />
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="40" y="114" />
+                        </Anchor>
+                    </Anchors>
+                </Button>
+                <Button name="$parentSortEffect" inherits="StockPiler2_SortHeader" id="2" textalign="left">
+                    <Size>
+                        <AbsPoint x="72" y="28" />
+                    </Size>
+                    <TextOffset x="4" y="4" />
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="388" y="114" />
+                        </Anchor>
+                    </Anchors>
+                </Button>
+                <Button name="$parentSortPower" inherits="StockPiler2_SortHeader" id="3" textalign="left">
+                    <Size>
+                        <AbsPoint x="68" y="28" />
+                    </Size>
+                    <TextOffset x="4" y="4" />
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="460" y="114" />
+                        </Anchor>
+                    </Anchors>
+                </Button>
+                <Button name="$parentSortStability" inherits="StockPiler2_SortHeader" id="4" textalign="left">
+                    <Size>
+                        <AbsPoint x="92" y="28" />
+                    </Size>
+                    <TextOffset x="4" y="4" />
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="528" y="114" />
+                        </Anchor>
+                    </Anchors>
+                </Button>
+                <Button name="$parentSortSuperCrit" inherits="StockPiler2_SortHeader" id="5" textalign="left">
+                    <Size>
+                        <AbsPoint x="100" y="28" />
+                    </Size>
+                    <TextOffset x="4" y="4" />
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="620" y="114" />
+                        </Anchor>
+                    </Anchors>
+                </Button>
+                <Button name="$parentSortYield" inherits="StockPiler2_SortHeader" id="6" textalign="left">
+                    <Size>
+                        <AbsPoint x="64" y="28" />
+                    </Size>
+                    <TextOffset x="4" y="4" />
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="720" y="114" />
+                        </Anchor>
+                    </Anchors>
+                </Button>
+                <Button name="$parentSortHave" inherits="StockPiler2_SortHeader" id="7" textalign="left">
+                    <Size>
+                        <AbsPoint x="68" y="28" />
+                    </Size>
+                    <TextOffset x="4" y="4" />
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="784" y="114" />
+                        </Anchor>
+                    </Anchors>
+                </Button>
+                <Button name="$parentSortRecipe" inherits="StockPiler2_StaticHeader">
+                    <Size>
+                        <AbsPoint x="80" y="28" />
+                    </Size>
+                    <TextOffset x="4" y="4" />
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="852" y="114" />
+                        </Anchor>
+                    </Anchors>
+                </Button>
+                <Button name="$parentSortForget" inherits="StockPiler2_StaticHeader">
+                    <Size>
+                        <AbsPoint x="68" y="28" />
+                    </Size>
+                    <TextOffset x="4" y="4" />
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="932" y="114" />
+                        </Anchor>
+                    </Anchors>
+                </Button>
+
+                <ListBox name="$parentList" scrollbar="EA_ScrollBar_DefaultVerticalChain" rowdef="StockPiler2PotionRow" visiblerows="12" rowspacing="2">
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="0" y="144" />
+                        </Anchor>
+                        <Anchor point="bottomright" relativePoint="bottomright">
+                            <AbsPoint x="-6" y="-8" />
+                        </Anchor>
+                    </Anchors>
+                    <ListData table="StockPiler2TabPotions.listData" populationfunction="StockPiler2TabPotions.UpdateRows">
+                        <ListColumns>
+                            <ListColumn windowname="Name" variable="name" format="wstring" />
+                            <ListColumn windowname="Effect" variable="effectText" format="wstring" />
+                            <ListColumn windowname="Power" variable="powerText" format="wstring" />
+                            <ListColumn windowname="Stability" variable="stabilityText" format="wstring" />
+                            <ListColumn windowname="SuperCrit" variable="superCritText" format="wstring" />
+                            <ListColumn windowname="Yield" variable="yieldText" format="wstring" />
+                            <ListColumn windowname="Have" variable="haveText" format="wstring" />
+                        </ListColumns>
+                    </ListData>
+                </ListBox>
+            </Windows>
+        </Window>
+    </Windows>
+</Interface>
