@@ -263,7 +263,7 @@
                     </Windows>
                 </Window>
 
-                <!-- Headers: Potion | Status | Stock | Craftable | Target | AutoGrow | Craft (1000px; match row columns) -->
+                <!-- Headers: Potion | Status | Stock | Craftable | Target | AutoGrow | Brew (1000px; match row columns) -->
                 <Button name="$parentColPotion" inherits="StockPiler2_StaticHeader">
                     <Size>
                         <AbsPoint x="312" y="28" />
@@ -326,6 +326,17 @@
                     <Anchors>
                         <Anchor point="topleft" relativePoint="topleft">
                             <AbsPoint x="798" y="118" />
+                        </Anchor>
+                    </Anchors>
+                </Button>
+                <Button name="$parentColBrew" inherits="StockPiler2_StaticHeader">
+                    <Size>
+                        <AbsPoint x="102" y="28" />
+                    </Size>
+                    <TextOffset x="2" y="4" />
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="898" y="118" />
                         </Anchor>
                     </Anchors>
                 </Button>

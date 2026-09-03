@@ -1,8 +1,8 @@
 # StockPiler2
 
-Greenfield rewrite of [StockPiler](../StockPiler) using an **Orchestrator + Stores + Planner + Executors** architecture. Runs as a **separate addon** alongside v1 — does not modify the original StockPiler folder.
+Greenfield rewrite of StockPiler using an **Orchestrator + Stores + Planner + Executors** architecture. Runs as a **separate addon** alongside v1 — does not modify the original StockPiler folder.
 
-**Version:** 0.2.0 (window + Potions/Watch tabs)
+**Version:** 0.3.0
 
 ## Install
 
@@ -18,18 +18,33 @@ Greenfield rewrite of [StockPiler](../StockPiler) using an **Orchestrator + Stor
 | `/sp2 potions` / `watch` | Open window on a tab |
 | `/sp2 help` | Command list |
 | `/sp2 debug` / `on` / `off` | Structured uilog (`StockPiler2\| …`) |
-| `/sp2 plan` | Planner snapshot dump |
+| `/sp2 plan` | Planner dump (includes watch rows) |
+| `/sp2 watchplan` | Watch-row status / stock / craftable / shared dump |
 | `/sp2 state` | Orchestrator phase + store generations |
-| `/sp2 growplan` | Garden plot dump |
-| `/sp2 brewplan` | Brew plan dump (scaffold) |
+| `/sp2 growplan` | Garden / grow / refine diagnostics |
+| `/sp2 brewplan` | Brew session + ready watches dump |
+| `/sp2 buyplan` | Buy job dump |
+| `/sp2 bags` / `bags force` | Bag snapshot dump |
 | `/sp2 events` / `on` / `off` / `dump` | Internal event bus trace |
-| `/sp2 perf` / `on` / `off` | Frametime hitch logger |
+| `/sp2 perf` / `on` / `off` / `summary` | Frametime hitch logger |
+| `/sp2 perf on [ms]` / `baseline [ms]` | Hitch threshold / baseline |
 | `/sp2 audit` | Saved variables health |
+| `/sp2 harvest` | Prepare next ready plot (macro/CMD path) |
 
-## UI (v0.2)
+## UI (v0.3)
 
 - **Potions tab** — learned potion list, search/effect filters, sort columns, watch toggle
-- **Watch tab** — global AutoGrow/AutoBuy toggles, per-row target and AutoGrow (no harvest/brew buttons yet)
+- **Watch tab** — AutoGrow / AutoBuy / seed buffer, per-row target and AutoGrow, status / stock / craftable colors
+- **Row Brew** — Idle → Load → Brew (L-click); R-click unloads that row’s load
+- **Footer Brew** — auto-picks green Ready watches only; R-click clears the load
+- **Footer Harvest** — native cultivation harvest action when plots are ready
+
+## Brew behavior
+
+- Footer Brew only loads/performs watches that are **Ready to craft** (deficit > 0, uncontested craftable).
+- After an **auto** brew hits the watch target, the session clears so the next footer click can pick another Ready watch.
+- **Manual** row Load/Brew can overstock (target already met or yellow shared craftable).
+- Shared-materials contention uses crafts **needed for deficit**, not max crafts possible from bags.
 
 ## Architecture
 
@@ -37,15 +52,19 @@ Greenfield rewrite of [StockPiler](../StockPiler) using an **Orchestrator + Stor
 Core/         EventBus, Scheduler, Orchestrator, EngineEventBridge, Debug, Perf, Audit
 Stores/       Inventory, Garden, RefinePipeline, Knowledge, Watch, PlanSnapshot
 Planner/      Pure Build() with gen-keyed cache
-Executors/    Grow / Refine / Brew / Buy stubs
-Adapters/     Bag, Cultivator, Apothecary, Vendor
+Grow/         Plant job pick + harvest helpers
+Brew/         Load / perform / session (footer + row)
+Refine/       Seed buffer refine intents
+Buy/          Vendor buy jobs
+Executors/    Grow / Refine / Brew / Buy
+Adapters/     Bag, Cultivator, Apothecary, Vendor, CraftChat
 Persistence/  Settings, Character, Account
 View/         Window, Templates, TabPotions, TabWatch, Catalog, Ui
 ```
 
 ## Saved data
 
-StockPiler2 starts with **empty** learned data. Relearn recipes in-game.
+StockPiler2 starts with **empty** learned data. Relearn recipes in-game (brew once so slots are stored).
 
 | Variable | Scope | Contents |
 | :--- | :--- | :--- |

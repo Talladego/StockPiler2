@@ -162,10 +162,40 @@ function D.DumpEventRing(emit)
     emit("--- end event ring ---")
 end
 
+-- WarTriage / SP1 style: colored [StockPiler2] LINK prefix before chat body.
+local CHAT_PREFIX_TEXT = "StockPiler2"
+local CHAT_PREFIX_COLOR = { 170, 220, 170 }
+
+local function ChatPrefix(includeSpace)
+    local coloredPartRaw = string.format(
+        "<LINK data=\"0\" color=\"%d,%d,%d\" text=\"%s\">",
+        CHAT_PREFIX_COLOR[1],
+        CHAT_PREFIX_COLOR[2],
+        CHAT_PREFIX_COLOR[3],
+        CHAT_PREFIX_TEXT
+    )
+    local prefix = L"[" .. towstring(coloredPartRaw) .. L"]"
+    if includeSpace then
+        prefix = prefix .. L" "
+    end
+    return prefix
+end
+
 function D.Print(msg)
+    local body = msg
+    if type(body) == "string" then
+        body = towstring(body)
+    elseif type(body) ~= "wstring" then
+        if body == nil then
+            body = L""
+        else
+            body = towstring(tostring(body))
+        end
+    end
     if EA_ChatWindow and EA_ChatWindow.Print then
-        EA_ChatWindow.Print(towstring(msg), SystemData.SystemLogFilters.GENERAL)
+        local filter = SystemData and SystemData.SystemLogFilters and SystemData.SystemLogFilters.GENERAL or 0
+        EA_ChatWindow.Print(ChatPrefix(true) .. body, filter)
     elseif type(d) == "function" then
-        d("StockPiler2| " .. D.LogText(msg))
+        d("StockPiler2| " .. D.LogText(body))
     end
 end

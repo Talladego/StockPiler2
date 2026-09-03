@@ -120,13 +120,36 @@
                 <Button name="$parentHarvest" inherits="EA_Button_DefaultResizeable" gameactionbutton="left">
                     <Anchors>
                         <Anchor point="bottom" relativePoint="bottom" relativeTo="StockPiler2Window">
-                            <AbsPoint x="0" y="-10" />
+                            <AbsPoint x="-70" y="-10" />
                         </Anchor>
                     </Anchors>
                     <EventHandlers>
                         <EventHandler event="OnLButtonDown" function="StockPiler2Window.OnHarvestPrepare" />
                         <EventHandler event="OnLButtonUp" function="StockPiler2Window.OnHarvest" />
                         <EventHandler event="OnMouseOver" function="StockPiler2Window.OnMouseOverHarvest" />
+                    </EventHandlers>
+                </Button>
+                <!-- Unused fallback; native harvest uses visible $parentHarvest gameactionbutton. -->
+                <Button name="$parentHarvestAction" inherits="EA_Button_DefaultResizeable" gameactionbutton="left">
+                    <Size>
+                        <AbsPoint x="1" y="1" />
+                    </Size>
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft" relativeTo="StockPiler2Window">
+                            <AbsPoint x="-2000" y="-2000" />
+                        </Anchor>
+                    </Anchors>
+                </Button>
+                <Button name="$parentBrew" inherits="EA_Button_DefaultResizeable">
+                    <Anchors>
+                        <Anchor point="bottom" relativePoint="bottom" relativeTo="StockPiler2Window">
+                            <AbsPoint x="70" y="-10" />
+                        </Anchor>
+                    </Anchors>
+                    <EventHandlers>
+                        <EventHandler event="OnLButtonUp" function="StockPiler2Window.OnBrew" />
+                        <EventHandler event="OnRButtonUp" function="StockPiler2Window.OnBrewRightClick" />
+                        <EventHandler event="OnMouseOver" function="StockPiler2Window.OnMouseOverBrew" />
                     </EventHandlers>
                 </Button>
             </Windows>

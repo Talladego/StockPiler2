@@ -32,8 +32,18 @@ Grow.PENDING_TTL_SEC = 10
 Grow.CHAT_HARVEST_WAKE_DEBOUNCE_SEC = 1.5
 Grow.HARVEST_OP_LOCK_SEC = 1.5
 
-local HARVEST_ACTION_WIN = "StockPiler2WindowHarvest"
+local HARVEST_WIN = "StockPiler2WindowHarvest"
+local HARVEST_ACTION_WIN = "StockPiler2WindowHarvestAction"
 local CULTIVATION_HARVEST_WIN = "CultivationWindowHarvest"
+
+local function RestoreHarvestChrome(windowName)
+    if windowName == nil or windowName == "" or not DoesWindowExist(windowName) then
+        return
+    end
+    if ButtonSetText then
+        ButtonSetText(windowName, L"Harvest")
+    end
+end
 
 -- Prefer underfilled recipe roles when craftsShort ties (lower = higher priority).
 local ROLE_PICK_ORDER = {
@@ -587,6 +597,10 @@ function Grow.OnCultivationUpdated(plotNum)
     if plotNum > 0 then
         HandleOne(plotNum, Grow.CachedPlot(plotNum))
         Grow.MarkAdditiveDue()
+        if Grow._liveHarvestTip and Grow._liveHarvestTip.kind == "harvest" then
+            Grow.SyncHarvestTipPlotsFromEngine()
+            Grow.MaybeRefreshHarvestTooltip(true)
+        end
         return
     end
     local Garden = StockPiler2.Garden
@@ -599,12 +613,20 @@ function Grow.OnCultivationUpdated(plotNum)
             Grow.ClearPendingAdditiveIfFilled(pn, Grow.CachedPlot(pn))
         end
         Grow.MarkAdditiveDue()
+        if Grow._liveHarvestTip and Grow._liveHarvestTip.kind == "harvest" then
+            Grow.SyncHarvestTipPlotsFromEngine()
+            Grow.MaybeRefreshHarvestTooltip(true)
+        end
         return
     end
     for pn, row in pairs(plots) do
         HandleOne(pn, row)
     end
     Grow.MarkAdditiveDue()
+    if Grow._liveHarvestTip and Grow._liveHarvestTip.kind == "harvest" then
+        Grow.SyncHarvestTipPlotsFromEngine()
+        Grow.MaybeRefreshHarvestTooltip(true)
+    end
 end
 
 --- Expire pending on empty plots after PENDING_TTL_SEC (missed cultivation events).
@@ -941,10 +963,16 @@ local function BindCultivationHarvestAction(windowName)
         LogGrow("BindCultivationHarvestAction failed win=" .. tostring(windowName) .. " err=" .. tostring(err))
         return false
     end
+    RestoreHarvestChrome(windowName)
     return true
 end
 
 function Grow.EnsureHarvestActionBound()
+    -- Visible footer Harvest owns native gameactionbutton click (primary path).
+    if BindCultivationHarvestAction(HARVEST_WIN) then
+        Grow._harvestActionBound = true
+        return true
+    end
     if BindCultivationHarvestAction(HARVEST_ACTION_WIN) then
         Grow._harvestActionBound = true
         return true
@@ -963,22 +991,81 @@ function Grow.ClearHarvestActionBound()
         Grow._harvestActionBound = false
         return false
     end
-    if not DoesWindowExist(HARVEST_ACTION_WIN) then
-        Grow._harvestActionBound = false
-        return false
-    end
     local none = 0
     if GameData and GameData.PlayerActions and GameData.PlayerActions.NONE ~= nil then
         none = GameData.PlayerActions.NONE
     end
-    local ok
-    if StockPiler2.TryCall then
-        ok = StockPiler2.TryCall("WindowSetGameActionData.clear", WindowSetGameActionData, HARVEST_ACTION_WIN, none, 0, L"")
-    else
-        ok = pcall(WindowSetGameActionData, HARVEST_ACTION_WIN, none, 0, L"")
+    local function clearWin(windowName)
+        if not DoesWindowExist(windowName) then
+            return false
+        end
+        local ok
+        if StockPiler2.TryCall then
+            ok = StockPiler2.TryCall("WindowSetGameActionData.clear", WindowSetGameActionData, windowName, none, 0, L"")
+        else
+            ok = pcall(WindowSetGameActionData, windowName, none, 0, L"")
+        end
+        RestoreHarvestChrome(windowName)
+        return ok == true
     end
+    local cleared = clearWin(HARVEST_WIN)
+    clearWin(HARVEST_ACTION_WIN)
     Grow._harvestActionBound = false
-    return ok == true
+    return cleared
+end
+
+--- Best-effort for orch/macros. Manual footer Harvest uses native gameactionbutton click.
+--- WindowGameAction often pcall-succeeds without harvesting.
+function Grow.FireHarvestAction()
+    Grow.EnsureHarvestActionBound()
+    if type(WindowGameAction) ~= "function" then
+        LogGrow("FireHarvestAction no WindowGameAction")
+        return false
+    end
+    local function tryWin(windowName, rebind)
+        if windowName == nil or windowName == "" or not DoesWindowExist(windowName) then
+            return false
+        end
+        if rebind == true then
+            BindCultivationHarvestAction(windowName)
+        end
+        local child = windowName .. "Action"
+        if DoesWindowExist(child) then
+            local okChild, errChild
+            if StockPiler2.TryCall then
+                okChild, errChild = StockPiler2.TryCall("WindowGameAction", WindowGameAction, child)
+            else
+                okChild, errChild = pcall(WindowGameAction, child)
+            end
+            if okChild == true then
+                LogGrow("FireHarvestAction ok win=" .. tostring(child))
+                return true
+            end
+            LogGrow("FireHarvestAction fail win=" .. tostring(child) .. " err=" .. tostring(errChild))
+        end
+        local ok, err
+        if StockPiler2.TryCall then
+            ok, err = StockPiler2.TryCall("WindowGameAction", WindowGameAction, windowName)
+        else
+            ok, err = pcall(WindowGameAction, windowName)
+        end
+        if ok == true then
+            LogGrow("FireHarvestAction ok win=" .. tostring(windowName))
+            return true
+        end
+        LogGrow("FireHarvestAction fail win=" .. tostring(windowName) .. " err=" .. tostring(err))
+        return false
+    end
+    if tryWin(HARVEST_WIN, true) then
+        return true
+    end
+    if tryWin(HARVEST_ACTION_WIN, true) then
+        return true
+    end
+    if tryWin(CULTIVATION_HARVEST_WIN, true) then
+        return true
+    end
+    return false
 end
 
 function Grow.SelectHarvestPlot(manual)
@@ -1048,6 +1135,11 @@ end
 
 --- Prepare CurrentPlot + harvest watch; game-action button performs the craft.
 function Grow.PrepareHarvestPlot(manual)
+    if StockPiler2.Brew and StockPiler2.Brew.BlocksHarvest
+        and StockPiler2.Brew.BlocksHarvest() == true
+    then
+        return false
+    end
     Grow.EnsureHarvestActionBound()
     local ok, plotNum = Grow.SelectHarvestPlot(manual == true)
     if ok ~= true then
@@ -1107,6 +1199,11 @@ function Grow.LogSkipPlant(reason)
 end
 
 function Grow.TryPlantNextEmptyPlot(opId)
+    if StockPiler2.Orchestrator and StockPiler2.Orchestrator.IsBrewSessionActive
+        and StockPiler2.Orchestrator.IsBrewSessionActive() == true
+    then
+        return false
+    end
     if not Grow.IsEnabled() then
         return false
     end
@@ -1340,6 +1437,11 @@ end
 
 --- Apply one Soil/Water/Nutrient for a plot whose stage matches an empty slot.
 function Grow.TryApplyNextAdditive(opId)
+    if StockPiler2.Orchestrator and StockPiler2.Orchestrator.IsBrewSessionActive
+        and StockPiler2.Orchestrator.IsBrewSessionActive() == true
+    then
+        return false
+    end
     if not Grow.IsEnabled() then
         return false
     end
@@ -1752,4 +1854,542 @@ function Grow.GrowingNotesForSpec(spec)
         return L""
     end
     return towstring(table.concat(parts, ", "))
+end
+
+----------------------------------------------------------------
+-- Harvest button tooltip (SP1 ShowHarvestTooltip slim port)
+----------------------------------------------------------------
+
+local HARVEST_TOOLTIP_ICON = 3317
+local HARVEST_TOOLTIP_ROWS = 40
+
+local function FormatTooltipIcon(iconNum)
+    iconNum = tonumber(iconNum) or 0
+    if iconNum <= 0 then
+        return L""
+    end
+    return towstring(string.format("<icon%05d>", iconNum))
+end
+
+local function FormatSeconds(t, condensed)
+    t = tonumber(t) or 0
+    if t <= 0 then
+        return L""
+    end
+    if condensed then
+        if TimeUtils and TimeUtils.FormatTimeCondensed then
+            return TimeUtils.FormatTimeCondensed(t)
+        end
+    else
+        if TimeUtils and TimeUtils.FormatTime then
+            return TimeUtils.FormatTime(t)
+        end
+        if TimeUtils and TimeUtils.FormatTimeCondensed then
+            return TimeUtils.FormatTimeCondensed(t)
+        end
+    end
+    return towstring(tostring(math.ceil(t))) .. L"s"
+end
+
+--- Prefer TotalTimer (time to harvest / full completion); fall back to stage timer.
+local function FormatPlotTimerStatus(stage, plot)
+    local status = StageLabel(stage)
+    if type(plot) ~= "table" then
+        return status
+    end
+    local total = tonumber(plot.totalTimer) or 0
+    local totalOn = plot.totalTimerOn
+    if totalOn ~= false and total > 0 then
+        local text = FormatSeconds(total, false)
+        if text ~= L"" then
+            return status .. L" - " .. text .. L" left"
+        end
+    end
+    local stageT = tonumber(plot.stageTimer) or 0
+    local stageOn = plot.stageTimerOn
+    if stageOn ~= false and stageT > 0 then
+        local text = FormatSeconds(stageT, true)
+        if text ~= L"" then
+            return status .. L" (" .. text .. L")"
+        end
+    end
+    return status
+end
+
+local function ResolveSeedItemData(plot)
+    if type(plot) ~= "table" then
+        return nil
+    end
+    if type(plot.seed) == "table" and (plot.seed.rarity ~= nil or plot.seed.name ~= nil) then
+        return plot.seed
+    end
+    local uid = tonumber(plot.seedUid) or 0
+    if uid > 0 and StockPiler2.Items and StockPiler2.Items.AsItemData then
+        local cached = StockPiler2.Items.AsItemData(uid)
+        if type(cached) == "table" then
+            return cached
+        end
+    end
+    if uid > 0 and StockPiler2.Inventory and StockPiler2.Inventory.CountByUniqueId then
+        local _, sample = StockPiler2.Inventory.CountByUniqueId(uid)
+        if type(sample) == "table" then
+            return sample
+        end
+    end
+    return type(plot.seed) == "table" and plot.seed or nil
+end
+
+local function PlantDisplayName(plot, plotNum)
+    if type(plot) ~= "table" then
+        return L"Plot " .. towstring(tostring(plotNum or "?"))
+    end
+    if plot.seedName ~= nil and plot.seedName ~= L"" then
+        return plot.seedName
+    end
+    local seed = ResolveSeedItemData(plot)
+    if type(seed) == "table" and seed.name ~= nil and seed.name ~= L"" then
+        return seed.name
+    end
+    local uid = tonumber(plot.seedUid) or 0
+    if uid > 0 then
+        return L"Seed " .. towstring(tostring(uid))
+    end
+    return L"Plot " .. towstring(tostring(plotNum or "?"))
+end
+
+local function SeedIconNum(plot)
+    if type(plot) ~= "table" then
+        return 0
+    end
+    local icon = tonumber(plot.seedIconNum) or 0
+    if icon > 0 then
+        return icon
+    end
+    local seed = ResolveSeedItemData(plot)
+    if type(seed) == "table" then
+        return tonumber(seed.iconNum) or 0
+    end
+    return 0
+end
+
+local function ItemRarityColor(itemData)
+    if itemData and DataUtils and DataUtils.GetItemRarityColor then
+        local ok, color
+        if StockPiler2.TryCallQuiet then
+            ok, color = StockPiler2.TryCallQuiet("DataUtils.GetItemRarityColor", DataUtils.GetItemRarityColor, itemData)
+        else
+            ok, color = pcall(DataUtils.GetItemRarityColor, itemData)
+        end
+        if ok and type(color) == "table" then
+            return color
+        end
+    end
+    if DefaultColor and DefaultColor.WHITE then
+        return DefaultColor.WHITE
+    end
+    return { r = 255, g = 255, b = 255 }
+end
+
+local function FormatPlotTooltipAdditiveLines(plot)
+    local lines = {}
+    if type(plot) ~= "table" or type(plot.additives) ~= "table" then
+        return lines
+    end
+    local types = (GameData and GameData.CultivationTypes) or {}
+    local order = {
+        { tonumber(types.SOIL) or 2, L"Soil" },
+        { tonumber(types.WATERCAN) or 3, L"Water" },
+        { tonumber(types.NUTRIENT) or 4, L"Nutrient" },
+    }
+    for i = 1, #order do
+        local slot = plot.additives[order[i][1]]
+        if type(slot) == "table" and (slot.filled == true or (tonumber(slot.id) or 0) ~= 0) then
+            local iconNum = tonumber(slot.iconNum) or 0
+            if iconNum <= 0 and type(slot.item) == "table" then
+                iconNum = tonumber(slot.item.iconNum) or 0
+            end
+            local icon = FormatTooltipIcon(iconNum)
+            local name = slot.name
+            if (name == nil or name == L"") and type(slot.item) == "table" then
+                name = slot.item.name
+            end
+            if name == nil or name == L"" then
+                name = order[i][2]
+            end
+            if icon ~= L"" then
+                lines[#lines + 1] = icon .. L" " .. name
+            else
+                lines[#lines + 1] = order[i][2] .. L" " .. name
+            end
+        end
+    end
+    return lines
+end
+
+local function setTooltipRowColor(row, column, color)
+    if not color or not Tooltips then
+        return
+    end
+    if Tooltips.SetTooltipColor then
+        Tooltips.SetTooltipColor(row, column, color.r or 255, color.g or 255, color.b or 255)
+    elseif Tooltips.SetTooltipColorDef then
+        Tooltips.SetTooltipColorDef(row, column, color)
+    end
+end
+
+local function setTooltipBodyColor(row, column)
+    if Tooltips and Tooltips.COLOR_BODY then
+        setTooltipRowColor(row, column, Tooltips.COLOR_BODY)
+    else
+        setTooltipRowColor(row, column, { r = 255, g = 255, b = 255 })
+    end
+end
+
+local function applyTooltipTextRow(row, text, color)
+    Tooltips.SetTooltipText(row, 1, text or L"", false)
+    if color then
+        setTooltipRowColor(row, 1, color)
+    else
+        setTooltipBodyColor(row, 1)
+    end
+end
+
+function Grow.EnsureHarvestTooltipRows()
+    if Grow._harvestTooltipRowsReady == true then
+        return true
+    end
+    if not DoesWindowExist("DefaultTooltip") or CreateWindowFromTemplate == nil then
+        return false
+    end
+    local have = tonumber(Tooltips and Tooltips.NUM_ROWS) or 17
+    for rowNum = have + 1, HARVEST_TOOLTIP_ROWS do
+        local rowName = "DefaultTooltipRow" .. tostring(rowNum)
+        if not DoesWindowExist(rowName) then
+            local ok
+            if StockPiler2.TryCall then
+                ok = StockPiler2.TryCall(
+                    "CreateWindowFromTemplate",
+                    CreateWindowFromTemplate,
+                    rowName,
+                    "TooltipRow",
+                    "DefaultTooltip"
+                )
+            else
+                ok = pcall(CreateWindowFromTemplate, rowName, "TooltipRow", "DefaultTooltip")
+            end
+            if not ok or not DoesWindowExist(rowName) then
+                return false
+            end
+            WindowClearAnchors(rowName)
+            local prev = "DefaultTooltipRow" .. tostring(rowNum - 1)
+            WindowAddAnchor(rowName, "bottomleft", prev, "topleft", 0, 5)
+            WindowAddAnchor(rowName, "bottomright", prev, "topright", 0, 5)
+        end
+    end
+    if Tooltips then
+        local n = tonumber(Tooltips.NUM_ROWS) or 17
+        if n < HARVEST_TOOLTIP_ROWS then
+            Tooltips.NUM_ROWS = HARVEST_TOOLTIP_ROWS
+        end
+    end
+    Grow._harvestTooltipRowsReady = true
+    return true
+end
+
+function Grow.GetPlotTooltipEntries()
+    local entries = {}
+    local CA = StockPiler2.CultivatorAdapter
+    local n = CA and CA.NumPlots and CA.NumPlots() or 4
+    local anyGrowing = false
+    local tipPlots = Grow._liveHarvestTip and Grow._liveHarvestTip.plots
+    for plotNum = 1, n do
+        local plot = nil
+        if type(tipPlots) == "table" and type(tipPlots[plotNum]) == "table" then
+            plot = tipPlots[plotNum]
+        elseif CA and CA.ReadPlot then
+            plot = CA.ReadPlot(plotNum)
+        else
+            plot = Grow.CachedPlot(plotNum)
+        end
+        if type(plot) == "table" then
+            local stage = Grow.NormalizeStage(plot.stage)
+            if stage ~= Grow.StageEmpty() then
+                anyGrowing = true
+                local seedData = ResolveSeedItemData(plot)
+                local icon = FormatTooltipIcon(SeedIconNum(plot))
+                local name = PlantDisplayName(plot, plotNum)
+                local seedText = name
+                if icon ~= L"" then
+                    seedText = icon .. L" " .. name
+                end
+                local entry = {
+                    title = { text = L"Plot " .. towstring(tostring(plotNum)) },
+                    seed = {
+                        text = seedText,
+                        color = ItemRarityColor(seedData),
+                    },
+                    status = { text = FormatPlotTimerStatus(stage, plot) },
+                }
+                local additiveLines = FormatPlotTooltipAdditiveLines(plot)
+                if #additiveLines > 0 then
+                    entry.additives = { lines = additiveLines }
+                end
+                entries[#entries + 1] = entry
+            end
+        end
+    end
+    if not anyGrowing then
+        entries[#entries + 1] = {
+            noPlants = true,
+            text = L"No plants growing.",
+        }
+    end
+    return entries
+end
+
+local function ApplyPlotTooltipRow(row, entry)
+    row = tonumber(row) or 1
+    if type(entry) ~= "table" then
+        return row + 1
+    end
+    if entry.noPlants == true then
+        applyTooltipTextRow(row, entry.text or L"No plants growing.")
+        return row + 1
+    end
+    if entry.title and entry.title.text and entry.title.text ~= L"" then
+        local heading = entry.title.color
+            or (Tooltips and Tooltips.COLOR_HEADING)
+            or { r = 255, g = 204, b = 102 }
+        applyTooltipTextRow(row, entry.title.text, heading)
+        row = row + 1
+    end
+    if entry.seed and entry.seed.text and entry.seed.text ~= L"" then
+        applyTooltipTextRow(row, entry.seed.text, entry.seed.color)
+        row = row + 1
+    end
+    if type(entry.additives) == "table" and type(entry.additives.lines) == "table" then
+        for i = 1, #entry.additives.lines do
+            if entry.additives.lines[i] and entry.additives.lines[i] ~= L"" then
+                applyTooltipTextRow(row, entry.additives.lines[i])
+                row = row + 1
+            end
+        end
+    end
+    if entry.status and entry.status.text and entry.status.text ~= L"" then
+        applyTooltipTextRow(row, entry.status.text)
+        row = row + 1
+    end
+    return row
+end
+
+function Grow.ApplyPlotTooltipRows(startRow)
+    if not Tooltips or type(Tooltips.SetTooltipText) ~= "function" then
+        return tonumber(startRow) or 1
+    end
+    startRow = tonumber(startRow) or 1
+    local entries = Grow.GetPlotTooltipEntries()
+    if #entries == 0 or (entries[1] and entries[1].noPlants == true) then
+        Tooltips.SetTooltipText(startRow, 1, L"No plants growing.", false)
+        setTooltipBodyColor(startRow, 1)
+        return startRow + 1
+    end
+    Tooltips.SetTooltipText(startRow, 1, L"Growing:", false)
+    setTooltipBodyColor(startRow, 1)
+    startRow = startRow + 1
+    for i = 1, #entries do
+        startRow = ApplyPlotTooltipRow(startRow, entries[i])
+    end
+    return startRow
+end
+
+--- Multi-row harvest tooltip for the Watch footer Harvest button.
+--- liveRefresh=true skips re-register (used while mouse stays over the button).
+function Grow.ShowHarvestTooltip(anchorWindow, anchor, liveRefresh)
+    if not Tooltips or type(Tooltips.CreateTextOnlyTooltip) ~= "function" then
+        return
+    end
+    if anchorWindow == nil or anchorWindow == "" then
+        return
+    end
+    if liveRefresh ~= true then
+        Grow.RegisterHarvestLiveTooltip(anchorWindow, anchor or Tooltips.ANCHOR_WINDOW_TOP)
+    end
+    Grow.EnsureHarvestTooltipRows()
+    Tooltips.CreateTextOnlyTooltip(anchorWindow)
+    local titleIcon = FormatTooltipIcon(HARVEST_TOOLTIP_ICON)
+    if titleIcon ~= L"" then
+        Tooltips.SetTooltipText(1, 1, titleIcon .. L" StockPiler2 Harvest")
+    else
+        Tooltips.SetTooltipText(1, 1, L"StockPiler2 Harvest")
+    end
+    local heading = (Tooltips and Tooltips.COLOR_HEADING) or { r = 255, g = 204, b = 102 }
+    setTooltipRowColor(1, 1, heading)
+
+    local readyN = Grow.CountReadyHarvestPlots and Grow.CountReadyHarvestPlots() or 0
+    local brewBlocks = StockPiler2.Brew
+        and StockPiler2.Brew.BlocksHarvest
+        and StockPiler2.Brew.BlocksHarvest() == true
+    if brewBlocks then
+        Tooltips.SetTooltipText(2, 1, L"Held: Brew is loaded or crafting.")
+    else
+        local ready = (tonumber(readyN) or 0) > 0 and L"ready" or L"not ready"
+        Tooltips.SetTooltipText(2, 1, L"Click: harvest next grown plot (" .. ready .. L").")
+    end
+    setTooltipBodyColor(2, 1)
+
+    local agOn = Grow.IsEnabled and Grow.IsEnabled() == true
+    local ag = agOn and L"on" or L"off"
+    local agIcon = agOn and L"<icon00057>" or L"<icon00058>"
+    Tooltips.SetTooltipText(3, 1, agIcon .. L" AutoGrow is " .. ag .. L".")
+    setTooltipBodyColor(3, 1)
+
+    Grow.ApplyPlotTooltipRows(4)
+    Tooltips.Finalize()
+    Tooltips.AnchorTooltip(anchor or Tooltips.ANCHOR_WINDOW_TOP)
+
+    local tip = Grow._liveHarvestTip
+    if tip and tip.anchor == anchorWindow then
+        tip.fingerprint = Grow.HarvestTooltipFingerprint()
+    end
+end
+
+local function DecayTipTimer(plot, field, onField, elapsed)
+    if type(plot) ~= "table" or plot[onField] ~= true then
+        return false
+    end
+    local before = tonumber(plot[field]) or 0
+    if before <= 0 then
+        plot[onField] = false
+        plot[field] = 0
+        return false
+    end
+    local after = before - (tonumber(elapsed) or 0)
+    if after < 0 then
+        after = 0
+    end
+    plot[field] = after
+    if after <= 0 then
+        plot[onField] = false
+    end
+    return math.floor(after) < math.floor(before)
+end
+
+function Grow.SyncHarvestTipPlotsFromEngine()
+    local tip = Grow._liveHarvestTip
+    if not tip then
+        tip = { plots = {} }
+        Grow._liveHarvestTip = tip
+    end
+    tip.plots = tip.plots or {}
+    local CA = StockPiler2.CultivatorAdapter
+    local n = CA and CA.NumPlots and CA.NumPlots() or 4
+    for plotNum = 1, n do
+        if CA and CA.ReadPlot then
+            tip.plots[plotNum] = CA.ReadPlot(plotNum)
+        end
+    end
+end
+
+function Grow.RegisterHarvestLiveTooltip(anchorWindow, anchorPoint)
+    if anchorWindow == nil or anchorWindow == "" then
+        Grow.ClearHarvestLiveTooltip()
+        return
+    end
+    Grow._liveHarvestTip = Grow._liveHarvestTip or {}
+    local tip = Grow._liveHarvestTip
+    tip.kind = "harvest"
+    tip.anchor = anchorWindow
+    tip.anchorPoint = anchorPoint
+    tip.fingerprint = nil
+    Grow.SyncHarvestTipPlotsFromEngine()
+end
+
+function Grow.ClearHarvestLiveTooltip()
+    local tip = Grow._liveHarvestTip
+    if tip then
+        tip.kind = nil
+        tip.anchor = nil
+        tip.anchorPoint = nil
+        tip.fingerprint = nil
+        tip.plots = nil
+    end
+end
+
+function Grow.HarvestTooltipFingerprint()
+    local parts = {}
+    local CA = StockPiler2.CultivatorAdapter
+    local n = CA and CA.NumPlots and CA.NumPlots() or 4
+    local tipPlots = Grow._liveHarvestTip and Grow._liveHarvestTip.plots
+    for plotNum = 1, n do
+        local plot = type(tipPlots) == "table" and tipPlots[plotNum] or nil
+        if type(plot) ~= "table" and CA and CA.ReadPlot then
+            plot = CA.ReadPlot(plotNum)
+        end
+        if type(plot) == "table" then
+            local stage = Grow.NormalizeStage(plot.stage)
+            if stage ~= Grow.StageEmpty() then
+                parts[#parts + 1] = plotNum .. ":"
+                    .. tostring(stage) .. ":"
+                    .. tostring(math.floor(tonumber(plot.totalTimer) or 0)) .. ":"
+                    .. tostring(math.floor(tonumber(plot.stageTimer) or 0))
+            end
+        end
+    end
+    parts[#parts + 1] = (Grow.IsEnabled and Grow.IsEnabled() == true) and "ag1" or "ag0"
+    local readyN = Grow.CountReadyHarvestPlots and Grow.CountReadyHarvestPlots() or 0
+    parts[#parts + 1] = ((tonumber(readyN) or 0) > 0) and "rdy" or "wait"
+    local brewBlocks = StockPiler2.Brew
+        and StockPiler2.Brew.BlocksHarvest
+        and StockPiler2.Brew.BlocksHarvest() == true
+    parts[#parts + 1] = brewBlocks and "brewHold" or "brewOk"
+    return table.concat(parts, "|")
+end
+
+function Grow.MaybeRefreshHarvestTooltip(force)
+    local tip = Grow._liveHarvestTip
+    if not tip or tip.kind ~= "harvest" or tip.anchor == nil or tip.anchor == "" then
+        return
+    end
+    local mouse = SystemData and SystemData.MouseOverWindow and SystemData.MouseOverWindow.name
+    if mouse ~= tip.anchor then
+        Grow.ClearHarvestLiveTooltip()
+        return
+    end
+    local fp = Grow.HarvestTooltipFingerprint()
+    if force ~= true and fp ~= nil and fp == tip.fingerprint then
+        return
+    end
+    tip.fingerprint = fp
+    Grow.ShowHarvestTooltip(tip.anchor, tip.anchorPoint, true)
+end
+
+--- Local countdown while harvest tip is open (engine timers only refresh on events).
+function Grow.TickHarvestLiveTooltip(timeElapsed)
+    local tip = Grow._liveHarvestTip
+    if not tip or tip.kind ~= "harvest" or type(tip.plots) ~= "table" then
+        return
+    end
+    local mouse = SystemData and SystemData.MouseOverWindow and SystemData.MouseOverWindow.name
+    if mouse ~= tip.anchor then
+        Grow.ClearHarvestLiveTooltip()
+        return
+    end
+    local elapsed = tonumber(timeElapsed) or 0
+    if elapsed <= 0 then
+        return
+    end
+    local changed = false
+    for _, plot in pairs(tip.plots) do
+        if DecayTipTimer(plot, "stageTimer", "stageTimerOn", elapsed) then
+            changed = true
+        end
+        if DecayTipTimer(plot, "totalTimer", "totalTimerOn", elapsed) then
+            changed = true
+        end
+    end
+    if changed then
+        Grow.MaybeRefreshHarvestTooltip(true)
+    else
+        Grow.MaybeRefreshHarvestTooltip(false)
+    end
 end

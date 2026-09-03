@@ -72,11 +72,20 @@ local function RecipeSlotPlanEntry(slot, slots, craftsNeeded, specDemand)
         and SM.IsOneWayHarvestSpec(spec) == true
     local seedRecord = nil
     local seedHave = 0
-    if oneWay and SM.ResolveSeedForSpec then
+    -- Resolve seed-line for both one-way harvest mats and growable plant products.
+    -- This lets the planner detect a truly exhausted seed-line (live + outstanding).
+    if (oneWay == true or growable == true) and SM.ResolveSeedForSpec then
         seedRecord = SM.ResolveSeedForSpec(spec)
         if type(seedRecord) == "table" then
             seedHave = tonumber(seedRecord.count) or 0
         end
+    end
+
+    local seedUid = type(seedRecord) == "table" and (tonumber(seedRecord.uniqueID) or 0) or 0
+    local seedCredit = 0
+    if seedUid > 0 and StockPiler2.Refine and StockPiler2.Refine.GetSeedBudgetForSpec then
+        local budget = StockPiler2.Refine.GetSeedBudgetForSpec(spec, seedUid)
+        seedCredit = tonumber(budget and budget.credit) or 0
     end
     local craftsHave = perCraft > 0 and math.floor(have / perCraft) or 0
     local entry = {
@@ -93,17 +102,22 @@ local function RecipeSlotPlanEntry(slot, slots, craftsNeeded, specDemand)
         oneWay = oneWay == true,
         seed = seedRecord,
         seedHave = seedHave,
-        seedUid = type(seedRecord) == "table" and (tonumber(seedRecord.uniqueID) or 0) or 0,
+        seedUid = seedUid,
+        seedCredit = seedCredit,
     }
     if slot.role == "container" then
         entry.kind = "buy"
     elseif byproduct then
         entry.kind = "convert"
-    elseif oneWay and deficit > 0 and seedHave <= 0 then
+    elseif oneWay and deficit > 0 and seedCredit <= 0 then
         -- One-way harvest mat with no seeds in bags: buy seed or buy material.
         entry.kind = "buy"
         entry.buySeedOrMat = true
-    elseif growable or (oneWay and seedHave > 0) then
+    elseif growable and deficit > 0 and seedCredit <= 0 then
+        -- Growable plant whose resolved seed-line is exhausted: buy seed.
+        entry.kind = "buy"
+        entry.buySeedOrMat = true
+    elseif growable or (oneWay and seedCredit > 0) then
         entry.kind = "plant"
     else
         entry.kind = "buy"
@@ -154,6 +168,12 @@ local function ApplySpecPlanStatus(row, target, recipe, demand)
         row.statusLines = { L"Bag count is at or above the target." }
         return
     end
+    local yield = RS.RecipeOutputYield and RS.RecipeOutputYield(recipe) or (tonumber(recipe.recipeYield) or 2)
+    local craftsNeeded = RS.CraftsNeededForDeficit and RS.CraftsNeededForDeficit(target.deficit, recipe)
+        or math.ceil(target.deficit / math.max(1, yield))
+    row.recipeYield = yield
+    row.stockYield = RS.WatchStockYield and RS.WatchStockYield(recipe) or 1
+    row.craftsNeeded = craftsNeeded
     if RS.WatchCoveredByBagsAndCraftable
         and RS.WatchCoveredByBagsAndCraftable(target.entry, recipe, target.min)
     then
@@ -185,12 +205,6 @@ local function ApplySpecPlanStatus(row, target, recipe, demand)
         }
         return
     end
-    local yield = RS.RecipeOutputYield and RS.RecipeOutputYield(recipe) or (tonumber(recipe.recipeYield) or 2)
-    local craftsNeeded = RS.CraftsNeededForDeficit and RS.CraftsNeededForDeficit(target.deficit, recipe)
-        or math.ceil(target.deficit / math.max(1, yield))
-    row.recipeYield = yield
-    row.stockYield = RS.WatchStockYield and RS.WatchStockYield(recipe) or 1
-    row.craftsNeeded = craftsNeeded
     local wantsGrow = RS.ShouldAutoGrowPotion and RS.ShouldAutoGrowPotion(target.potionKey, nil) == true
     local slots = recipe.slots or {}
     local limiting = nil
@@ -332,7 +346,9 @@ local function ApplySpecPlanStatus(row, target, recipe, demand)
     end
     if buySeedOrMatShort ~= nil then
         row.statusKey = "buy_ingredients"
-        row.statusText = L"Buy seed or material"
+        row.statusText = buySeedOrMatShort.seedUid and tonumber(buySeedOrMatShort.seedUid) > 0
+            and L"Buy seeds"
+            or L"Buy seed or material"
         row.statusDetail = lines[2] or lines[1]
         row.specDeficit = buySeedOrMatShort
         return
@@ -399,9 +415,7 @@ end
 function Planner.BuildWatchRows(ctx)
     local rows = {}
     local RS = StockPiler2.RecipeSpec
-    local MS = StockPiler2.MaterialSpec
     local targets = BuildWatchedTargets(ctx)
-    local watchMats = {} -- rowIdx -> { [specKey] = perCraft }
     for i = 1, #targets do
         local target = targets[i]
         local recipe = RS and RS.RecipeSpecForPotion and RS.RecipeSpecForPotion(target.potionKey)
@@ -442,83 +456,33 @@ function Planner.BuildWatchRows(ctx)
         if type(recipe) == "table" and RS.HydrateRecipeSlots then
             RS.HydrateRecipeSlots(recipe)
         end
-        local mats = {}
-        if type(recipe) == "table" and type(recipe.slots) == "table" and MS and MS.Key then
-            local slots = recipe.slots
-            for s = 1, #slots do
-                local slot = slots[s]
-                local spec = slot and (slot.spec or (RS.ResolveSlotSpec and RS.ResolveSlotSpec(slot)))
-                if type(spec) == "table" then
-                    local specKey = MS.Key(spec)
-                    if type(specKey) == "string" and specKey ~= "" then
-                        local perCraft = RS.EffectiveSpecPerCraft and RS.EffectiveSpecPerCraft(slot, slots) or 1
-                        mats[specKey] = perCraft
-                    end
-                end
-            end
-        end
-        watchMats[#rows + 1] = mats
         rows[#rows + 1] = row
     end
-    -- Contested shared mats: bag stock cannot cover combined craftable claims.
-    local matUsers = {}
-    for i = 1, #rows do
-        local mats = watchMats[i]
-        if type(mats) == "table" then
-            for specKey, perCraft in pairs(mats) do
-                local list = matUsers[specKey]
-                if list == nil then
-                    list = {}
-                    matUsers[specKey] = list
-                end
-                list[#list + 1] = {
-                    rowIdx = i,
-                    perCraft = tonumber(perCraft) or 1,
-                    crafts = tonumber(rows[i].craftsPossible) or 0,
-                }
-            end
+    -- Contested shared mats among deficit watches only (stocked leftover craftable ignored).
+    if RS and RS.ApplyDeficitCraftableShared then
+        RS.ApplyDeficitCraftableShared(rows)
+    else
+        for i = 1, #rows do
+            rows[i].craftableShared = false
         end
     end
     for i = 1, #rows do
         local row = rows[i]
-        local mats = watchMats[i]
-        local contested = false
-        if type(mats) == "table" and (tonumber(row.craftable) or 0) > 0 then
-            for specKey, _ in pairs(mats) do
-                local users = matUsers[specKey]
-                if type(users) == "table" and #users > 1 then
-                    local combinedNeed = 0
-                    for u = 1, #users do
-                        combinedNeed = combinedNeed + (users[u].crafts * users[u].perCraft)
-                    end
-                    local have = 0
-                    if RS and RS.CountItemsMatchingSpec then
-                        local sampleSpec = nil
-                        local recipe = row.recipe
-                        if type(recipe) == "table" and type(recipe.slots) == "table" then
-                            for s = 1, #recipe.slots do
-                                local slot = recipe.slots[s]
-                                local spec = slot and (slot.spec or (RS.ResolveSlotSpec and RS.ResolveSlotSpec(slot)))
-                                if type(spec) == "table" and MS and MS.Key and MS.Key(spec) == specKey then
-                                    sampleSpec = spec
-                                    break
-                                end
-                            end
-                        end
-                        if type(sampleSpec) == "table" then
-                            have = RS.CountItemsMatchingSpec(sampleSpec) or 0
-                        end
-                    end
-                    if have < combinedNeed then
-                        contested = true
-                        break
-                    end
-                end
-            end
-        end
-        row.craftableShared = contested
         if (tonumber(row.craftable) or 0) > 0 or row.hasRecipe then
             row.craftableText = towstring(tostring(row.craftable or 0))
+        end
+        if row.statusKey == "ready_to_craft" and row.craftableShared == true then
+            row.statusKey = "ready_to_craft_shared"
+            row.statusText = L"Ready to craft"
+            row.statusLines = {
+                L"Stock + Craftable covers the target, but shared materials are contested with other short watches.",
+                L"AutoGrow will keep filling shared plants until Craftable turns green. Footer Brew waits for uncontested Ready; row Load/Brew can brew early.",
+            }
+        elseif row.statusKey == "ready_to_craft" then
+            row.statusLines = {
+                L"Stock + Craftable covers the target and shared materials are uncontested.",
+                L"Use footer Brew or the row Brew button to load and craft. Growing resumes if stock is still short after brewing.",
+            }
         end
     end
     return rows
@@ -678,6 +642,89 @@ function Planner.InvalidatePlanCache()
     end
 end
 
+local function DumpWatchRows(emit, rows)
+    local RS = StockPiler2.RecipeSpec
+    local MS = StockPiler2.MaterialSpec
+    emit("=== StockPiler2 watchplan ===")
+    emit(string.format("  watches=%d", type(rows) == "table" and #rows or 0))
+    if type(rows) ~= "table" then
+        emit("=== end watchplan ===")
+        return
+    end
+    for i = 1, #rows do
+        local row = rows[i]
+        if type(row) == "table" then
+            emit(string.format(
+                "  [%d] %s key=%s status=%s stock=%s/%s deficit=%s craftable=%s craftsPossible=%s craftsNeeded=%s craftsClaim=%s shared=%s autoGrow=%s",
+                i,
+                ToNarrow(row.name),
+                tostring(row.potionKey or ""),
+                tostring(row.statusKey or ""),
+                tostring(row.potionHave or 0),
+                tostring(row.potionMin or row.target or 0),
+                tostring(row.potionDeficit or 0),
+                tostring(row.craftable or 0),
+                tostring(row.craftsPossible or 0),
+                tostring(row.craftsNeeded or "-"),
+                tostring(row.craftsClaim or "-"),
+                tostring(row.craftableShared == true),
+                tostring(row.autoGrow == true)
+            ))
+            if row.statusText ~= nil then
+                emit("      statusText=" .. ToNarrow(row.statusText))
+            end
+            local recipe = row.recipe
+            if type(recipe) == "table" and type(recipe.slots) == "table" then
+                local claim = tonumber(row.craftsClaim)
+                if claim == nil then
+                    local possible = tonumber(row.craftsPossible) or 0
+                    local needed = tonumber(row.craftsNeeded) or possible
+                    claim = math.min(possible, needed)
+                end
+                for s = 1, #recipe.slots do
+                    local slot = recipe.slots[s]
+                    local spec = slot and (slot.spec or (RS and RS.ResolveSlotSpec and RS.ResolveSlotSpec(slot)))
+                    if type(spec) == "table" then
+                        local specKey = MS and MS.Key and MS.Key(spec) or ""
+                        local perCraft = RS and RS.EffectiveSpecPerCraft
+                            and RS.EffectiveSpecPerCraft(slot, recipe.slots) or 1
+                        perCraft = tonumber(perCraft) or 1
+                        local have = 0
+                        if RS and RS.CountItemsMatchingSpec then
+                            have = tonumber(RS.CountItemsMatchingSpec(spec)) or 0
+                        end
+                        local label = ""
+                        if MS and MS.NeedLabel then
+                            label = ToNarrow(MS.NeedLabel(spec))
+                        elseif MS and MS.Label then
+                            label = ToNarrow(MS.Label(spec))
+                        end
+                        emit(string.format(
+                            "      slot role=%s spec=%s label=%s have=%s perCraft=%s claim=%s",
+                            tostring(slot.role or ""),
+                            tostring(specKey),
+                            label,
+                            tostring(have),
+                            tostring(perCraft),
+                            tostring(claim * perCraft)
+                        ))
+                    end
+                end
+            end
+        end
+    end
+    emit("=== end watchplan ===")
+end
+
+function Planner.DumpWatchPlan(emit)
+    emit = type(emit) == "function" and emit or function(msg)
+        StockPiler2.Debug.Print(msg)
+    end
+    emit("(diagnostic: forces full plan rebuild)")
+    local plan = Planner.Build({ force = true })
+    DumpWatchRows(emit, plan and plan.rows)
+end
+
 function Planner.Dump(emit)
     emit = type(emit) == "function" and emit or function(msg)
         StockPiler2.Debug.Print(msg)
@@ -696,6 +743,7 @@ function Planner.Dump(emit)
         for _ in pairs(plan.ctx.counts or {}) do n = n + 1 end
         return n
     end)()))
+    DumpWatchRows(emit, plan and plan.rows)
     emit("=== end plan ===")
 end
 
@@ -853,8 +901,8 @@ function Planner.CollectVendorBuyJobs()
                 local uid = tonumber(resolved and resolved.outputUid) or tonumber(potion.outputUid) or 0
                 if potDeficit > 0
                     and target > 0
-                    and not (RS.WatchCoveredByBagsAndCraftable
-                        and RS.WatchCoveredByBagsAndCraftable(potion, recipe, target))
+                    and RS.WatchStillNeedsGrow
+                    and RS.WatchStillNeedsGrow(potion, recipe, target, watchKey)
                 then
                     local groupKey = uid
                     if groupKey <= 0 then
@@ -942,7 +990,11 @@ end
 
 function Planner.DumpBrewPlan(emit)
     emit = type(emit) == "function" and emit or function(msg) StockPiler2.Debug.Print(msg) end
-    emit("=== StockPiler2 brew plan (scaffold) ===")
-    emit("  (brew planner not wired yet)")
+    if StockPiler2.Brew and StockPiler2.Brew.DumpPlan then
+        StockPiler2.Brew.DumpPlan(emit)
+        return
+    end
+    emit("=== StockPiler2 brew plan ===")
+    emit("  (Brew.DumpPlan not loaded)")
     emit("=== end brew plan ===")
 end

@@ -289,6 +289,21 @@ function Sch.OnUpdate(timeElapsed)
     if StockPiler2.Grow and StockPiler2.Grow.ExpireStalePending then
         StockPiler2.Grow.ExpireStalePending()
     end
+    if StockPiler2.Grow and StockPiler2.Grow.TickHarvestLiveTooltip then
+        StockPiler2.Grow.TickHarvestLiveTooltip(timeElapsed)
+    end
+    if StockPiler2.Brew and StockPiler2.Brew.OnUpdate then
+        StockPiler2.Brew.OnUpdate(timeElapsed)
+    end
+    if StockPiler2Window and StockPiler2Window.FlushPendingListRepopulate
+        and DoesWindowExist("StockPiler2Window")
+        and WindowGetShowing("StockPiler2Window") == true
+    then
+        StockPiler2Window.FlushPendingListRepopulate()
+    end
+    if StockPiler2.Brew and StockPiler2.Brew.TickBrewLiveTooltip then
+        StockPiler2.Brew.TickBrewLiveTooltip(timeElapsed)
+    end
     DecaySuppressInventorySideEffects()
     local didHeavy = false
     if FlushBagIfDue() then
@@ -304,6 +319,13 @@ function Sch.OnUpdate(timeElapsed)
     local tickSec = AutoTickIntervalSec()
     if Sch._autoAccum >= tickSec then
         Sch._autoAccum = Sch._autoAccum - tickSec
+        -- Decay wait cooldowns even when orch is idle (otherwise Brew stays blocked).
+        if StockPiler2.Refine and StockPiler2.Refine.DecayRefineWaitTicks then
+            StockPiler2.Refine.DecayRefineWaitTicks()
+        end
+        if StockPiler2.Grow and StockPiler2.Grow.DecayPlantWaitTicks then
+            StockPiler2.Grow.DecayPlantWaitTicks()
+        end
         if not didHeavy and not Sch.BagWorkPending() and ShouldRunOrchestratorTick()
             and StockPiler2.Orchestrator and StockPiler2.Orchestrator.Tick then
             StockPiler2.Orchestrator.Tick()

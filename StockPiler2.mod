@@ -2,7 +2,7 @@
 
 <ModuleFile xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 
-    <UiMod name="StockPiler2" version="0.2.1" date="2026-09-02">
+    <UiMod name="StockPiler2" version="0.3.0" date="2026-09-03">
 
         <Author name="Talladego" email="" />
 
@@ -97,6 +97,8 @@
             <File name="Source/Planner/Planner.lua" />
 
             <File name="Source/Grow/Grow.lua" />
+
+            <File name="Source/Brew/Brew.lua" />
 
             <File name="Source/Refine/Refine.lua" />
 

@@ -937,6 +937,11 @@ function StockPiler2.BrewLearn.CompletePendingCraftLearn(opts)
             end
         end
     end
+    if opts.failed ~= true and #outputs > 0
+        and StockPiler2.Brew and StockPiler2.Brew.RefreshSessionAfterBrew
+    then
+        StockPiler2.Brew.RefreshSessionAfterBrew()
+    end
     return stored
 end
 

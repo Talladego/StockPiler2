@@ -35,18 +35,3 @@ function StockPiler2.GrowExecutor.Harvest(opId)
     end
     return false, "not-implemented"
 end
-
-function StockPiler2.RefineExecutor.Tick(opId, plan)
-    return false, "not-implemented"
-end
-
-function StockPiler2.BrewExecutor.Tick(opId)
-    return false, "not-implemented"
-end
-
-function StockPiler2.BrewExecutor.TryPerform(opId)
-    if StockPiler2.Debug and StockPiler2.Debug.LogOp then
-        StockPiler2.Debug.LogOp("brew", "opId=" .. tostring(opId) .. " stub perform")
-    end
-    return false, "not-implemented"
-end

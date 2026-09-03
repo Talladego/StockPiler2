@@ -39,6 +39,9 @@ function Bridge.OnCraftingSlotUpdated(updatedSlots)
     else
         StockPiler2.Inventory.MarkDirty({ reason = "engine-crafting-slot", full = true })
     end
+    if StockPiler2.Brew and StockPiler2.Brew.OnCraftingUpdated then
+        StockPiler2.Brew.OnCraftingUpdated()
+    end
     if StockPiler2.Grow and StockPiler2.Grow.NeedsCurrentStageAdditive
         and StockPiler2.Grow.NeedsCurrentStageAdditive()
         and StockPiler2.Grow.MarkAdditiveDue
@@ -53,6 +56,15 @@ end
 function Bridge.OnCraftingUpdated()
     if StockPiler2.LearnBridge and StockPiler2.LearnBridge.OnCraftingUpdated then
         StockPiler2.LearnBridge.OnCraftingUpdated()
+    end
+    if StockPiler2.Brew and StockPiler2.Brew.OnCraftingUpdated then
+        StockPiler2.Brew.OnCraftingUpdated()
+    end
+    if StockPiler2Window and StockPiler2Window.RefreshFooterButtons
+        and DoesWindowExist("StockPiler2Window")
+        and WindowGetShowing("StockPiler2Window") == true
+    then
+        StockPiler2Window.RefreshFooterButtons()
     end
 end
 

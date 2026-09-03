@@ -180,12 +180,6 @@ function Orch.Tick()
         end
         return
     end
-    if StockPiler2.Refine and StockPiler2.Refine.DecayRefineWaitTicks then
-        StockPiler2.Refine.DecayRefineWaitTicks()
-    end
-    if StockPiler2.Grow and StockPiler2.Grow.DecayPlantWaitTicks then
-        StockPiler2.Grow.DecayPlantWaitTicks()
-    end
     if StockPiler2.Grow and StockPiler2.Grow.IsFillBlocked and StockPiler2.Grow.IsFillBlocked() then
         -- Still allow seed-buffer refine while planting is fill-blocked.
         local Refine = StockPiler2.Refine

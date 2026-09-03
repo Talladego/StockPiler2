@@ -3,7 +3,7 @@
 ----------------------------------------------------------------
 
 StockPiler2 = StockPiler2 or {}
-StockPiler2.Version = L"0.2.1"
+StockPiler2.Version = L"0.3.0"
 
 local function EmitLog(msg)
     if StockPiler2.Debug and StockPiler2.Debug.LogAlways then
@@ -22,14 +22,14 @@ local function SetDebugEnabled(on)
     s.debugEnabled = on == true
     StockPiler2.Debug.Enabled = s.debugEnabled
     EmitLog("settings| debug=" .. (StockPiler2.Debug.Enabled and "ON" or "OFF"))
-    Print(L"StockPiler2 debug " .. (StockPiler2.Debug.Enabled and L"ON" or L"OFF"))
+    Print(L"Debug " .. (StockPiler2.Debug.Enabled and L"ON" or L"OFF"))
 end
 
 local function SetEventTrace(on)
     local s = StockPiler2.Persistence.EnsureSettings()
     s.eventTrace = on == true
     StockPiler2.Debug.EventTrace = s.eventTrace
-    Print(L"StockPiler2 event trace " .. (s.eventTrace and L"ON" or L"OFF"))
+    Print(L"Event trace " .. (s.eventTrace and L"ON" or L"OFF"))
 end
 
 local function SetPerfEnabled(on)
@@ -38,14 +38,22 @@ local function SetPerfEnabled(on)
     if StockPiler2.Perf then
         StockPiler2.Perf.SetEnabled(s.perfEnabled)
     end
-    Print(L"StockPiler2 perf " .. (s.perfEnabled and L"ON" or L"OFF"))
+    Print(L"Perf " .. (s.perfEnabled and L"ON" or L"OFF"))
 end
 
 local function PrintHelp()
-    Print(L"StockPiler2 v" .. StockPiler2.Version)
-    Print(L"/sp2 — open window  |  help | debug [on|off] | plan | state | growplan | brewplan | buyplan")
-    Print(L"/sp2 bags [force] | events [on|off|dump] | perf [on|off|summary] | audit [mapping]")
-    Print(L"/sp2 perf on [ms] | perf baseline [ms] | perf summary — log frametime spikes")
+    Print(L"Commands:")
+    Print(L"/sp2 - open window")
+    Print(L"/sp2 help - show this help")
+    Print(L"/sp2 potions | watch - open on a tab")
+    Print(L"/sp2 debug [on|off] - uilog debug")
+    Print(L"/sp2 plan | watchplan | state | growplan | brewplan | buyplan - dump to uilog")
+    Print(L"/sp2 bags [force] - dump bag snapshot to uilog")
+    Print(L"/sp2 events [on|off|dump] - event trace")
+    Print(L"/sp2 perf [on|off|summary] - frametime hitch log")
+    Print(L"/sp2 perf on [ms] | perf baseline [ms] - hitch threshold / baseline")
+    Print(L"/sp2 audit [mapping] - saved-data health")
+    Print(L"/sp2 harvest - prepare next ready plot (macro/CMD path)")
 end
 
 local function SetPerfThreshold(thresholdMs)
@@ -57,7 +65,7 @@ local function SetPerfThreshold(thresholdMs)
         thresholdMs = 50
     end
     StockPiler2.Perf.FrameThresholdMs = thresholdMs
-    Print(L"StockPiler2 perf threshold " .. towstring(tostring(thresholdMs)) .. L"ms")
+    Print(L"Perf threshold " .. towstring(tostring(thresholdMs)) .. L"ms")
 end
 
 function StockPiler2.OnSlash(input)
@@ -113,6 +121,14 @@ function StockPiler2.OnSlash(input)
         end
         return
     end
+    if lower == "watchplan" then
+        if StockPiler2.Planner and StockPiler2.Planner.DumpWatchPlan then
+            Print(L"Note: /sp2 watchplan forces a full rebuild (profiling only).")
+            StockPiler2.Planner.DumpWatchPlan(function(msg) EmitLog(msg) end)
+            Print(L"Watch plan dumped to uilog.log")
+        end
+        return
+    end
     if lower == "state" then
         if StockPiler2.Orchestrator and StockPiler2.Orchestrator.DumpState then
             StockPiler2.Orchestrator.DumpState(function(msg) EmitLog(msg) end)
@@ -147,6 +163,9 @@ function StockPiler2.OnSlash(input)
     if lower == "brewplan" then
         if StockPiler2.Planner and StockPiler2.Planner.DumpBrewPlan then
             StockPiler2.Planner.DumpBrewPlan(function(msg) EmitLog(msg) end)
+            Print(L"Brew plan dumped to uilog.log")
+        elseif StockPiler2.Brew and StockPiler2.Brew.DumpPlan then
+            StockPiler2.Brew.DumpPlan(function(msg) EmitLog(msg) end)
             Print(L"Brew plan dumped to uilog.log")
         end
         return
@@ -275,7 +294,7 @@ function StockPiler2.Initialize()
     EmitLog("init v" .. tostring(StockPiler2.Version)
         .. " debug=" .. tostring(StockPiler2.Debug.Enabled == true)
         .. " perf=" .. tostring(StockPiler2.Perf and StockPiler2.Perf.Enabled == true))
-    Print(L"StockPiler2 v" .. StockPiler2.Version .. L" loaded. /sp2 to open window.")
+    Print(L"v" .. StockPiler2.Version .. L" loaded. /sp2 to open window.")
     if StockPiler2.Scheduler then
         StockPiler2.Scheduler.EnqueueBagFlush(true)
     end

@@ -11,6 +11,7 @@ StockPiler2Window.SelectedTab = StockPiler2Window.TABS_POTIONS
 
 local CLEAR_WATCHES_WIN = "StockPiler2WindowClearWatches"
 local HARVEST_WIN = "StockPiler2WindowHarvest"
+local BREW_WIN = "StockPiler2WindowBrew"
 
 StockPiler2Window.Tabs = {
     [1] = {
@@ -53,6 +54,9 @@ function StockPiler2Window.RefreshFooterButtons()
     if DoesWindowExist(CLEAR_WATCHES_WIN) then
         WindowSetShowing(CLEAR_WATCHES_WIN, onPotions)
     end
+    local brewBlocksHarvest = StockPiler2.Brew
+        and StockPiler2.Brew.BlocksHarvest
+        and StockPiler2.Brew.BlocksHarvest() == true
     if DoesWindowExist(HARVEST_WIN) then
         WindowSetShowing(HARVEST_WIN, onWatch)
         if onWatch then
@@ -60,7 +64,7 @@ function StockPiler2Window.RefreshFooterButtons()
             if StockPiler2.Grow and StockPiler2.Grow.CountReadyHarvestPlots then
                 ready = tonumber(StockPiler2.Grow.CountReadyHarvestPlots()) or 0
             end
-            local canHarvest = ready > 0
+            local canHarvest = ready > 0 and not brewBlocksHarvest
             ButtonSetDisabledFlag(HARVEST_WIN, not canHarvest)
             -- Disabled buttons still fire gameactionbutton if bound — bind/clear with ready state.
             if canHarvest then
@@ -72,6 +76,25 @@ function StockPiler2Window.RefreshFooterButtons()
             end
         elseif StockPiler2.Grow and StockPiler2.Grow.ClearHarvestActionBound then
             StockPiler2.Grow.ClearHarvestActionBound()
+        end
+    end
+    if DoesWindowExist(BREW_WIN) then
+        WindowSetShowing(BREW_WIN, onWatch)
+        if onWatch then
+            local canBrew = false
+            local session = StockPiler2.Brew and StockPiler2.Brew.GetSession and StockPiler2.Brew.GetSession()
+            local phase = session and session.phase
+            if phase == "loading" then
+                canBrew = false
+            elseif phase == "loaded" then
+                canBrew = true
+            elseif StockPiler2.Brew and StockPiler2.Brew.HasReadyToCraft
+                and StockPiler2.Brew.HasReadyToCraft() == true
+                and StockPiler2.Brew.CanStartBrewLoad
+            then
+                canBrew = StockPiler2.Brew.CanStartBrewLoad() == true
+            end
+            ButtonSetDisabledFlag(BREW_WIN, not canBrew)
         end
     end
 end
@@ -94,6 +117,9 @@ function StockPiler2Window.Initialize()
         if StockPiler2.Grow and StockPiler2.Grow.EnsureHarvestActionBound then
             StockPiler2.Grow.EnsureHarvestActionBound()
         end
+    end
+    if DoesWindowExist(BREW_WIN) then
+        ButtonSetText(BREW_WIN, L"Brew")
     end
     for _, tab in ipairs(StockPiler2Window.Tabs) do
         ButtonSetText(tab.name, tab.label)
@@ -199,7 +225,7 @@ function StockPiler2Window.OnRefresh()
     StockPiler2.Ui.Print(L"Refreshed local bags (" .. towstring(tostring(n)) .. L" item stacks).")
 end
 
-function StockPiler2Window.OnClearWatches()
+function StockPiler2Window.ConfirmClearWatches()
     local n = 0
     if StockPiler2.Catalog and StockPiler2.Catalog.ClearWatchList then
         n = tonumber(StockPiler2.Catalog.ClearWatchList()) or 0
@@ -209,6 +235,35 @@ function StockPiler2Window.OnClearWatches()
         StockPiler2TabWatch.Refresh()
     end
     StockPiler2Window.RefreshFooterButtons()
+end
+
+function StockPiler2Window.OnClearWatches()
+    local watches = StockPiler2.Watch and StockPiler2.Watch.GetWatches and StockPiler2.Watch.GetWatches() or nil
+    local count = 0
+    if type(watches) == "table" then
+        for _ in pairs(watches) do
+            count = count + 1
+        end
+    end
+    if count <= 0 then
+        StockPiler2.Ui.Print(L"No watches to clear.")
+        return
+    end
+    if type(DialogManager) == "table" and type(DialogManager.MakeTwoButtonDialog) == "function" then
+        local yes = GetString and GetString(StringTables.Default.LABEL_YES) or L"Yes"
+        local no = GetString and GetString(StringTables.Default.LABEL_NO) or L"No"
+        DialogManager.MakeTwoButtonDialog(
+            L"Clear all watches for this character?\n"
+                .. towstring(tostring(count))
+                .. L" watch(es) will be removed.",
+            yes,
+            StockPiler2Window.ConfirmClearWatches,
+            no,
+            nil
+        )
+        return
+    end
+    StockPiler2Window.ConfirmClearWatches()
 end
 
 function StockPiler2Window.OnMouseOverClearWatches()
@@ -227,22 +282,31 @@ function StockPiler2Window.OnHarvestPrepare()
     if DoesWindowExist(HARVEST_WIN) and ButtonGetDisabledFlag(HARVEST_WIN) == true then
         return
     end
-    -- Set CurrentPlot before the game action fires (often before OnLButtonUp).
+    -- Set CurrentPlot before the engine fires PERFORM_CRAFTING on this gameactionbutton.
     local prepared = false
     if StockPiler2.Grow and StockPiler2.Grow.PrepareHarvestPlot then
         prepared = StockPiler2.Grow.PrepareHarvestPlot(true) == true
     end
-    if prepared and Sound and Sound.Play and Sound.CULTIVATING_HARVEST_CROP then
-        Sound.Play(Sound.CULTIVATING_HARVEST_CROP)
+    if prepared then
+        if Sound and Sound.Play and Sound.CULTIVATING_HARVEST_CROP then
+            Sound.Play(Sound.CULTIVATING_HARVEST_CROP)
+        end
     end
 end
 
+--- Native gameactionbutton fires harvest; L-up only refreshes footer chrome.
 function StockPiler2Window.OnHarvest()
-    -- Game action already fired; only refresh footer enable state.
     StockPiler2Window.RefreshFooterButtons()
 end
 
 function StockPiler2Window.OnMouseOverHarvest()
+    if StockPiler2.Grow and StockPiler2.Grow.ShowHarvestTooltip then
+        StockPiler2.Grow.ShowHarvestTooltip(
+            SystemData.ActiveWindow.name,
+            Tooltips.ANCHOR_WINDOW_TOP
+        )
+        return
+    end
     local ready = 0
     if StockPiler2.Grow and StockPiler2.Grow.CountReadyHarvestPlots then
         ready = tonumber(StockPiler2.Grow.CountReadyHarvestPlots()) or 0
@@ -255,6 +319,45 @@ function StockPiler2Window.OnMouseOverHarvest()
     end
     Tooltips.CreateTextOnlyTooltip(SystemData.ActiveWindow.name, tip)
     Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_RIGHT)
+end
+
+function StockPiler2Window.OnBrew()
+    if DoesWindowExist(BREW_WIN) and ButtonGetDisabledFlag(BREW_WIN) == true then
+        return
+    end
+    if not StockPiler2.Brew then
+        return
+    end
+    local result = nil
+    if StockPiler2.Brew.TryBrewClick then
+        result = StockPiler2.Brew.TryBrewClick()
+    end
+    if result == "go" and StockPiler2.Brew.FirePerform then
+        StockPiler2.Brew.FirePerform()
+    end
+    StockPiler2Window.RefreshFooterButtons()
+end
+
+function StockPiler2Window.OnBrewRightClick()
+    if StockPiler2.Brew and StockPiler2.Brew.ClearLoadedSession then
+        StockPiler2.Brew.ClearLoadedSession()
+    end
+    StockPiler2Window.RefreshFooterButtons()
+end
+
+function StockPiler2Window.OnMouseOverBrew()
+    if StockPiler2.Brew and StockPiler2.Brew.ShowBrewTooltip then
+        StockPiler2.Brew.ShowBrewTooltip(
+            SystemData.ActiveWindow.name,
+            Tooltips.ANCHOR_WINDOW_TOP
+        )
+        return
+    end
+    Tooltips.CreateTextOnlyTooltip(
+        SystemData.ActiveWindow.name,
+        L"Brew green Ready watches. R-click clears the load."
+    )
+    Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_TOP)
 end
 
 function StockPiler2Window.SelectTab(tabNumber)

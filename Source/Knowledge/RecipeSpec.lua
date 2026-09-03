@@ -2146,6 +2146,185 @@ function RS.WatchCoveredByBagsAndCraftable(potion, recipe, target)
     return have + RS.CountPotionsCraftable(recipe) >= target
 end
 
+--- Mark craftableShared on each info among deficit watches only.
+--- Stocked watches (deficit <= 0) never participate and get craftableShared = false.
+--- infos[i] fields: potionDeficit, craftable, craftsPossible, recipe
+function RS.ApplyDeficitCraftableShared(infos)
+    if type(infos) ~= "table" then
+        return
+    end
+    local MS = StockPiler2.MaterialSpec
+    local matUsers = {}
+    for i = 1, #infos do
+        local info = infos[i]
+        if type(info) == "table" then
+            info.craftableShared = false
+            local deficit = tonumber(info.potionDeficit) or 0
+            local craftable = tonumber(info.craftable) or 0
+            if deficit > 0 and craftable > 0 then
+                local recipe = info.recipe
+                if type(recipe) == "table" and type(recipe.slots) == "table" and MS and MS.Key then
+                    if RS.HydrateRecipeSlots then
+                        RS.HydrateRecipeSlots(recipe)
+                    end
+                    local slots = recipe.slots
+                    local craftsPossible = tonumber(info.craftsPossible) or 0
+                    local craftsNeeded = tonumber(info.craftsNeeded)
+                    if craftsNeeded == nil and RS.CraftsNeededForDeficit then
+                        craftsNeeded = tonumber(RS.CraftsNeededForDeficit(deficit, recipe)) or craftsPossible
+                        info.craftsNeeded = craftsNeeded
+                    end
+                    local crafts = math.min(craftsPossible, craftsNeeded or craftsPossible)
+                    info.craftsClaim = crafts
+                    for s = 1, #slots do
+                        local slot = slots[s]
+                        local spec = slot and (slot.spec or (RS.ResolveSlotSpec and RS.ResolveSlotSpec(slot)))
+                        if type(spec) == "table" then
+                            local specKey = MS.Key(spec)
+                            if type(specKey) == "string" and specKey ~= "" then
+                                local perCraft = RS.EffectiveSpecPerCraft and RS.EffectiveSpecPerCraft(slot, slots) or 1
+                                local list = matUsers[specKey]
+                                if list == nil then
+                                    list = {}
+                                    matUsers[specKey] = list
+                                end
+                                list[#list + 1] = {
+                                    infoIdx = i,
+                                    perCraft = tonumber(perCraft) or 1,
+                                    crafts = crafts,
+                                    spec = spec,
+                                }
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    for i = 1, #infos do
+        local info = infos[i]
+        if type(info) ~= "table" then
+            -- skip
+        elseif (tonumber(info.potionDeficit) or 0) <= 0 or (tonumber(info.craftable) or 0) <= 0 then
+            info.craftableShared = false
+        else
+            local contested = false
+            local recipe = info.recipe
+            if type(recipe) == "table" and type(recipe.slots) == "table" and MS and MS.Key then
+                local slots = recipe.slots
+                for s = 1, #slots do
+                    local slot = slots[s]
+                    local spec = slot and (slot.spec or (RS.ResolveSlotSpec and RS.ResolveSlotSpec(slot)))
+                    if type(spec) == "table" then
+                        local specKey = MS.Key(spec)
+                        local users = type(specKey) == "string" and matUsers[specKey] or nil
+                        if type(users) == "table" and #users > 1 then
+                            local combinedNeed = 0
+                            for u = 1, #users do
+                                combinedNeed = combinedNeed + (users[u].crafts * users[u].perCraft)
+                            end
+                            local have = 0
+                            if RS.CountItemsMatchingSpec then
+                                have = tonumber(RS.CountItemsMatchingSpec(spec)) or 0
+                            end
+                            if have < combinedNeed then
+                                contested = true
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+            info.craftableShared = contested
+        end
+    end
+end
+
+--- Contested map for enabled deficit watches: watchKey -> craftableShared.
+--- Matches Planner Status/Craftable (stocked leftover craftable ignored).
+function RS.BuildWatchDeficitContestedByKey()
+    local snapGen = 0
+    if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
+        snapGen = tonumber(StockPiler2.Inventory.GetSnapGen()) or 0
+    end
+    local watchGen = 0
+    if StockPiler2.Watch and StockPiler2.Watch.GetGen then
+        watchGen = tonumber(StockPiler2.Watch.GetGen()) or 0
+    end
+    local cacheKey = tostring(snapGen) .. ":" .. tostring(watchGen)
+    if type(RS._deficitContestedCache) == "table" and RS._deficitContestedSnapGen == cacheKey then
+        return RS._deficitContestedCache
+    end
+    local s = EnsureSettings()
+    local out = {}
+    if type(s.watches) ~= "table" then
+        RS._deficitContestedCache = out
+        RS._deficitContestedSnapGen = cacheKey
+        return out
+    end
+    local infos = {}
+    local keys = {}
+    for watchKey, watch in pairs(s.watches) do
+        if type(watch) == "table" and watch.enabled == true then
+            local resolved = RS.ResolveWatchPotion(watchKey)
+            local potion = resolved and resolved.potion
+            local recipe = RS.RecipeSpecForPotion(watchKey)
+            if type(potion) == "table" and type(recipe) == "table" then
+                local target = tonumber(watch.targetStock) or 0
+                local have = RS.PotionHaveCombined(potion)
+                local deficit = math.max(0, target - have)
+                if deficit > 0 and target > 0 then
+                    local craftable = 0
+                    local craftsPossible = 0
+                    if RS.CountPotionsCraftable then
+                        craftable = math.max(0, math.floor((tonumber(RS.CountPotionsCraftable(recipe)) or 0) + 0.5))
+                    end
+                    if RS.CountCraftsPossible then
+                        craftsPossible = math.max(0, math.floor((tonumber(RS.CountCraftsPossible(recipe)) or 0) + 0.5))
+                    end
+                    keys[#keys + 1] = watchKey
+                    infos[#infos + 1] = {
+                        potionDeficit = deficit,
+                        craftable = craftable,
+                        craftsPossible = craftsPossible,
+                        craftsNeeded = RS.CraftsNeededForDeficit(deficit, recipe),
+                        recipe = recipe,
+                    }
+                end
+            end
+        end
+    end
+    RS.ApplyDeficitCraftableShared(infos)
+    for i = 1, #keys do
+        out[keys[i]] = infos[i].craftableShared == true
+    end
+    RS._deficitContestedCache = out
+    RS._deficitContestedSnapGen = cacheKey
+    return out
+end
+
+--- Deficit watch still needs plant/refine: uncovered, or covered but deficit-contested.
+function RS.WatchStillNeedsGrow(potion, recipe, target, watchKey)
+    target = tonumber(target) or 0
+    if target <= 0 or type(potion) ~= "table" then
+        return false
+    end
+    local have = RS.PotionHaveCombined(potion)
+    local deficit = math.max(0, target - have)
+    if deficit <= 0 then
+        return false
+    end
+    if not RS.WatchCoveredByBagsAndCraftable(potion, recipe, target) then
+        return true
+    end
+    watchKey = tostring(watchKey or "")
+    if watchKey == "" then
+        return false
+    end
+    local map = RS.BuildWatchDeficitContestedByKey()
+    return map[watchKey] == true
+end
+
 --- Growable seed/plant lines from AutoGrow-enabled watches, even when
 --- Stock+Craftable already covers Target (seed-buffer maintenance set).
 function RS.CollectAutoGrowSeedLines()
@@ -2461,7 +2640,7 @@ function RS.CollectAutoGrowFocus()
                 local have = RS.PotionHaveCombined(potion)
                 local deficit = math.max(0, target - have)
                 if deficit > 0 and target > 0
-                    and not RS.WatchCoveredByBagsAndCraftable(potion, recipe, target)
+                    and RS.WatchStillNeedsGrow(potion, recipe, target, watchKey)
                 then
                     local craftable = RS.CountPotionsCraftable(recipe)
                     candidates[#candidates + 1] = {
@@ -2569,7 +2748,7 @@ function RS.BuildBalancedSpecDemand()
                 local have = RS.PotionHaveCombined(potion)
                 local deficit = math.max(0, target - have)
                 if uid > 0 and deficit > 0 and target > 0
-                    and not RS.WatchCoveredByBagsAndCraftable(potion, recipe, target)
+                    and RS.WatchStillNeedsGrow(potion, recipe, target, watchKey)
                 then
                     local group = byUid[uid]
                     if group == nil then

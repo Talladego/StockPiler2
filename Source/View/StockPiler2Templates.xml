@@ -216,7 +216,7 @@
             </Windows>
         </Window>
 
-        <!-- AutoGrow row: Potion | Status | Stock | Craftable | Target | AutoGrow | Craft (1000px) -->
+        <!-- AutoGrow row: Potion | Status | Stock | Craftable | Target | AutoGrow | Brew (1000px) -->
         <Window name="StockPiler2WatchRow">
             <Size>
                 <AbsPoint x="1000" y="32" />
@@ -342,6 +342,22 @@
                     <EventHandlers>
                         <EventHandler event="OnLButtonUp" function="StockPiler2TabWatch.OnToggleRowAutoGrow" />
                         <EventHandler event="OnMouseOver" function="StockPiler2TabWatch.OnMouseOverRowAutoGrow" />
+                    </EventHandlers>
+                </Button>
+
+                <Button name="$parentLoad" inherits="StockPiler2_RowTextButton">
+                    <Size>
+                        <AbsPoint x="70" y="28" />
+                    </Size>
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft" relativeTo="$parent">
+                            <AbsPoint x="914" y="2" />
+                        </Anchor>
+                    </Anchors>
+                    <EventHandlers>
+                        <EventHandler event="OnLButtonUp" function="StockPiler2TabWatch.OnLoadRow" />
+                        <EventHandler event="OnRButtonUp" function="StockPiler2TabWatch.OnLoadRowRightClick" />
+                        <EventHandler event="OnMouseOver" function="StockPiler2TabWatch.OnMouseOverLoad" />
                     </EventHandlers>
                 </Button>
             </Windows>

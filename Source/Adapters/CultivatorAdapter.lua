@@ -111,6 +111,8 @@ local function ReadAdditivesMap(src)
                 id = id,
                 uniqueID = uid,
                 filled = id ~= 0 or uid ~= 0,
+                iconNum = tonumber(slot.iconNum) or 0,
+                name = slot.name,
                 item = slot,
             }
         end
@@ -118,11 +120,37 @@ local function ReadAdditivesMap(src)
     return out
 end
 
+local function SeedDisplayFromTable(seed)
+    if type(seed) ~= "table" then
+        return nil
+    end
+    return {
+        uniqueID = SeedUidFromSeedTable(seed),
+        name = seed.name,
+        iconNum = tonumber(seed.iconNum) or 0,
+        rarity = seed.rarity,
+        itemSet = seed.itemSet,
+    }
+end
+
 --- Prefer engine GetCultivationInfo (same as default CultivationWindow).
 --- Plots[].seedUniqueID/stage are often empty and broke manual plant→harvest learn.
 function CA.ReadPlot(plotNum)
     plotNum = tonumber(plotNum) or 0
-    local out = { plotNum = plotNum, stage = 0, seedUid = 0, plantUid = 0, additives = {} }
+    local out = {
+        plotNum = plotNum,
+        stage = 0,
+        stageTimer = 0,
+        stageTimerOn = false,
+        totalTimer = 0,
+        totalTimerOn = false,
+        seedUid = 0,
+        plantUid = 0,
+        seedName = nil,
+        seedIconNum = 0,
+        seed = nil,
+        additives = {},
+    }
     if plotNum <= 0 then
         return out
     end
@@ -142,7 +170,25 @@ function CA.ReadPlot(plotNum)
                 stage = StageEmpty()
             end
             out.stage = stage
+            out.stageTimer = tonumber(info.StageTimer) or 0
+            out.totalTimer = tonumber(info.TotalTimer) or 0
+            local filled = stage ~= StageEmpty()
+            if info.StageTimerOn ~= nil or info.stageTimerOn ~= nil then
+                out.stageTimerOn = info.StageTimerOn == true or info.stageTimerOn == true
+            else
+                out.stageTimerOn = filled and out.stageTimer > 0
+            end
+            if info.TotalTimerOn ~= nil or info.totalTimerOn ~= nil then
+                out.totalTimerOn = info.TotalTimerOn == true or info.totalTimerOn == true
+            else
+                out.totalTimerOn = filled and out.totalTimer > 0
+            end
             out.seedUid = SeedUidFromSeedTable(info.Seed)
+            out.seed = SeedDisplayFromTable(info.Seed)
+            if type(info.Seed) == "table" then
+                out.seedName = info.Seed.name
+                out.seedIconNum = tonumber(info.Seed.iconNum) or 0
+            end
             -- Plant product id when present (optional; harvest loot still teaches plantUid).
             if type(info.Plant) == "table" then
                 out.plantUid = tonumber(info.Plant.uniqueID) or tonumber(info.Plant.id) or 0
@@ -166,7 +212,17 @@ function CA.ReadPlot(plotNum)
         if out.stage == 255 then
             out.stage = StageEmpty()
         end
+        out.stageTimer = tonumber(p.StageTimer) or tonumber(p.stageTimer) or 0
+        out.totalTimer = tonumber(p.TotalTimer) or tonumber(p.totalTimer) or 0
+        local filled = out.stage ~= StageEmpty()
+        out.stageTimerOn = filled and out.stageTimer > 0
+        out.totalTimerOn = filled and out.totalTimer > 0
         out.seedUid = tonumber(p.seedUniqueID) or SeedUidFromSeedTable(p.Seed) or 0
+        out.seed = SeedDisplayFromTable(p.Seed)
+        if type(p.Seed) == "table" then
+            out.seedName = p.Seed.name
+            out.seedIconNum = tonumber(p.Seed.iconNum) or 0
+        end
         out.plantUid = tonumber(p.plantUniqueID) or 0
         out.additives = ReadAdditivesMap(p.Additives)
     end
