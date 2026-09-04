@@ -7,6 +7,8 @@ local Sch = StockPiler2.Scheduler
 
 Sch.BAG_COALESCE_SEC = 2.0
 Sch.PLAN_MAX_WAIT_SEC = 0.5
+-- While AutoGrow has work (empty plots / no-job thrash), coalesce plan rebuilds longer.
+Sch.PLAN_COALESCE_WHEN_AWAKE_SEC = 3.0
 Sch.AUTO_TICK_SEC = 1.0
 Sch.AUTO_TICK_BURST_SEC = 1.5
 Sch.AUTO_TICK_IDLE_SEC = 5.0
@@ -100,11 +102,20 @@ function Sch.EnqueuePlanRebuild()
         return
     end
     local now = Now()
-    Sch._planDue = true
-    local at = now + Sch.PLAN_MAX_WAIT_SEC
-    if Sch._planAt <= 0 or at < Sch._planAt then
-        Sch._planAt = at
+    local wait = tonumber(Sch.PLAN_MAX_WAIT_SEC) or 0.5
+    -- Empty-plot AutoGrow used to pull _planAt earlier on every snap (+1 snapGen
+    -- per rebuild). Use a longer first delay and never pull the deadline earlier.
+    if Sch.ShouldWakeAutoGrow() then
+        wait = tonumber(Sch.PLAN_COALESCE_WHEN_AWAKE_SEC) or 3.0
     end
+    Sch._planDue = true
+    if Sch._planAt <= 0 then
+        Sch._planAt = now + wait
+    end
+end
+
+function Sch.IsPlanRebuildPending()
+    return Sch._planDue == true
 end
 
 function Sch.ShouldWakeAutoGrow()
@@ -125,6 +136,9 @@ function Sch.ShouldWakeAutoGrow()
     end
     local Refine = StockPiler2.Refine
     if Refine and Refine._refineDirty == true then
+        return true
+    end
+    if Grow and Grow.HasPendingBufferRefine and Grow.HasPendingBufferRefine() == true then
         return true
     end
     return false
@@ -250,7 +264,11 @@ local function HasAutoGrowWork()
         return true
     end
     local Refine = StockPiler2.Refine
-    if Refine and Refine.ShouldAllowRefineNow and Refine.ShouldAllowRefineNow() == true then
+    if Refine and Refine._refineDirty == true then
+        return true
+    end
+    -- Cheap gate: cached buffer pending (do not call full ShouldAllowRefineNow here).
+    if Grow and Grow.HasPendingBufferRefine and Grow.HasPendingBufferRefine() == true then
         return true
     end
     return false
@@ -286,6 +304,9 @@ local function ShouldRunOrchestratorTick()
 end
 
 function Sch.OnUpdate(timeElapsed)
+    if StockPiler2.Buy and StockPiler2.Buy.PollStorePresence then
+        StockPiler2.Buy.PollStorePresence()
+    end
     if StockPiler2.Grow and StockPiler2.Grow.ExpireStalePending then
         StockPiler2.Grow.ExpireStalePending()
     end
@@ -348,14 +369,13 @@ function Sch.Initialize()
             if StockPiler2.Buy and StockPiler2.Buy.InvalidateJobsCache then
                 StockPiler2.Buy.InvalidateJobsCache()
             end
-            if StockPiler2.Grow and StockPiler2.Grow.ClearFillBlocked then
-                StockPiler2.Grow.ClearFillBlocked()
-            end
+            -- Do not ClearFillBlocked / WakeAutoGrow on every snap — that kept
+            -- burst mode and forced Planner.Build after each snapGen bump.
             if StockPiler2.Grow and StockPiler2.Grow.MarkPlantJobDirty then
                 StockPiler2.Grow.MarkPlantJobDirty()
             end
             if Sch.ShouldWakeAutoGrow() then
-                Sch.WakeAutoGrow()
+                Sch._autoGrowFast = true
                 Sch.EnqueuePlanRebuild()
             elseif StockPiler2.Ui and StockPiler2.Ui.MarkWatchUiDirty then
                 StockPiler2.Ui.MarkWatchUiDirty()
@@ -363,6 +383,14 @@ function Sch.Initialize()
         end)
         B.Subscribe(E.GARDEN_DIRTY, function()
             if Sch.ShouldWakeAutoGrow() then
+                -- Already in fill burst with a coalesced plan pending: avoid WakeAutoGrow
+                -- churn on every cultivation edge (still keep plan due via Enqueue if needed).
+                if Sch._autoGrowFast == true
+                    and Sch.IsPlanRebuildPending
+                    and Sch.IsPlanRebuildPending() == true
+                then
+                    return
+                end
                 Sch.WakeAutoGrow()
                 Sch.EnqueuePlanRebuild()
             elseif StockPiler2.Ui and StockPiler2.Ui.MarkWatchUiDirty then

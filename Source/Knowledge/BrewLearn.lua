@@ -68,8 +68,14 @@ local function EachItem(fn)
 end
 
 local function SnapshotItems()
-    if StockPiler2.Inventory and StockPiler2.Inventory.Flush then
-        StockPiler2.Inventory.Flush({ force = true })
+    -- Prefer the L0 inventory snapshot. Do not force Flatten on every craft
+    -- learn snapshot (that caused Flatten x3 + plan/UI cascades per brew).
+    local Inv = StockPiler2.Inventory
+    if Inv and Inv._ready == true then
+        return
+    end
+    if Inv and Inv.Flush then
+        Inv.Flush({})
     elseif GameData and GameData.Player then
         GameData.Player.itemsDirty = true
         GameData.Player.craftingItemsDirty = true
@@ -466,6 +472,10 @@ function StockPiler2.BrewLearn.CaptureApothecaryMaterials()
 end
 
 function StockPiler2.BrewLearn.SnapshotPotionCounts()
+    local Perf = StockPiler2.Perf
+    if Perf and Perf.Begin then
+        Perf.Begin("BrewLearn.SnapshotPotionCounts")
+    end
     BL._snapshotDone = false
     SnapshotItems()
     local counts = {}
@@ -477,6 +487,9 @@ function StockPiler2.BrewLearn.SnapshotPotionCounts()
             end
         end
     end)
+    if Perf and Perf.End then
+        Perf.End("BrewLearn.SnapshotPotionCounts")
+    end
     return counts
 end
 

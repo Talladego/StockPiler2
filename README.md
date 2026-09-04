@@ -2,13 +2,17 @@
 
 Greenfield rewrite of StockPiler using an **Orchestrator + Stores + Planner + Executors** architecture. Runs as a **separate addon** alongside v1 — does not modify the original StockPiler folder.
 
-**Version:** 0.3.0
+**Version:** 0.4.13
+
+Repository: [Talladego/StockPiler2](https://github.com/Talladego/StockPiler2)
 
 ## Install
 
 1. Ensure the `StockPiler2` folder is under `Interface/AddOns/`.
 2. Enable **StockPiler2** in the addon list (v1 can stay enabled for parallel testing).
 3. `/reloadui`
+
+On first load, StockPiler2 creates ActionBar macros **StockPiler2 Harvest** and **StockPiler2 Brew** (if an empty macro slot exists). Drag them to a hotbar for click + keybind harvest/brew. Leftover v1 macros (`StockPiler Harvest` / `StockPiler Brew`) are ignored.
 
 ## Commands
 
@@ -31,13 +35,22 @@ Greenfield rewrite of StockPiler using an **Orchestrator + Stores + Planner + Ex
 | `/sp2 audit` | Saved variables health |
 | `/sp2 harvest` | Prepare next ready plot (macro/CMD path) |
 
-## UI (v0.3)
+## UI
 
-- **Potions tab** — learned potion list, search/effect filters, sort columns, watch toggle
-- **Watch tab** — AutoGrow / AutoBuy / seed buffer, per-row target and AutoGrow, status / stock / craftable colors
+- **Potions tab** — learned potion list, search/effect filters, sort columns, watch toggle; placeholder tooltips use the potion icon
+- **Watch tab** — AutoGrow / AutoBuy / seed buffer, per-row target and AutoGrow, traffic-light status / stock / craftable
+- **Skill gates** — AutoGrow needs Cultivation; Brew needs Apothecary; AutoBuy needs Cultivation or Apothecary
 - **Row Brew** — Idle → Load → Brew (L-click); R-click unloads that row’s load
 - **Footer Brew** — auto-picks green Ready watches only; R-click clears the load
-- **Footer Harvest** — native cultivation harvest action when plots are ready
+- **Footer Harvest** — native cultivation harvest when plots are ready
+- **ActionBar macros** — same activate + tooltips as footer Harvest/Brew; enabled/disabled with the footer (mushroom / madened-speed elixir icons)
+
+## AutoGrow
+
+- Plants empty plots from watch deficits and seed buffer (one seed per orchestrator tick).
+- Seed buffer credits bag + in-ground seeds; shortfalls refine when needed (batched when plots are full).
+- After harvest, replant is delayed slightly so AutoGrow work does not stack on the engine harvest hitch.
+- Additives optional via Watch tab.
 
 ## Brew behavior
 
@@ -45,6 +58,11 @@ Greenfield rewrite of StockPiler using an **Orchestrator + Stores + Planner + Ex
 - After an **auto** brew hits the watch target, the session clears so the next footer click can pick another Ready watch.
 - **Manual** row Load/Brew can overstock (target already met or yellow shared craftable).
 - Shared-materials contention uses crafts **needed for deficit**, not max crafts possible from bags.
+
+## AutoBuy
+
+- Buys Cultivating / Apothecary craft mats (and plant/seed buys when Cultivation is missing).
+- Respects gold reserve / budget stops; reopens correctly after vendor close.
 
 ## Architecture
 
@@ -56,8 +74,9 @@ Grow/         Plant job pick + harvest helpers
 Brew/         Load / perform / session (footer + row)
 Refine/       Seed buffer refine intents
 Buy/          Vendor buy jobs
+Macro/        ActionBar Harvest / Brew macros (WarTriage rebind)
 Executors/    Grow / Refine / Brew / Buy
-Adapters/     Bag, Cultivator, Apothecary, Vendor, CraftChat
+Adapters/     Bag, Cultivator, Apothecary, Vendor, CraftChat, TradeSkillCaps
 Persistence/  Settings, Character, Account
 View/         Window, Templates, TabPotions, TabWatch, Catalog, Ui
 ```
@@ -72,6 +91,40 @@ StockPiler2 starts with **empty** learned data. Relearn recipes in-game (brew on
 | `StockPiler2.Account` | Global | Learned knowledge |
 
 Separate from v1 `StockPiler.*` saved variables.
+
+## Versioning
+
+On each user-facing ship, bump together:
+
+1. `StockPiler2.mod` `version` + `date`
+2. `Source/Bootstrap.lua` `StockPiler2.Version`
+3. This README **Version:** line + a changelog bullet below
+
+| Bump | When |
+| :--- | :--- |
+| **Patch** (`0.x.Y+1`) | Bugfix / polish only |
+| **Minor** (`0.X+1.0`) | New behavior / UX features |
+| **Major** (`N+1.0.0`) | Breaking saved-var / architecture break (rare in 0.x) |
+
+## Changelog
+
+**0.4.13:** Macros — mushroom / madened-speed elixir icons; disable hotbar macros with footer rules (disabled DDS); drop checkbox overlays.
+
+**0.4.12:** ActionBar macros — `StockPiler2 Harvest` / `StockPiler2 Brew` (WarTriage rebind; footer-equivalent activate + tooltips; ignores SP1 macros).
+
+**0.4.11:** Perf — post-harvest plant quiet (~1.2s); debounce force plant-queue invalidates across P1–P4 wake wave.
+
+**0.4.10–0.4.9:** Harvest/fill perf — Watch flush skip, FindSeedSlot cache, softer GARDEN_DIRTY, seed-line caches, deferred Planner while coalesce pending.
+
+**0.4.8:** AutoBuy — store-close detection for reserved/budget stops; visit resume on reopen.
+
+**0.4.7:** Seed buffer — bag + in-ground credit; SHORT surplus block; batched buffer refine when plots full.
+
+**0.4.6–0.4.4:** LearnBridge/harvest perf; AutoGrow commit release; uid-first seed↔plant; freeze fix (snap wake storm).
+
+**0.4.3–0.4.0:** Liniment/one-way AutoGrow; skill-aware Grow/Brew/Buy; traffic-light status polish.
+
+**0.3.0:** Watch dashboard polish — footer vs row Brew split, shared craftable contention, `/sp2 watchplan`.
 
 ## Lua pitfalls (addon authors)
 

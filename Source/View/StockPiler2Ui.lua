@@ -57,6 +57,31 @@ local function WatchContentKey()
     return tostring(snapGen) .. ":" .. tostring(planGen) .. ":" .. tostring(autoGrowOn)
 end
 
+--- True during harvest or AutoGrow fill wave — skip heavy Watch list rebuild.
+local function IsWatchUiFillBurst()
+    local Orch = StockPiler2.Orchestrator
+    if Orch and Orch.IsHarvestActive and Orch.IsHarvestActive() == true then
+        return true
+    end
+    local Grow = StockPiler2.Grow
+    local Sch = StockPiler2.Scheduler
+    local fast = Sch and Sch._autoGrowFast == true
+    if not fast then
+        return false
+    end
+    if Grow and Grow.HasEmptyPlot and Grow.HasEmptyPlot() == true then
+        return true
+    end
+    if type(Grow) == "table" and type(Grow._pendingPlant) == "table" then
+        for _, n in pairs(Grow._pendingPlant) do
+            if (tonumber(n) or 0) > 0 then
+                return true
+            end
+        end
+    end
+    return false
+end
+
 function StockPiler2.Ui.MarkWatchUiDirty()
     StockPiler2.Ui._watchUiDirty = true
 end
@@ -83,6 +108,10 @@ function StockPiler2.Ui.FlushWatchUiIfDirty()
     if not DoesWindowExist("StockPiler2Window")
         or WindowGetShowing("StockPiler2Window") ~= true
     then
+        return
+    end
+    -- Keep dirty; catch up once harvest/fill settles (footer stays light via cultivation bridge).
+    if IsWatchUiFillBurst() then
         return
     end
     local contentKey = WatchContentKey()

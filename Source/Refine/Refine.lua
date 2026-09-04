@@ -142,21 +142,45 @@ function Refine.ShouldAllowRefineNow()
         return false, "brew-session"
     end
     local Grow = StockPiler2.Grow
+    local bufferPending = Grow and Grow.HasPendingBufferRefine and Grow.HasPendingBufferRefine() == true
     local empty = Grow and Grow.HasEmptyPlot and Grow.HasEmptyPlot() == true
     if empty and Grow then
         local plantable = false
+        local plantReason = nil
         if Grow.PeekSeedsForNextPlant then
-            local ok = Grow.PeekSeedsForNextPlant()
+            local ok, job = Grow.PeekSeedsForNextPlant()
             if ok == true then
                 plantable = true
+                if type(job) == "table" then
+                    plantReason = tostring(job.plantReason or "")
+                end
             end
         end
         if not plantable and Grow.HasSeedsForNextPlant then
             plantable = Grow.HasSeedsForNextPlant() == true
+            if plantable then
+                local job = Grow._cachedPlantJob
+                if type(job) ~= "table" and Grow.GetPlantJob then
+                    job = Grow.GetPlantJob()
+                end
+                if type(job) == "table" then
+                    plantReason = tostring(job.plantReason or "")
+                end
+            end
         end
         if plantable then
-            return false, "plant-first"
+            -- Plant-first for potion/buffer jobs; surplus must not block seed-buffer refine.
+            if bufferPending then
+                if plantReason == "potion_stock" or plantReason == "seed_buffer" then
+                    return false, "plant-first"
+                end
+            else
+                return false, "plant-first"
+            end
         end
+    end
+    if bufferPending then
+        return true, "seed-buffer"
     end
     if Refine._refineDirtyReason == "harvest" or Refine._refineDirty == true then
         return true, "post-harvest"
@@ -366,9 +390,9 @@ end
 
 function Refine.GetSeedBudgetForSpec(spec, seedUid)
     seedUid = tonumber(seedUid) or 0
-    -- Live bag counts ignore in-ground plantings. Server refunds those seeds on
-    -- abort/logout, so refining to buffer while plots grow can overstock.
-    -- Later: credit pending/growing plots toward live if desired.
+    -- Bag + in-ground count toward buffer until harvest outcome / user uproot.
+    -- Planting moves bag→plot without changing credit; failed harvest or uproot
+    -- drops ground with no bag refund → SHORT. Abort/logout refund keeps credit flat.
     local buffer = StockPiler2.Watch and StockPiler2.Watch.GetSeedBufferMin() or 5
     local live = Refine.LiveSeedCountForSpec(spec)
     if live <= 0 and seedUid > 0 then
@@ -377,15 +401,20 @@ function Refine.GetSeedBudgetForSpec(spec, seedUid)
     if seedUid > 0 then
         Refine._lastLiveBySeed[seedUid] = live
     end
+    local ground = 0
+    if seedUid > 0 and StockPiler2.Grow and StockPiler2.Grow.CountInGroundSeeds then
+        ground = tonumber(StockPiler2.Grow.CountInGroundSeeds(seedUid)) or 0
+    end
     local RP = StockPiler2.RefinePipeline
     local outstanding = seedUid > 0 and RP and RP.GetOutstanding(seedUid) or 0
-    local credit = live + outstanding
+    local credit = live + ground + outstanding
     local headroom = buffer - credit
     if headroom < 0 then
         headroom = 0
     end
     return {
         live = live,
+        ground = ground,
         credit = credit,
         headroom = headroom,
         buffer = buffer,
@@ -418,21 +447,24 @@ end
 
 function Refine.GetSeedBudget(seedUid)
     seedUid = tonumber(seedUid) or 0
-    -- Live bag counts ignore in-ground plantings. Server refunds those seeds on
-    -- abort/logout, so refining to buffer while plots grow can overstock.
-    -- Later: credit pending/growing plots toward live if desired.
+    -- Bag + in-ground count toward buffer until harvest outcome / user uproot.
     local buffer = StockPiler2.Watch and StockPiler2.Watch.GetSeedBufferMin() or 5
     local live = Refine.LiveSeedCount(seedUid)
     Refine._lastLiveBySeed[seedUid] = live
+    local ground = 0
+    if seedUid > 0 and StockPiler2.Grow and StockPiler2.Grow.CountInGroundSeeds then
+        ground = tonumber(StockPiler2.Grow.CountInGroundSeeds(seedUid)) or 0
+    end
     local RP = StockPiler2.RefinePipeline
     local outstanding = RP and RP.GetOutstanding(seedUid) or 0
-    local credit = live + outstanding
+    local credit = live + ground + outstanding
     local headroom = buffer - credit
     if headroom < 0 then
         headroom = 0
     end
     return {
         live = live,
+        ground = ground,
         credit = credit,
         headroom = headroom,
         buffer = buffer,
@@ -659,7 +691,7 @@ function Refine.CollectIntents()
                 local budget = Refine.GetSeedBudgetForSpec(spec, seedUid)
                 local refinable = Refine.CountRefinablePlants(plantUid, spec)
                 if budget.headroom > 0 and refinable > 0 then
-                    local uses = math.min(budget.headroom, refinable, 1)
+                    local uses = math.min(budget.headroom, refinable, 5)
                     AppendRefineIntent(intents, SM, line, "seed-buffer", uses, budget)
                 end
             end
@@ -751,7 +783,8 @@ function Refine.IssueOne(intent, opId)
     local reason = tostring(intent.reason or "refine")
     local pending = tonumber(Refine._pendingByPlant[plantUid]) or 0
     local stack = tonumber(item.stackCount) or tonumber(item.StackCount) or 1
-    uses = math.min(uses, stack, MAX_PENDING_PER_PLANT - pending, 1)
+    local maxUses = (reason == "seed-buffer") and 5 or 1
+    uses = math.min(uses, stack, MAX_PENDING_PER_PLANT - pending, maxUses)
     if uses < 1 then
         return false
     end
@@ -810,7 +843,7 @@ function Refine.IssueOne(intent, opId)
         StockPiler2.Scheduler.EnqueueBagFlush(false)
     end
     Refine.InvalidateIntentCache()
-    Refine._refineWaitTicks = 5
+    Refine._refineWaitTicks = (reason == "seed-buffer") and 2 or 5
     Refine._refineDirty = false
     Refine._refineDirtyReason = nil
     if StockPiler2.Scheduler and StockPiler2.Scheduler.WakeAutoGrow then
@@ -984,11 +1017,12 @@ function Refine.DumpDiagnostics(emit)
             and Refine.CountRefinablePlants(plantUid, spec)
             or (plantUid > 0 and Refine.CountRefinablePlants(plantUid) or 0)
         emit(string.format(
-            "  productKey=%s seedUid=%d plantUid=%d live=%d outstanding=%d headroom=%d refinable=%d deficit=%d",
+            "  productKey=%s seedUid=%d plantUid=%d live=%d ground=%d outstanding=%d headroom=%d refinable=%d deficit=%d",
             tostring(line.specKey or "?"),
             seedUid,
             plantUid,
             tonumber(budget.live) or 0,
+            tonumber(budget.ground) or 0,
             tonumber(budget.outstanding) or 0,
             tonumber(budget.headroom) or 0,
             refinable,

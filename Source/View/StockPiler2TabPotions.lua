@@ -793,6 +793,7 @@ function StockPiler2TabPotions.OnMouseOverIcon()
         StockPiler2RecipeTooltip.ShowPotionIconTooltip(SystemData.ActiveWindow.name, {
             name = data.name or L"Potion",
             uniqueID = data.uniqueID,
+            iconNum = data.iconNum,
             itemData = itemData,
             iLevel = iLevel,
             effectKey = data.effectKey,

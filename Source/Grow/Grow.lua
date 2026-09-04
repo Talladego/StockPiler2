@@ -24,12 +24,18 @@ Grow._fillBlocked = false
 Grow._plantWaitTicks = 0
 Grow._jobProbed = false
 Grow._lastChatHarvestWakeAt = 0
+Grow._lastHarvestForceAt = 0
+Grow._plantQuietUntil = 0
 Grow._commitForceCleared = false
 Grow._harvestOpLockUntil = 0
 Grow._lastPreparedHarvestPlot = 0
 Grow._harvestActionBound = false
+Grow._skillSkipByUid = Grow._skillSkipByUid or {}
+Grow._skillSkipSnapGen = -1
 Grow.PENDING_TTL_SEC = 10
 Grow.CHAT_HARVEST_WAKE_DEBOUNCE_SEC = 1.5
+Grow.HARVEST_FORCE_DEBOUNCE_SEC = 1.5
+Grow.POST_HARVEST_PLANT_DELAY_SEC = 1.2
 Grow.HARVEST_OP_LOCK_SEC = 1.5
 
 local HARVEST_WIN = "StockPiler2WindowHarvest"
@@ -232,6 +238,12 @@ local function CountPlotsForSeedUid(seedUid)
     return n
 end
 
+--- Seeds still in plots (pending/growing). Counts toward seed-buffer credit until
+--- harvest success/fail or user uproot. SP2 never uproots.
+function Grow.CountInGroundSeeds(seedUid)
+    return CountPlotsForSeedUid(seedUid)
+end
+
 local function SeedHaveForLine(line, SM, Inv)
     local seed = line.seed
     local seedUid = tonumber(line.seedUid) or 0
@@ -269,6 +281,39 @@ local function CanUseSeedUid(seedUid, Inv)
     return true
 end
 
+local function CurrentSnapGen()
+    if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
+        return tonumber(StockPiler2.Inventory.GetSnapGen()) or 0
+    end
+    return 0
+end
+
+local function SyncSkillSkipBlacklist()
+    local snapGen = CurrentSnapGen()
+    if Grow._skillSkipSnapGen ~= snapGen then
+        Grow._skillSkipByUid = {}
+        Grow._skillSkipSnapGen = snapGen
+    end
+end
+
+local function IsSkillSkippedUid(seedUid)
+    seedUid = tonumber(seedUid) or 0
+    if seedUid <= 0 then
+        return false
+    end
+    SyncSkillSkipBlacklist()
+    return Grow._skillSkipByUid[seedUid] == true
+end
+
+local function MarkSkillSkippedUid(seedUid)
+    seedUid = tonumber(seedUid) or 0
+    if seedUid <= 0 then
+        return
+    end
+    SyncSkillSkipBlacklist()
+    Grow._skillSkipByUid[seedUid] = true
+end
+
 local function AnyBufferRefinePending(lines)
     local Refine = StockPiler2.Refine
     if type(Refine) ~= "table" or not Refine.GetSeedBudgetForSpec then
@@ -286,6 +331,68 @@ local function AnyBufferRefinePending(lines)
     return false
 end
 
+--- True when any refinable buffer line has credit below buffer (SHORT).
+local function AnyBufferShort(lines)
+    local Refine = StockPiler2.Refine
+    if type(Refine) ~= "table" or not Refine.GetSeedBudgetForSpec then
+        return false
+    end
+    local buffer = StockPiler2.Watch and StockPiler2.Watch.GetSeedBufferMin() or 5
+    for i = 1, #lines do
+        local line = lines[i]
+        local budget = Refine.GetSeedBudgetForSpec(line.spec, line.seedUid)
+        local credit = tonumber(budget and budget.credit) or 0
+        if credit < buffer then
+            return true
+        end
+    end
+    return false
+end
+
+local function BufferFlagsCacheKey()
+    local snapGen = 0
+    if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
+        snapGen = tonumber(StockPiler2.Inventory.GetSnapGen()) or 0
+    end
+    local gardenGen = 0
+    if StockPiler2.Garden and StockPiler2.Garden.GetGen then
+        gardenGen = tonumber(StockPiler2.Garden.GetGen()) or 0
+    end
+    local watchGen = 0
+    if StockPiler2.Watch and StockPiler2.Watch.GetGen then
+        watchGen = tonumber(StockPiler2.Watch.GetGen()) or 0
+    end
+    local buffer = StockPiler2.Watch and StockPiler2.Watch.GetSeedBufferMin() or 5
+    local outstanding = 0
+    local RP = StockPiler2.RefinePipeline
+    if RP and RP.Snapshot then
+        local snap = RP.Snapshot()
+        if type(snap) == "table" then
+            for _, n in pairs(snap) do
+                outstanding = outstanding + (tonumber(n) or 0)
+            end
+        end
+    end
+    return tostring(snapGen) .. ":" .. tostring(gardenGen) .. ":" .. tostring(watchGen)
+        .. ":" .. tostring(buffer) .. ":" .. tostring(outstanding)
+end
+
+local function EnsureBufferFlagsCached()
+    local key = BufferFlagsCacheKey()
+    if Grow._bufferFlagsKey == key and type(Grow._bufferFlags) == "table" then
+        return Grow._bufferFlags
+    end
+    local RS = StockPiler2.RecipeSpec
+    local lines = (RS and RS.CollectAutoGrowSeedLines and RS.CollectAutoGrowSeedLines()) or {}
+    local flags = {
+        pending = AnyBufferRefinePending(lines),
+        short = AnyBufferShort(lines),
+    }
+    Grow._bufferFlagsKey = key
+    Grow._bufferFlags = flags
+    return flags
+end
+
 --- True when Seed Buffer is on and at least one watched line can refine for buffer.
 function Grow.HasPendingBufferRefine()
     if not (StockPiler2.Watch and StockPiler2.Watch.IsSeedBufferEnabled
@@ -297,7 +404,21 @@ function Grow.HasPendingBufferRefine()
     if not (RS and RS.CollectAutoGrowSeedLines) then
         return false
     end
-    return AnyBufferRefinePending(RS.CollectAutoGrowSeedLines())
+    return EnsureBufferFlagsCached().pending == true
+end
+
+--- True when Seed Buffer is on and any watched refinable line is below buffer.
+function Grow.HasAnyBufferShort()
+    if not (StockPiler2.Watch and StockPiler2.Watch.IsSeedBufferEnabled
+        and StockPiler2.Watch.IsSeedBufferEnabled() == true)
+    then
+        return false
+    end
+    local RS = StockPiler2.RecipeSpec
+    if not (RS and RS.CollectAutoGrowSeedLines) then
+        return false
+    end
+    return EnsureBufferFlagsCached().short == true
 end
 
 local function PickBufferGrowCandidate(lines, SM, Inv)
@@ -308,17 +429,18 @@ local function PickBufferGrowCandidate(lines, SM, Inv)
     for i = 1, #lines do
         local line = lines[i]
         local seedHave, seedUid = SeedHaveForLine(line, SM, Inv)
-        if seedUid > 0 and CanUseSeedUid(seedUid, Inv) then
+        if seedUid > 0 and IsSkillSkippedUid(seedUid) then
+            -- blacklisted for this snapGen
+        elseif seedUid > 0 and not CanUseSeedUid(seedUid, Inv) then
+            MarkSkillSkippedUid(seedUid)
+        elseif seedUid > 0 and CanUseSeedUid(seedUid, Inv) then
             local committed = tonumber(Grow._seedCommitted[seedUid]) or 0
             local avail = seedHave - committed
-            local live = seedHave
-            local outstanding = 0
+            local credit = seedHave
             if Refine and Refine.GetSeedBudgetForSpec then
                 local budget = Refine.GetSeedBudgetForSpec(line.spec, seedUid)
-                live = tonumber(budget and budget.live) or live
-                outstanding = tonumber(budget and budget.outstanding) or 0
+                credit = tonumber(budget and budget.credit) or credit
             end
-            local credit = live + outstanding
             if avail > 0 and credit < buffer then
                 local refinable = Refine and Refine.CountRefinablePlants
                     and Refine.CountRefinablePlants(line.plantUid, line.spec) or 0
@@ -357,7 +479,7 @@ local function PickBufferGrowCandidate(lines, SM, Inv)
 end
 
 local function PickSurplusCandidate(lines, SM, Inv)
-    if AnyBufferRefinePending(lines) then
+    if AnyBufferShort(lines) or AnyBufferRefinePending(lines) then
         return nil
     end
     local Refine = StockPiler2.Refine
@@ -367,7 +489,11 @@ local function PickSurplusCandidate(lines, SM, Inv)
     for i = 1, #lines do
         local line = lines[i]
         local seedHave, seedUid = SeedHaveForLine(line, SM, Inv)
-        if seedUid > 0 and CanUseSeedUid(seedUid, Inv) then
+        if seedUid > 0 and IsSkillSkippedUid(seedUid) then
+            -- blacklisted for this snapGen
+        elseif seedUid > 0 and not CanUseSeedUid(seedUid, Inv) then
+            MarkSkillSkippedUid(seedUid)
+        elseif seedUid > 0 then
             local committed = tonumber(Grow._seedCommitted[seedUid]) or 0
             local live = seedHave
             if Refine and Refine.GetSeedBudgetForSpec then
@@ -436,14 +562,15 @@ function Grow.PickPlantCandidate()
                 local seed = SM.ResolveSeedForSpec(spec)
                 if type(seed) == "table" then
                     local seedUid = tonumber(seed.uniqueID) or 0
-                    if seedUid > 0 and Inv and Inv.CanUseUniqueId
-                        and not Inv.CanUseUniqueId(seedUid)
-                    then
+                    if seedUid <= 0 and type(seed.itemData) == "table" then
+                        seedUid = tonumber(seed.itemData.uniqueID) or 0
+                    end
+                    if seedUid > 0 and IsSkillSkippedUid(seedUid) then
+                        -- blacklisted for this snapGen
+                    elseif seedUid > 0 and not CanUseSeedUid(seedUid, Inv) then
+                        MarkSkillSkippedUid(seedUid)
                         LogOnce("skill-" .. tostring(seedUid), "plant skip skill seedUid=" .. tostring(seedUid))
                     else
-                        if seedUid <= 0 and type(seed.itemData) == "table" then
-                            seedUid = tonumber(seed.itemData.uniqueID) or 0
-                        end
                         local seedHave = tonumber(seed.count) or 0
                         if SM and SM.CountSeedsInBagsForSpec then
                             local variantCount = SM.CountSeedsInBagsForSpec(spec)
@@ -571,8 +698,10 @@ local function ApplyPendingClearForPlot(plotNum, plot)
         return
     end
     if Grow.NormalizeStage(plot.stage) ~= Grow.StageEmpty() then
-        -- Plant confirmed in soil — drop pending without rolling back commit.
-        Grow.ClearPendingPlot(plotNum)
+        -- Plant confirmed in soil: bag already lost the seed. Release commit so
+        -- the next PickPlantCandidate does not do seedHave - committed against
+        -- an already-decremented bag (that stole plots to surplus seeds).
+        Grow.ClearPendingPlot(plotNum, { rollbackCommit = true })
         return
     end
     -- Empty while pending: harvest/fail. Grace so post-plant empty frames don't clear.
@@ -1015,8 +1144,15 @@ function Grow.ClearHarvestActionBound()
 end
 
 --- Best-effort for orch/macros. Manual footer Harvest uses native gameactionbutton click.
+--- Prefers placed StockPiler2 Harvest macro Action windows; then footer / cult windows.
 --- WindowGameAction often pcall-succeeds without harvesting.
 function Grow.FireHarvestAction()
+    if StockPiler2.Macro and StockPiler2.Macro.FireHarvestGameAction then
+        if StockPiler2.Macro.FireHarvestGameAction() == true then
+            LogGrow("FireHarvestAction ok via macro")
+            return true
+        end
+    end
     Grow.EnsureHarvestActionBound()
     if type(WindowGameAction) ~= "function" then
         LogGrow("FireHarvestAction no WindowGameAction")
@@ -1133,11 +1269,20 @@ function Grow.SelectHarvestPlot(manual)
     return true, pick, plotData
 end
 
---- Prepare CurrentPlot + harvest watch; game-action button performs the craft.
-function Grow.PrepareHarvestPlot(manual)
+--- True when a harvest can proceed (ready plot, not brew-blocked).
+function Grow.CanHarvestNow()
     if StockPiler2.Brew and StockPiler2.Brew.BlocksHarvest
         and StockPiler2.Brew.BlocksHarvest() == true
     then
+        return false
+    end
+    local ready = Grow.CountReadyHarvestPlots and Grow.CountReadyHarvestPlots() or 0
+    return (tonumber(ready) or 0) > 0
+end
+
+--- Prepare CurrentPlot + harvest watch; game-action button performs the craft.
+function Grow.PrepareHarvestPlot(manual)
+    if Grow.CanHarvestNow and Grow.CanHarvestNow() ~= true then
         return false
     end
     Grow.EnsureHarvestActionBound()
@@ -1158,9 +1303,17 @@ end
 --- After a plot becomes empty (cultivation or CraftChat harvest): clear block, rebuild job, wake.
 --- Marks refine due only when no plantable seed job exists (need buffer refill).
 --- CraftChat often fires WakeAfterHarvest(0) repeatedly; debounce those during a fill wave.
+--- Per-plot wakes (P1–P4) share one force-invalidate + plant quiet window so replant
+--- does not stack on the engine harvest hitch.
 function Grow.WakeAfterHarvest(plotNum)
     plotNum = tonumber(plotNum) or 0
     local now = NowSec()
+    local plantDelay = tonumber(Grow.POST_HARVEST_PLANT_DELAY_SEC) or 1.2
+    local quietUntil = now + plantDelay
+    local prevQuiet = tonumber(Grow._plantQuietUntil) or 0
+    if quietUntil > prevQuiet then
+        Grow._plantQuietUntil = quietUntil
+    end
     if plotNum <= 0 then
         local debounce = tonumber(Grow.CHAT_HARVEST_WAKE_DEBOUNCE_SEC) or 1.5
         local last = tonumber(Grow._lastChatHarvestWakeAt) or 0
@@ -1174,22 +1327,38 @@ function Grow.WakeAfterHarvest(plotNum)
         Grow._lastChatHarvestWakeAt = now
     end
     Grow.ClearFillBlocked()
-    Grow.InvalidatePlantQueue({ force = true })
+    local forceDebounce = tonumber(Grow.HARVEST_FORCE_DEBOUNCE_SEC) or 1.5
+    local lastForce = tonumber(Grow._lastHarvestForceAt) or 0
+    local doForce = lastForce <= 0 or now <= 0 or (now - lastForce) >= forceDebounce
     local plantable = false
-    if Grow.HasSeedsForNextPlant then
-        plantable = Grow.HasSeedsForNextPlant() == true
-    end
-    if not plantable and StockPiler2.Refine and StockPiler2.Refine.MarkRefineDue then
-        StockPiler2.Refine.MarkRefineDue("harvest")
-    elseif plantable and StockPiler2.Refine and StockPiler2.Refine.ClearPostHarvestState then
-        StockPiler2.Refine.ClearPostHarvestState()
+    if doForce then
+        Grow._lastHarvestForceAt = now
+        Grow.InvalidatePlantQueue({ force = true })
+        if Grow.HasSeedsForNextPlant then
+            plantable = Grow.HasSeedsForNextPlant() == true
+        end
+        if not plantable and StockPiler2.Refine and StockPiler2.Refine.MarkRefineDue then
+            StockPiler2.Refine.MarkRefineDue("harvest")
+        elseif plantable and StockPiler2.Refine and StockPiler2.Refine.ClearPostHarvestState then
+            StockPiler2.Refine.ClearPostHarvestState()
+        end
+    else
+        if Grow.HasSeedsForNextPlant then
+            plantable = Grow.HasSeedsForNextPlant() == true
+        end
     end
     if StockPiler2.Scheduler and StockPiler2.Scheduler.WakeAutoGrow then
         StockPiler2.Scheduler.WakeAutoGrow()
     end
     LogOnce(
         "harvest-wake-" .. tostring(plotNum),
-        string.format("harvest-wake P%s plantable=%s", tostring(plotNum > 0 and plotNum or "?"), tostring(plantable))
+        string.format(
+            "harvest-wake P%s plantable=%s force=%s quiet=%.1f",
+            tostring(plotNum > 0 and plotNum or "?"),
+            tostring(plantable),
+            tostring(doForce),
+            plantDelay
+        )
     )
     return plantable
 end
@@ -1206,6 +1375,15 @@ function Grow.TryPlantNextEmptyPlot(opId)
     end
     if not Grow.IsEnabled() then
         return false
+    end
+    local quietUntil = tonumber(Grow._plantQuietUntil) or 0
+    if quietUntil > 0 then
+        local now = NowSec()
+        if now > 0 and now < quietUntil then
+            LogOnce("plant-quiet", string.format("plant quiet remaining=%.1fs", quietUntil - now))
+            return false
+        end
+        Grow._plantQuietUntil = 0
     end
     if StockPiler2.Perf and StockPiler2.Perf.Begin then
         StockPiler2.Perf.Begin("Grow.TryPlant")
@@ -1566,22 +1744,25 @@ function Grow.DumpDiagnostics(emit)
         for i = 1, #lines do
             local line = lines[i]
             local live = 0
+            local ground = 0
             local headroom = 0
             local refinable = 0
             if StockPiler2.Refine and StockPiler2.Refine.GetSeedBudgetForSpec then
                 local budget = StockPiler2.Refine.GetSeedBudgetForSpec(line.spec, line.seedUid)
                 live = tonumber(budget and budget.live) or 0
+                ground = tonumber(budget and budget.ground) or 0
                 headroom = tonumber(budget and budget.headroom) or 0
             end
             if StockPiler2.Refine and StockPiler2.Refine.CountRefinablePlants then
                 refinable = StockPiler2.Refine.CountRefinablePlants(line.plantUid, line.spec) or 0
             end
             emit(string.format(
-                "  %s seedUid=%d plantUid=%d live=%d headroom=%d refinable=%d",
+                "  %s seedUid=%d plantUid=%d live=%d ground=%d headroom=%d refinable=%d",
                 tostring(line.specKey),
                 tonumber(line.seedUid) or 0,
                 tonumber(line.plantUid) or 0,
                 live,
+                ground,
                 headroom,
                 refinable
             ))
@@ -1860,7 +2041,7 @@ end
 -- Harvest button tooltip (SP1 ShowHarvestTooltip slim port)
 ----------------------------------------------------------------
 
-local HARVEST_TOOLTIP_ICON = 3317
+local HARVEST_TOOLTIP_ICON = 2486
 local HARVEST_TOOLTIP_ROWS = 40
 
 local function FormatTooltipIcon(iconNum)

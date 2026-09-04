@@ -9,6 +9,41 @@ StockPiler2.SeedMap._bagSeedIndexGen = -1
 StockPiler2.SeedMap._bagSeedIndex = nil
 -- Live seedUniqueID can be 0 by harvest time; remember last non-zero per plot.
 StockPiler2.SeedMap._plotSeedByPlot = StockPiler2.SeedMap._plotSeedByPlot or {}
+StockPiler2.SeedMap._planLinkCache = StockPiler2.SeedMap._planLinkCache or {}
+
+--- Per Planner.Build caches (cleared via ClearPlanCaches).
+local function PlanCacheGet(kind, key)
+    local c = StockPiler2.SeedMap._planLinkCache
+    if type(c) ~= "table" or key == nil or key == "" then
+        return nil, false
+    end
+    local bucket = c[kind]
+    if type(bucket) ~= "table" or bucket[key] == nil then
+        return nil, false
+    end
+    return bucket[key], true
+end
+
+local function PlanCacheSet(kind, key, value)
+    if key == nil or key == "" then
+        return
+    end
+    local c = StockPiler2.SeedMap._planLinkCache
+    if type(c) ~= "table" then
+        c = {}
+        StockPiler2.SeedMap._planLinkCache = c
+    end
+    local bucket = c[kind]
+    if type(bucket) ~= "table" then
+        bucket = {}
+        c[kind] = bucket
+    end
+    bucket[key] = value
+end
+
+function StockPiler2.SeedMap.ClearPlanCaches()
+    StockPiler2.SeedMap._planLinkCache = {}
+end
 
 local BUTCHER_HINTS = {
     "scale",
@@ -157,12 +192,24 @@ end
 --- Forward declaration; defined after GetPlantUidForSpec helpers.
 local SeedMatchesGrowSpec
 
+--- Soft cold-start aid for grow relatedness — not the seed-map source of truth.
+--- Learned grows/refines uid pairs are authoritative once stored.
 local function NormalizeGrowName(nameNarrow)
     local s = string.lower(nameNarrow or "")
     s = string.gsub(s, "%s+seed%s+packet$", "")
     s = string.gsub(s, "%s+spore%s+packet$", "")
     s = string.gsub(s, "%s+seed$", "")
     s = string.gsub(s, "%s+spore$", "")
+    -- Compound forms: "Blackbell Bloodseed" (no space before seed).
+    s = string.gsub(s, "seed$", "")
+    s = string.gsub(s, "spore$", "")
+    -- One-way harvest products: "Blackbell Powder" / remaining "blood" → blackbell.
+    s = string.gsub(s, "%s+powder$", "")
+    s = string.gsub(s, "%s+extract$", "")
+    s = string.gsub(s, "%s+blood$", "")
+    s = string.gsub(s, "%s+dust$", "")
+    s = string.gsub(s, "%s+oil$", "")
+    s = string.gsub(s, "%s+pulp$", "")
     s = string.gsub(s, "%s+", " ")
     s = string.gsub(s, "^%s+", "")
     s = string.gsub(s, "%s+$", "")
@@ -198,6 +245,7 @@ local function GrowNameStemsMatch(a, b)
 end
 
 --- Harvested plant and its seed share a stem: "Glossy Spumepetal" / "Glossy Spumepetal Seed".
+--- Also one-way: "Blackbell Powder" / "Blackbell Bloodseed" after product-type strip.
 function StockPiler2.SeedMap.GrowNamesRelated(plantName, seedName)
     local a = NormalizeGrowName(ToNarrow(plantName))
     local b = NormalizeGrowName(ToNarrow(seedName))
@@ -536,7 +584,18 @@ SeedMatchesGrowSpec = function(seedItem, spec, expectedPlantUid)
         if type(plantData) == "table" and MS.ProductMatches(plantData, spec) then
             return true, plantUid
         end
+        -- Mapped plant missing or wrong: Liniment seeds still ProductMatch the apo spec.
+        if (type(plantData) ~= "table" or expectedPlantUid <= 0)
+            and IsBagSeedOrSpore(seedItem)
+            and MS.ProductMatches(seedItem, spec) == true
+        then
+            return true, plantUid
+        end
         return false, plantUid
+    end
+    -- One-way / Liniment: bought seed ProductMatches recipe Main with no refinable plant uid.
+    if seedUid > 0 and IsBagSeedOrSpore(seedItem) and MS.ProductMatches(seedItem, spec) == true then
+        return true, expectedPlantUid
     end
     if expectedPlantUid <= 0 or seedUid <= 0 then
         return false, 0
@@ -699,7 +758,8 @@ function StockPiler2.SeedMap.PairLooksLikePlantAndSeed(plantUid, seedUid)
     if type(plantData) ~= "table" or type(seedData) ~= "table" then
         return false
     end
-    if StockPiler2.SeedMap.GrowNamesRelated(plantData.name, seedData.name) then
+    -- Same relatedness as harvest learning (names or ProductMatches).
+    if SeedPlantPairRelated(seedData, plantData) then
         return true
     end
     local logKey = tostring(plantUid) .. ":" .. tostring(seedUid)
@@ -2706,18 +2766,62 @@ local function IsCultivatablePlantItem(item)
     return false
 end
 
+--- Refinable plants, Liniment-style non-refinable harvest (ct set or brew-learned main),
+--- or producers with a known seed map. Butcher mats without a related seed stay out of
+--- grow linking via SeedMatchesGrowSpec / GrowNamesRelated (not here).
+local function IsGrowProducerItemForSpec(item)
+    if type(item) ~= "table" or IsSeedOrSporeItem(item) then
+        return false
+    end
+    if IsCultivatablePlantItem(item) then
+        return true
+    end
+    local ct = tonumber(item.cultivationType) or 0
+    if ct ~= 0 then
+        return true
+    end
+    local uid = tonumber(item.uniqueID) or 0
+    if uid > 0 then
+        if #EngineSeedUidsForPlant(uid) > 0 then
+            return true
+        end
+        local mapped = StockPiler2.SeedMap.GetSeedUidsForPlant(uid)
+        if type(mapped) == "table" and #mapped > 0 then
+            return true
+        end
+        -- Brew-learned main fingerprint (Blackbell Powder / Primals): allow as plant uid;
+        -- growability still requires a related seed in SeedMatchesGrowSpec.
+        if StockPiler2.Items and StockPiler2.Items.ToSpec then
+            local learned = StockPiler2.Items.ToSpec(uid)
+            if type(learned) == "table"
+                and learned.incomplete ~= true
+                and (learned.role == "main" or learned.role == nil)
+                and (tonumber(learned.effectId) or 0) > 0
+            then
+                return true
+            end
+        end
+    end
+    return false
+end
+
 function StockPiler2.SeedMap.FindPlantUidForSpec(spec)
     if type(spec) ~= "table" or not StockPiler2.MaterialSpec then
         return 0
     end
     local MS = StockPiler2.MaterialSpec
+    local cacheKey = (MS.ProductKey and MS.ProductKey(spec)) or (MS.Key and MS.Key(spec)) or ""
+    local cached, hit = PlanCacheGet("plantUid", cacheKey)
+    if hit then
+        return tonumber(cached) or 0
+    end
     local bestUid = 0
 
     -- Bags may also hold butcher substitutes with the same spec (e.g. Zoic Gore
-    -- vs Goldweed). Only a refinable plant is valid for grow/refine.
+    -- vs Goldweed). Prefer refinable plants; also accept Liniment harvest products.
     if StockPiler2.Inventory and StockPiler2.Inventory.ForEachItem and MS.ProductMatches then
         StockPiler2.Inventory.ForEachItem(function(item)
-            if type(item) == "table" and MS.ProductMatches(item, spec) and IsCultivatablePlantItem(item) then
+            if type(item) == "table" and MS.ProductMatches(item, spec) and IsGrowProducerItemForSpec(item) then
                 local uid = tonumber(item.uniqueID) or 0
                 if uid > 0 then
                     bestUid = uid
@@ -2725,6 +2829,7 @@ function StockPiler2.SeedMap.FindPlantUidForSpec(spec)
             end
         end)
         if bestUid > 0 then
+            PlanCacheSet("plantUid", cacheKey, bestUid)
             return bestUid
         end
     end
@@ -2748,7 +2853,7 @@ function StockPiler2.SeedMap.FindPlantUidForSpec(spec)
             itemData = LookupItemData(uid)
         end
         if type(itemData) == "table" then
-            if MS.ProductMatches and MS.ProductMatches(itemData, spec) and IsCultivatablePlantItem(itemData) then
+            if MS.ProductMatches and MS.ProductMatches(itemData, spec) and IsGrowProducerItemForSpec(itemData) then
                 bestUid = uid
             end
             return
@@ -2774,13 +2879,13 @@ function StockPiler2.SeedMap.FindPlantUidForSpec(spec)
                     if type(itemSpec) == "table" then
                         local itemKey = (MS.ProductKey and MS.ProductKey(itemSpec)) or MS.Key(itemSpec)
                         if itemKey == specKey then
-                            if IsCultivatablePlantItem(StockPiler2.Items.AsItemData(uid) or row) then
+                            if IsGrowProducerItemForSpec(StockPiler2.Items.AsItemData(uid) or row) then
                                 bestUid = uid
                             end
                         elseif MS.ProductMatches then
                             local asItem = StockPiler2.Items.AsItemData(uid)
                             if type(asItem) == "table" and MS.ProductMatches(asItem, spec)
-                                and IsCultivatablePlantItem(asItem)
+                                and IsGrowProducerItemForSpec(asItem)
                             then
                                 bestUid = uid
                             end
@@ -2793,6 +2898,7 @@ function StockPiler2.SeedMap.FindPlantUidForSpec(spec)
         end
     end
     if bestUid > 0 then
+        PlanCacheSet("plantUid", cacheKey, bestUid)
         return bestUid
     end
 
@@ -2807,6 +2913,7 @@ function StockPiler2.SeedMap.FindPlantUidForSpec(spec)
         end
     end
     if bestUid > 0 then
+        PlanCacheSet("plantUid", cacheKey, bestUid)
         return bestUid
     end
 
@@ -2821,6 +2928,7 @@ function StockPiler2.SeedMap.FindPlantUidForSpec(spec)
             end
         end
     end
+    PlanCacheSet("plantUid", cacheKey, bestUid)
     return bestUid
 end
 
@@ -3089,6 +3197,10 @@ local function SpecLinkedToGrowOrRefine(spec)
     if plantKey == "" then
         return false
     end
+    local cached, hit = PlanCacheGet("linked", plantKey)
+    if hit then
+        return cached == true
+    end
 
     local function uidMatches(uid)
         uid = tonumber(uid) or 0
@@ -3111,12 +3223,16 @@ local function SpecLinkedToGrowOrRefine(spec)
     local grows = AccountTable("grows")
     for seedKey, plants in pairs(grows) do
         if type(plants) == "table" then
-            local seedUid = tonumber(seedKey) or 0
             for plantUidKey, row in pairs(plants) do
                 if type(row) == "table" and uidMatches(plantUidKey) then
                     local plantUid = tonumber(plantUidKey) or 0
-                    -- Ignore polluted bag-delta rows (e.g. butcher mat under wrong seed).
-                    if seedUid > 0 and HarvestPairAllowed(seedUid, plantUid, {}) then
+                    -- Stored grows uid pairs are authoritative; do not re-gate with
+                    -- empty-opts HarvestPairAllowed (name gate ignored Bloodseed→Powder).
+                    if plantUid > 0
+                        and not (StockPiler2.SeedMap.IsResinUid
+                            and StockPiler2.SeedMap.IsResinUid(plantUid))
+                    then
+                        PlanCacheSet("linked", plantKey, true)
                         return true
                     end
                 end
@@ -3127,6 +3243,7 @@ local function SpecLinkedToGrowOrRefine(spec)
     local refines = AccountTable("refines")
     for plantUidKey, entry in pairs(refines) do
         if type(entry) == "table" and (tonumber(entry.seedUid) or 0) > 0 and uidMatches(plantUidKey) then
+            PlanCacheSet("linked", plantKey, true)
             return true
         end
     end
@@ -3134,9 +3251,11 @@ local function SpecLinkedToGrowOrRefine(spec)
     if StockPiler2.SeedMap.FindSeedInBagsForPlantSpec then
         local bag = StockPiler2.SeedMap.FindSeedInBagsForPlantSpec(spec)
         if type(bag) == "table" and (tonumber(bag.count) or 0) > 0 then
+            PlanCacheSet("linked", plantKey, true)
             return true
         end
     end
+    PlanCacheSet("linked", plantKey, false)
     return false
 end
 
@@ -3281,14 +3400,21 @@ function StockPiler2.SeedMap.IsGrowableSpec(spec)
     if type(spec) ~= "table" or not StockPiler2.MaterialSpec then
         return false
     end
+    local MS = StockPiler2.MaterialSpec
+    local cacheKey = (MS.ProductKey and MS.ProductKey(spec)) or (MS.Key and MS.Key(spec)) or ""
+    local cached, hit = PlanCacheGet("growable", cacheKey)
+    if hit then
+        return cached == true
+    end
     local role = spec.role or ""
-    if role == "container" then
-        return false
+    local result = false
+    if role ~= "container"
+        and not (StockPiler2.SeedMap.IsHarvestByproduct and StockPiler2.SeedMap.IsHarvestByproduct(spec))
+    then
+        result = SpecLinkedToGrowOrRefine(spec) == true
     end
-    if StockPiler2.SeedMap.IsHarvestByproduct(spec) then
-        return false
-    end
-    return SpecLinkedToGrowOrRefine(spec)
+    PlanCacheSet("growable", cacheKey, result)
+    return result
 end
 
 --- Grow-linked mat with no plant→seed refine path (e.g. Blackbell Bloodseed → Powder).
@@ -3296,18 +3422,30 @@ function StockPiler2.SeedMap.IsOneWayHarvestSpec(spec)
     if type(spec) ~= "table" or not StockPiler2.MaterialSpec then
         return false
     end
+    local MS = StockPiler2.MaterialSpec
+    local cacheKey = (MS.ProductKey and MS.ProductKey(spec)) or (MS.Key and MS.Key(spec)) or ""
+    local cached, hit = PlanCacheGet("oneWay", cacheKey)
+    if hit then
+        return cached == true
+    end
+
+    local function finish(result)
+        PlanCacheSet("oneWay", cacheKey, result == true)
+        return result == true
+    end
+
     if StockPiler2.SeedMap.IsHarvestByproduct and StockPiler2.SeedMap.IsHarvestByproduct(spec) then
-        return false
+        return finish(false)
     end
     if not SpecLinkedToGrowOrRefine(spec) then
-        return false
+        return finish(false)
     end
     local plantUid = 0
     if StockPiler2.SeedMap.FindPlantUidForSpec then
         plantUid = tonumber(StockPiler2.SeedMap.FindPlantUidForSpec(spec)) or 0
     end
     if plantUid <= 0 then
-        return false
+        return finish(false)
     end
     local refinable = false
     local plantData = LookupItemData(plantUid)
@@ -3323,14 +3461,11 @@ function StockPiler2.SeedMap.IsOneWayHarvestSpec(spec)
     local entry = refines[tostring(plantUid)]
     local hasRefineSeed = type(entry) == "table" and (tonumber(entry.seedUid) or 0) > 0
     if refinable or hasRefineSeed then
-        return false
+        return finish(false)
     end
-    local seedUids = StockPiler2.SeedMap.GetSeedUidsForPlant(plantUid)
-    if #seedUids > 0 then
-        return true
-    end
-    local seed = StockPiler2.SeedMap.ResolveSeedForSpec and StockPiler2.SeedMap.ResolveSeedForSpec(spec)
-    return type(seed) == "table" and (tonumber(seed.uniqueID) or 0) > 0
+    -- SpecLinked + non-refinable = one-way. Do not call ResolveSeedForSpec here
+    -- (that recursed into bag scans / LearnMapping during every Planner.Build).
+    return finish(true)
 end
 
 function StockPiler2.SeedMap.ResolveSeedForSpec(spec)
@@ -3424,9 +3559,17 @@ function StockPiler2.SeedMap.ForgetUnrelatedLearnedMaps()
                     local plantUid = tonumber(plantKey) or 0
                     local plantData = plantUid > 0 and LookupItemData(plantUid) or nil
                     local resinPlant = StockPiler2.SeedMap.IsResinUid and StockPiler2.SeedMap.IsResinUid(plantUid)
-                    if resinPlant
-                        or (type(plantData) == "table" and type(seedData) == "table"
-                            and not SeedPlantPairRelated(seedData, plantData))
+                    local samples = tonumber(row.samples) or 0
+                    -- Keep sampled / known one-way pairs even when names do not stem-match.
+                    local keepKnown = samples > 0
+                    if resinPlant then
+                        plants[plantKey] = nil
+                        dropped = dropped + 1
+                        D("SeedMap forgot unrelated grow plantUid=" .. tostring(plantUid)
+                            .. " seedUid=" .. tostring(seedUid))
+                    elseif not keepKnown
+                        and type(plantData) == "table" and type(seedData) == "table"
+                        and not SeedPlantPairRelated(seedData, plantData)
                     then
                         plants[plantKey] = nil
                         dropped = dropped + 1
@@ -3450,15 +3593,32 @@ function StockPiler2.SeedMap.ForgetUnrelatedLearnedMaps()
                 local plantData = LookupItemData(plantUid)
                 local seedData = LookupItemData(seedUid)
                 local resinPlant = StockPiler2.SeedMap.IsResinUid and StockPiler2.SeedMap.IsResinUid(plantUid)
-                if resinPlant
-                    or (type(plantData) == "table" and type(seedData) == "table"
-                        and not SeedPlantPairRelated(seedData, plantData))
-                then
+                if resinPlant then
                     entry.seedUid = 0
                     entry.seedKind = nil
                     dropped = dropped + 1
                     D("SeedMap forgot unrelated refine plantUid=" .. tostring(plantUid)
                         .. " seedUid=" .. tostring(seedUid))
+                elseif type(plantData) == "table" and type(seedData) == "table"
+                    and not SeedPlantPairRelated(seedData, plantData)
+                then
+                    -- Keep refine seed if any byproduct was sampled (observed refine).
+                    local keep = false
+                    if type(entry.byproducts) == "table" then
+                        for _, brow in pairs(entry.byproducts) do
+                            if type(brow) == "table" and (tonumber(brow.samples) or 0) > 0 then
+                                keep = true
+                                break
+                            end
+                        end
+                    end
+                    if not keep then
+                        entry.seedUid = 0
+                        entry.seedKind = nil
+                        dropped = dropped + 1
+                        D("SeedMap forgot unrelated refine plantUid=" .. tostring(plantUid)
+                            .. " seedUid=" .. tostring(seedUid))
+                    end
                 end
             end
         end

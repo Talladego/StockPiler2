@@ -237,10 +237,40 @@ end
 function CA.FindSeedSlot(seedUid, seedKey)
     seedUid = tonumber(seedUid) or 0
     seedKey = ToNarrow(seedKey or "")
-    local BA = StockPiler2.BagAdapter
-    if not BA or not BA.FetchLight or not BA.IterateSlots then
-        return 0, nil, CA.CraftingBackpackType()
+    local Perf = StockPiler2.Perf
+    if Perf and Perf.Begin then
+        Perf.Begin("FindSeedSlot")
     end
+
+    local Inv = StockPiler2.Inventory
+    local snapGen = Inv and Inv.GetSnapGen and Inv.GetSnapGen() or 0
+    -- Memoize by snap + seedUid (same seed across plots in a fill wave).
+    if seedUid > 0 and type(CA._seedSlotCache) == "table" then
+        local cached = CA._seedSlotCache[seedUid]
+        if type(cached) == "table" and (tonumber(cached.snapGen) or 0) == snapGen then
+            local slot = tonumber(cached.slot) or 0
+            local bagKey = cached.bagKey
+            local item = nil
+            if slot > 0 and Inv and Inv._ready == true and type(Inv._itemBySlot) == "table"
+                and type(Inv._itemBySlot[bagKey]) == "table"
+            then
+                item = Inv._itemBySlot[bagKey][slot]
+            end
+            if type(item) == "table" and (tonumber(item.uniqueID) or 0) == seedUid then
+                local stack = tonumber(item.stackCount) or tonumber(item.StackCount) or 1
+                if stack > 0 then
+                    if not (Inv.CanUseCraftingItem and not Inv.CanUseCraftingItem(item)) then
+                        if Perf and Perf.End then
+                            Perf.End("FindSeedSlot")
+                        end
+                        return slot, item, BackpackTypeForBagKey(bagKey)
+                    end
+                end
+            end
+            CA._seedSlotCache[seedUid] = nil
+        end
+    end
+
     local bestSlot = 0
     local bestItem = nil
     local bestBagKey = nil
@@ -271,11 +301,39 @@ function CA.FindSeedSlot(seedUid, seedKey)
             end
         end
     end
-    local bags = BA.FetchLight()
-    for i = 1, #bags do
-        BA.IterateSlots(bags[i], consider)
+
+    if Inv and Inv._ready == true and type(Inv._itemBySlot) == "table" then
+        for bagKey, slots in pairs(Inv._itemBySlot) do
+            if type(slots) == "table" then
+                for slot, item in pairs(slots) do
+                    consider(bagKey, tonumber(slot) or 0, item)
+                end
+            end
+        end
+    else
+        local BA = StockPiler2.BagAdapter
+        if BA and BA.FetchLight and BA.IterateSlots then
+            local bags = BA.FetchLight()
+            for i = 1, #bags do
+                BA.IterateSlots(bags[i], consider)
+            end
+        end
+    end
+
+    if Perf and Perf.End then
+        Perf.End("FindSeedSlot")
     end
     if bestSlot > 0 then
+        if seedUid > 0 then
+            if type(CA._seedSlotCache) ~= "table" then
+                CA._seedSlotCache = {}
+            end
+            CA._seedSlotCache[seedUid] = {
+                snapGen = snapGen,
+                slot = bestSlot,
+                bagKey = bestBagKey,
+            }
+        end
         return bestSlot, bestItem, BackpackTypeForBagKey(bestBagKey)
     end
     return 0, nil, CA.CraftingBackpackType()

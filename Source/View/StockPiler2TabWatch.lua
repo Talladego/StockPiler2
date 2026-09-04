@@ -84,14 +84,23 @@ local STATUS_COLORS = {
     potion_stocked = COLOR_OK,
     ready_to_craft = COLOR_OK,
     ready_to_craft_shared = COLOR_WARN,
-    need_crafting_bag = { 180, 200, 255 },
     restocking = COLOR_WARN,
-    need_materials = COLOR_BLOCK,
-    buy_flasks = COLOR_BLOCK,
+    enable_autogrow = COLOR_BLOCK,
+    need_apothecary = COLOR_BLOCK,
+    need_materials = COLOR_BLOCK, -- fallback if old plan cache
     buy_ingredients = COLOR_BLOCK,
     need_seeds = COLOR_WARN,
-    need_seed = COLOR_WARN,
 }
+
+local function CanAutoGrowUi()
+    local Caps = StockPiler2.TradeSkillCaps
+    return Caps and Caps.CanAutoGrow and Caps.CanAutoGrow() == true
+end
+
+local function CanAutoBuyUi()
+    local Caps = StockPiler2.TradeSkillCaps
+    return Caps and Caps.CanAutoBuy and Caps.CanAutoBuy() == true
+end
 
 local function RgbDef(rgb)
     if type(rgb) ~= "table" then
@@ -156,9 +165,11 @@ local function UpdateEnableCheckbox()
     if not DoesWindowExist(ENABLE_WIN) then
         return
     end
+    local can = CanAutoGrowUi()
     syncingUi = true
     ButtonSetCheckButtonFlag(ENABLE_WIN, true)
-    ButtonSetPressedFlag(ENABLE_WIN, type(row) == "table" and row.autoGrowEnabled == true)
+    ButtonSetPressedFlag(ENABLE_WIN, can and type(row) == "table" and row.autoGrowEnabled == true)
+    ButtonSetDisabledFlag(ENABLE_WIN, not can)
     syncingUi = false
 end
 
@@ -167,9 +178,11 @@ local function UpdateAdditivesCheckbox()
     if not DoesWindowExist(ADDITIVES_WIN) then
         return
     end
+    local can = CanAutoGrowUi()
     syncingUi = true
     ButtonSetCheckButtonFlag(ADDITIVES_WIN, true)
-    ButtonSetPressedFlag(ADDITIVES_WIN, type(row) == "table" and row.autoGrowAdditives == true)
+    ButtonSetPressedFlag(ADDITIVES_WIN, can and type(row) == "table" and row.autoGrowAdditives == true)
+    ButtonSetDisabledFlag(ADDITIVES_WIN, not can)
     syncingUi = false
 end
 
@@ -178,9 +191,11 @@ local function UpdateAutoBuyCheckbox()
     if not DoesWindowExist(AUTOBUY_WIN) then
         return
     end
+    local can = CanAutoBuyUi()
     syncingUi = true
     ButtonSetCheckButtonFlag(AUTOBUY_WIN, true)
-    ButtonSetPressedFlag(AUTOBUY_WIN, type(row) == "table" and row.autoBuyEnabled == true)
+    ButtonSetPressedFlag(AUTOBUY_WIN, can and type(row) == "table" and row.autoBuyEnabled == true)
+    ButtonSetDisabledFlag(AUTOBUY_WIN, not can)
     syncingUi = false
 end
 
@@ -189,13 +204,15 @@ local function UpdateSeedBufferEnableCheckbox()
     if not DoesWindowExist(SEED_BUFFER_ENABLE_WIN) then
         return
     end
+    local can = CanAutoGrowUi()
     syncingUi = true
     ButtonSetCheckButtonFlag(SEED_BUFFER_ENABLE_WIN, true)
     local enabled = true
     if type(row) == "table" then
         enabled = row.growSeedBufferEnabled ~= false
     end
-    ButtonSetPressedFlag(SEED_BUFFER_ENABLE_WIN, enabled)
+    ButtonSetPressedFlag(SEED_BUFFER_ENABLE_WIN, can and enabled)
+    ButtonSetDisabledFlag(SEED_BUFFER_ENABLE_WIN, not can)
     syncingUi = false
 end
 
@@ -309,9 +326,11 @@ function StockPiler2TabWatch.UpdateRows()
             ApplyStatusColor(rowName .. "Status", data.statusKey)
             local autoGrowWin = rowName .. "AutoGrow"
             if DoesWindowExist(autoGrowWin) then
+                local can = CanAutoGrowUi()
                 syncingUi = true
                 ButtonSetCheckButtonFlag(autoGrowWin, true)
-                ButtonSetPressedFlag(autoGrowWin, data.autoGrow == true)
+                ButtonSetPressedFlag(autoGrowWin, can and data.autoGrow == true)
+                ButtonSetDisabledFlag(autoGrowWin, not can)
                 syncingUi = false
             end
             -- Target chip always white (same as header chips)
@@ -386,6 +405,10 @@ function StockPiler2TabWatch.OnToggleEnabled()
     if syncingUi then
         return
     end
+    if not CanAutoGrowUi() then
+        UpdateEnableCheckbox()
+        return
+    end
     local row = CharRow()
     if type(row) ~= "table" then
         return
@@ -408,6 +431,10 @@ function StockPiler2TabWatch.OnToggleAdditives()
     if syncingUi then
         return
     end
+    if not CanAutoGrowUi() then
+        UpdateAdditivesCheckbox()
+        return
+    end
     local row = CharRow()
     if type(row) ~= "table" then
         return
@@ -420,6 +447,10 @@ function StockPiler2TabWatch.OnToggleSeedBuffer()
     if syncingUi then
         return
     end
+    if not CanAutoGrowUi() then
+        UpdateSeedBufferEnableCheckbox()
+        return
+    end
     local row = CharRow()
     if type(row) ~= "table" then
         return
@@ -430,6 +461,10 @@ end
 
 function StockPiler2TabWatch.OnToggleAutoBuy()
     if syncingUi then
+        return
+    end
+    if not CanAutoBuyUi() then
+        UpdateAutoBuyCheckbox()
         return
     end
     local row = CharRow()
@@ -476,6 +511,13 @@ local function AdjustChip(field, delta, lo, hi)
     row[field] = n
     BumpWatch()
     StockPiler2TabWatch.Refresh()
+    if field == "autoBuyReserveGold" or field == "autoBuyBudgetGold" then
+        if StockPiler2.Buy and StockPiler2.Buy.ClearMoneyGateStop then
+            StockPiler2.Buy.ClearMoneyGateStop(field)
+        elseif StockPiler2.Scheduler and StockPiler2.Scheduler.WakeAutoBuy then
+            StockPiler2.Scheduler.WakeAutoBuy()
+        end
+    end
 end
 
 function StockPiler2TabWatch.OnSeedBufferLButtonUp(flags)
@@ -504,6 +546,10 @@ end
 
 function StockPiler2TabWatch.OnToggleRowAutoGrow()
     if syncingUi then
+        return
+    end
+    if not CanAutoGrowUi() then
+        StockPiler2TabWatch.UpdateRows()
         return
     end
     local data, clickWin = RowDataFromActiveChild()
@@ -562,11 +608,33 @@ function StockPiler2TabWatch.OnTargetRButtonUp(flags)
 end
 
 function StockPiler2TabWatch.OnMouseOverEnabled()
+    if not CanAutoGrowUi() then
+        local Caps = StockPiler2.TradeSkillCaps
+        local gather = Caps and Caps.GatheringLabel and Caps.GatheringLabel()
+        local text = L"AutoGrow requires Cultivation."
+        if gather ~= nil and gather ~= L"Cultivation" then
+            text = text
+                .. L" This character gathers via "
+                .. gather
+                .. L" — plant mats must be bought or grown on a Cultivator."
+        end
+        Tooltips.CreateTextOnlyTooltip(SystemData.ActiveWindow.name, text)
+        Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_RIGHT)
+        return
+    end
     Tooltips.CreateTextOnlyTooltip(SystemData.ActiveWindow.name, L"Master AutoGrow switch. Per-potion AutoGrow boxes also need to be checked.")
     Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_RIGHT)
 end
 
 function StockPiler2TabWatch.OnMouseOverAdditives()
+    if not CanAutoGrowUi() then
+        Tooltips.CreateTextOnlyTooltip(
+            SystemData.ActiveWindow.name,
+            L"Additives require Cultivation (AutoGrow)."
+        )
+        Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_RIGHT)
+        return
+    end
     Tooltips.CreateTextOnlyTooltip(
         SystemData.ActiveWindow.name,
         L"Auto-apply best Soil / Water / Nutrient from the crafting bag at the matching grow stage."
@@ -575,14 +643,34 @@ function StockPiler2TabWatch.OnMouseOverAdditives()
 end
 
 function StockPiler2TabWatch.OnMouseOverAutoBuy()
-    Tooltips.CreateTextOnlyTooltip(
-        SystemData.ActiveWindow.name,
-        L"While an NPC vendor is open, buy non-growable Watch shortages (flasks, butcher mats). Growables stay with AutoGrow. Independent of AutoGrow."
-    )
+    if not CanAutoBuyUi() then
+        Tooltips.CreateTextOnlyTooltip(
+            SystemData.ActiveWindow.name,
+            L"AutoBuy requires Cultivation or Apothecary. It only buys those craft-mat types from an open NPC vendor."
+        )
+        Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_RIGHT)
+        return
+    end
+    local text = L"While an NPC vendor is open, buy Cultivating and Apothecary craft-mat shortages for Watch targets."
+    if CanAutoGrowUi() then
+        text = text .. L" Growable plants stay with AutoGrow."
+    else
+        text = text .. L" Without Cultivation, plant and seed shortages can be bought at vendors."
+    end
+    text = text .. L" Independent of AutoGrow. Non-cult/apo store items are skipped."
+    Tooltips.CreateTextOnlyTooltip(SystemData.ActiveWindow.name, text)
     Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_RIGHT)
 end
 
 function StockPiler2TabWatch.OnMouseOverSeedBufferEnable()
+    if not CanAutoGrowUi() then
+        Tooltips.CreateTextOnlyTooltip(
+            SystemData.ActiveWindow.name,
+            L"Seed buffer requires Cultivation (AutoGrow)."
+        )
+        Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_TOP)
+        return
+    end
     Tooltips.CreateTextOnlyTooltip(
         SystemData.ActiveWindow.name,
         L"Keep a seed buffer for watched potion ingredients (refine, buffer-grow, surplus). Grow is not done while buffer is short."
@@ -637,14 +725,15 @@ local function CollectSeedBufferTooltipData()
             local seedUid = tonumber(line.seedUid) or 0
             local specKey = tostring(line.specKey or seedUid or i)
             if byKey[specKey] == nil then
-                local live, planned = 0, 0
+                local live, ground, planned, credit = 0, 0, 0, 0
                 if Refine and Refine.GetSeedBudgetForSpec then
                     local budget = Refine.GetSeedBudgetForSpec(spec, seedUid)
                     live = tonumber(budget and budget.live) or 0
+                    ground = tonumber(budget and budget.ground) or 0
                     planned = tonumber(budget and budget.outstanding) or 0
+                    credit = tonumber(budget and budget.credit) or (live + ground + planned)
                 end
-                local total = live + planned
-                local shortBy = math.max(0, (tonumber(buffer) or 0) - total)
+                local shortBy = math.max(0, (tonumber(buffer) or 0) - credit)
                 local name = SeedSpecLabel(spec)
                 byKey[specKey] = {
                     key = specKey,
@@ -652,8 +741,9 @@ local function CollectSeedBufferTooltipData()
                     seedUid = seedUid,
                     name = name,
                     live = live,
+                    ground = ground,
                     planned = planned,
-                    total = total,
+                    total = credit,
                     shortBy = shortBy,
                 }
                 rows[#rows + 1] = byKey[specKey]
@@ -748,9 +838,13 @@ function StockPiler2TabWatch.OnMouseOverSeedBuffer()
         local maxWatched = 6
         for i = 1, math.min(#data.watched, maxWatched) do
             local w = data.watched[i]
+            local liveText = towstring(tostring(w.live))
+            if (tonumber(w.ground) or 0) > 0 then
+                liveText = liveText .. L"+" .. towstring(tostring(w.ground)) .. L"g"
+            end
             local line = ToW(w.name)
                 .. L": live "
-                .. towstring(tostring(w.live))
+                .. liveText
                 .. L" + planned "
                 .. towstring(tostring(w.planned))
                 .. L" / "
@@ -892,6 +986,7 @@ function StockPiler2TabWatch.OnMouseOverIcon()
         StockPiler2RecipeTooltip.ShowPotionIconTooltip(SystemData.ActiveWindow.name, {
             name = data.name or L"Potion",
             uniqueID = uid,
+            iconNum = data.iconNum,
             itemData = itemData,
             iLevel = iLevel,
             effectKey = effectKey,
@@ -930,6 +1025,8 @@ local function GrowingNoteKind(notes)
     end
     if string.find(n, "buy seeds", 1, true)
         or string.find(n, "buy plants", 1, true)
+        or string.find(n, "autogrow off", 1, true)
+        or string.find(n, "needs cultivation", 1, true)
     then
         return "negative"
     end
@@ -962,6 +1059,12 @@ local function TitleCaseStatusNote(notes)
     end
     if lower == "needs planting" then
         return L"Needs planting"
+    end
+    if lower == "needs cultivation" then
+        return L"Needs Cultivation"
+    end
+    if lower == "autogrow off for this watch" then
+        return L"AutoGrow off for this watch"
     end
     -- Capitalize first character of the display string when it is ASCII.
     local first = string.sub(narrow, 1, 1)
@@ -1100,6 +1203,39 @@ function StockPiler2TabWatch.OnMouseOverStatus()
                         .. L" is a best case; Potent / other rarities do not count."
                 )
             end
+            if data.statusKey == "enable_autogrow" then
+                rows[#rows + 1] = {
+                    text = L"Enable AutoGrow for this watch to plant short materials.",
+                    kind = "warning",
+                    color = RgbDef(COLOR_BLOCK),
+                }
+            elseif data.statusKey == "need_apothecary" then
+                rows[#rows + 1] = {
+                    text = L"Only Apothecaries can brew potions.",
+                    kind = "warning",
+                    color = RgbDef(COLOR_BLOCK),
+                }
+            elseif data.statusKey == "buy_ingredients" and not CanAutoGrowUi() then
+                local st = string.lower(
+                    StockPiler2.ToNarrow and StockPiler2.ToNarrow(data.statusText) or tostring(data.statusText or "")
+                )
+                if not string.find(st, "flask", 1, true) then
+                    local Caps = StockPiler2.TradeSkillCaps
+                    local text =
+                        L"Cultivation is required to AutoGrow. Buy plants or seeds, or use a Cultivator character."
+                    local gather = Caps and Caps.GatheringLabel and Caps.GatheringLabel()
+                    if gather ~= nil and gather ~= L"Cultivation" then
+                        text = L"This character gathers via "
+                            .. gather
+                            .. L" — plant mats must be bought or grown on a Cultivator."
+                    end
+                    rows[#rows + 1] = {
+                        text = text,
+                        kind = "warning",
+                        color = RgbDef(COLOR_BLOCK),
+                    }
+                end
+            end
             local RS = StockPiler2.RecipeSpec
             local uid = tonumber(data.uniqueID) or 0
             if RS and RS.ExpectedCraftsForDeficit and type(recipe) == "table" then
@@ -1182,7 +1318,10 @@ function StockPiler2TabWatch.OnMouseOverStatus()
                         notes = Grow.GrowingNotesForSpec(entry.spec) or L""
                     end
                     if notes == L"" then
-                        if data.autoGrow == true then
+                        if not CanAutoGrowUi() then
+                            notes = L"Needs Cultivation"
+                            haveColor = colorBlock
+                        elseif data.autoGrow == true then
                             -- "Needs planting" is misleading when the seed-line itself is exhausted.
                             -- In that case the only way forward is to buy more seeds/plants.
                             local seedUid = 0

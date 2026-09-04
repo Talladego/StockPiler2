@@ -2,7 +2,7 @@
 
 <ModuleFile xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 
-    <UiMod name="StockPiler2" version="0.3.0" date="2026-09-03">
+    <UiMod name="StockPiler2" version="0.4.13" date="2026-09-04">
 
         <Author name="Talladego" email="" />
 
@@ -25,6 +25,8 @@
             <Dependency name="EA_ChatWindow" />
 
             <Dependency name="EASystem_Tooltips" />
+
+            <Dependency name="EA_ActionBars" />
 
             <Dependency name="LibSlash" optional="true" />
 
@@ -51,6 +53,8 @@
             <File name="Source/Adapters/BagAdapter.lua" />
 
             <File name="Source/Adapters/CultivatorAdapter.lua" />
+
+            <File name="Source/Adapters/TradeSkillCaps.lua" />
 
             <File name="Source/Adapters/ApothecaryAdapter.lua" />
 
@@ -111,6 +115,8 @@
             <File name="Source/Buy/Buy.lua" />
 
             <File name="Source/Executors/BuyExecutor.lua" />
+
+            <File name="Source/Macro/Macro.lua" />
 
             <File name="Source/View/StockPiler2Catalog.lua" />
 

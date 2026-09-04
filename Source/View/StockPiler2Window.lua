@@ -54,17 +54,11 @@ function StockPiler2Window.RefreshFooterButtons()
     if DoesWindowExist(CLEAR_WATCHES_WIN) then
         WindowSetShowing(CLEAR_WATCHES_WIN, onPotions)
     end
-    local brewBlocksHarvest = StockPiler2.Brew
-        and StockPiler2.Brew.BlocksHarvest
-        and StockPiler2.Brew.BlocksHarvest() == true
     if DoesWindowExist(HARVEST_WIN) then
         WindowSetShowing(HARVEST_WIN, onWatch)
         if onWatch then
-            local ready = 0
-            if StockPiler2.Grow and StockPiler2.Grow.CountReadyHarvestPlots then
-                ready = tonumber(StockPiler2.Grow.CountReadyHarvestPlots()) or 0
-            end
-            local canHarvest = ready > 0 and not brewBlocksHarvest
+            local canHarvest = StockPiler2.Grow and StockPiler2.Grow.CanHarvestNow
+                and StockPiler2.Grow.CanHarvestNow() == true
             ButtonSetDisabledFlag(HARVEST_WIN, not canHarvest)
             -- Disabled buttons still fire gameactionbutton if bound — bind/clear with ready state.
             if canHarvest then
@@ -81,21 +75,13 @@ function StockPiler2Window.RefreshFooterButtons()
     if DoesWindowExist(BREW_WIN) then
         WindowSetShowing(BREW_WIN, onWatch)
         if onWatch then
-            local canBrew = false
-            local session = StockPiler2.Brew and StockPiler2.Brew.GetSession and StockPiler2.Brew.GetSession()
-            local phase = session and session.phase
-            if phase == "loading" then
-                canBrew = false
-            elseif phase == "loaded" then
-                canBrew = true
-            elseif StockPiler2.Brew and StockPiler2.Brew.HasReadyToCraft
-                and StockPiler2.Brew.HasReadyToCraft() == true
-                and StockPiler2.Brew.CanStartBrewLoad
-            then
-                canBrew = StockPiler2.Brew.CanStartBrewLoad() == true
-            end
+            local canBrew = StockPiler2.Brew and StockPiler2.Brew.CanBrewNow
+                and StockPiler2.Brew.CanBrewNow() == true
             ButtonSetDisabledFlag(BREW_WIN, not canBrew)
         end
+    end
+    if StockPiler2.Macro and StockPiler2.Macro.SyncEnabledState then
+        StockPiler2.Macro.SyncEnabledState()
     end
 end
 
@@ -272,12 +258,18 @@ function StockPiler2Window.OnMouseOverClearWatches()
 end
 
 function StockPiler2Window.OnHarvestPrepare()
-    local ready = 0
-    if StockPiler2.Grow and StockPiler2.Grow.CountReadyHarvestPlots then
-        ready = tonumber(StockPiler2.Grow.CountReadyHarvestPlots()) or 0
-    end
-    if ready <= 0 then
-        return
+    if StockPiler2.Grow and StockPiler2.Grow.CanHarvestNow then
+        if StockPiler2.Grow.CanHarvestNow() ~= true then
+            return
+        end
+    else
+        local ready = 0
+        if StockPiler2.Grow and StockPiler2.Grow.CountReadyHarvestPlots then
+            ready = tonumber(StockPiler2.Grow.CountReadyHarvestPlots()) or 0
+        end
+        if ready <= 0 then
+            return
+        end
     end
     if DoesWindowExist(HARVEST_WIN) and ButtonGetDisabledFlag(HARVEST_WIN) == true then
         return

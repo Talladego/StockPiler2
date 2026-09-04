@@ -337,6 +337,24 @@ function Brew.CanStartBrewLoad()
     return true
 end
 
+--- Same gate as Watch footer Brew button (enabled when click would do useful work).
+function Brew.CanBrewNow()
+    local session = GetSession()
+    local phase = session and session.phase
+    if phase == "loading" then
+        return false
+    end
+    if phase == "loaded" then
+        return true
+    end
+    if Brew.HasReadyToCraft and Brew.HasReadyToCraft() == true
+        and Brew.CanStartBrewLoad and Brew.CanStartBrewLoad() == true
+    then
+        return true
+    end
+    return false
+end
+
 ----------------------------------------------------------------
 -- Bag / load steps
 ----------------------------------------------------------------
@@ -2095,7 +2113,7 @@ function Brew.ShowBrewTooltip(anchorWindow, anchor, liveRefresh)
     end
     Tooltips.CreateTextOnlyTooltip(anchorWindow)
     local heading = (Tooltips and Tooltips.COLOR_HEADING) or { r = 255, g = 204, b = 102 }
-    Tooltips.SetTooltipText(1, 1, L"<icon00529> StockPiler2 Brew")
+    Tooltips.SetTooltipText(1, 1, L"<icon10985> StockPiler2 Brew")
     if Tooltips.SetTooltipColor then
         Tooltips.SetTooltipColor(1, 1, heading.r or 255, heading.g or 204, heading.b or 102)
     end
@@ -2208,7 +2226,7 @@ function Brew.ShowRowBrewTooltip(anchorWindow, row, anchor, liveRefresh)
     end
     Tooltips.CreateTextOnlyTooltip(anchorWindow)
     local heading = (Tooltips and Tooltips.COLOR_HEADING) or { r = 255, g = 204, b = 102 }
-    Tooltips.SetTooltipText(1, 1, L"<icon00529> StockPiler2 Brew")
+    Tooltips.SetTooltipText(1, 1, L"<icon10985> StockPiler2 Brew")
     if Tooltips.SetTooltipColor then
         Tooltips.SetTooltipColor(1, 1, heading.r or 255, heading.g or 204, heading.b or 102)
     end

@@ -19,6 +19,25 @@ local EFFECT_TO_PB = {
     heal = "HEAL",
     hot = "REGEN",
     ap = "AP",
+    -- Liniment / hybrid PotionBar types (Data.lua 21–38).
+    hywoucrit = "WARBLOOD",
+    hywoumelee = "WARDEMISE",
+    hywourcrit = "WARFERVOR",
+    hywoumcrit = "WARGENIUS",
+    hywoustr = "WARHUNGER",
+    hywouheal = "WARMERCY",
+    hywouinit = "BOUNDLESSSIGHT",
+    hyhpregencritdmg = "IMMUTABLEDEFIANCE",
+    hyresist = "INEXORABLEAEGIS",
+    hywillheal = "INSPIRATIONALWINDS",
+    hytounocrit = "PEERLESSDEFENSE",
+    hywsarmpen = "QUICKENEDBLADES",
+    hytoucrit = "SAVAGEVIGOR",
+    hywsnocrit = "SWIFTTERGIVERSATION",
+    hyaccrcrit = "ETERNALHUNT",
+    hystrmelee = "INEVITABLETEMPEST",
+    hyintmcrit = "TOLLINGBELL",
+    hystrheal = "UNFETTEREDZEAL",
 }
 
 local PB_TO_EFFECT = {}
@@ -92,6 +111,27 @@ local function ClassifyFromDescription(name, description)
         then
             return "hywoucrit"
         end
+        if string.find(descLower, "initiative", 1, true) then
+            return "hywouinit"
+        end
+        if string.find(descLower, "healing", 1, true)
+            or string.find(descLower, "heal", 1, true)
+        then
+            return "hywouheal"
+        end
+        if string.find(descLower, "strength", 1, true) then
+            return "hywoustr"
+        end
+        if string.find(descLower, "armor pen", 1, true)
+            or string.find(descLower, "armour pen", 1, true)
+        then
+            return "hywouarmpen"
+        end
+        if string.find(descLower, "melee power", 1, true)
+            or string.find(descLower, "melee", 1, true)
+        then
+            return "hywoumelee"
+        end
     end
     if string.find(descLower, "ballistic", 1, true)
         and string.find(descLower, "ranged", 1, true)
@@ -99,6 +139,44 @@ local function ClassifyFromDescription(name, description)
             or string.find(descLower, "critical", 1, true))
     then
         return "hyaccrcrit"
+    end
+    if string.find(descLower, "weapon skill", 1, true)
+        or string.find(descLower, "weaponskill", 1, true)
+    then
+        if string.find(descLower, "armor pen", 1, true)
+            or string.find(descLower, "armour pen", 1, true)
+        then
+            return "hywsarmpen"
+        end
+        if string.find(descLower, "crit", 1, true)
+            or string.find(descLower, "critical", 1, true)
+        then
+            return "hywsnocrit"
+        end
+    end
+    if string.find(descLower, "toughness", 1, true)
+        and (string.find(descLower, "crit", 1, true)
+            or string.find(descLower, "critical", 1, true))
+    then
+        if string.find(descLower, "chance", 1, true)
+            or string.find(descLower, "reduced", 1, true)
+        then
+            return "hytounocrit"
+        end
+        return "hytoucrit"
+    end
+    if (string.find(descLower, "health regen", 1, true)
+            or string.find(descLower, "healthregen", 1, true)
+            or string.find(descLower, "regenerat", 1, true))
+        and (string.find(descLower, "crit", 1, true)
+            or string.find(descLower, "critical", 1, true))
+    then
+        return "hyhpregencritdmg"
+    end
+    if string.find(descLower, "resist", 1, true)
+        and not string.find(descLower, "crit", 1, true)
+    then
+        return "hyresist"
     end
 
     if string.find(description, "Instantly restores %d+") then
@@ -138,6 +216,69 @@ local function ClassifyFromDescription(name, description)
         if string.find(description, "Armor") then
             return "armor"
         end
+    end
+    return nil
+end
+
+--- Name fallback when ability text is empty (liniment titles).
+local function ClassifyFromPotionName(name)
+    local n = string.lower(ToNarrow(name))
+    if n == "" then
+        return nil
+    end
+    if string.find(n, "tergiversation", 1, true) then
+        return "hywsnocrit"
+    end
+    if string.find(n, "immutable defiance", 1, true) then
+        return "hyhpregencritdmg"
+    end
+    if string.find(n, "peerless defense", 1, true) then
+        return "hytounocrit"
+    end
+    if string.find(n, "quickened blades", 1, true) then
+        return "hywsarmpen"
+    end
+    if string.find(n, "inexorable aegis", 1, true) then
+        return "hyresist"
+    end
+    if string.find(n, "war: hunger", 1, true) or string.find(n, "war hunger", 1, true) then
+        return "hywoustr"
+    end
+    if string.find(n, "war: mercy", 1, true) or string.find(n, "war mercy", 1, true) then
+        return "hywouheal"
+    end
+    if string.find(n, "blood archer", 1, true) or string.find(n, "war fervor", 1, true) then
+        return "hywourcrit"
+    end
+    if string.find(n, "boundless sight", 1, true) then
+        return "hywouinit"
+    end
+    if string.find(n, "eternal hunt", 1, true) then
+        return "hyaccrcrit"
+    end
+    if string.find(n, "savage vigor", 1, true) then
+        return "hytoucrit"
+    end
+    if string.find(n, "inspirational winds", 1, true) then
+        return "hywillheal"
+    end
+    if string.find(n, "inevitable tempest", 1, true) then
+        return "hystrmelee"
+    end
+    if string.find(n, "tolling bell", 1, true) then
+        return "hyintmcrit"
+    end
+    if string.find(n, "unfettered zeal", 1, true) then
+        return "hystrheal"
+    end
+    if string.find(n, "war: blood", 1, true) or string.find(n, "war blood", 1, true) then
+        return "hywoucrit"
+    end
+    if string.find(n, "war: demise", 1, true) or string.find(n, "war demise", 1, true) then
+        return "hywoumelee"
+    end
+    if string.find(n, "war: genius", 1, true) or string.find(n, "war genius", 1, true) then
+        return "hywoumcrit"
     end
     return nil
 end
@@ -226,6 +367,7 @@ function Classify.GetEffectKey(itemData)
     end
 
     return ClassifyFromDescription(ToNarrow(itemData.name), description)
+        or ClassifyFromPotionName(itemData.name)
 end
 
 local function ParseStatsFromDescription(description)

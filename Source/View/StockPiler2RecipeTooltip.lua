@@ -379,8 +379,25 @@ local EFFECT_FULL_LABELS = {
 --- Build placeholder rows when CreateItemTooltip cannot run (no Use-bonus in bags).
 function StockPiler2RecipeTooltip.BuildPotionPlaceholderRows(summary)
     summary = type(summary) == "table" and summary or {}
+    local name = summary.name or L"Potion"
+    local iconNum = tonumber(summary.iconNum) or 0
+    if iconNum <= 0 and type(summary.itemData) == "table" then
+        iconNum = tonumber(summary.itemData.iconNum) or 0
+    end
+    if iconNum <= 0 then
+        local uid = tonumber(summary.uniqueID) or 0
+        if uid > 0 and StockPiler2.Items and StockPiler2.Items.AsItemData then
+            local item = StockPiler2.Items.AsItemData(uid)
+            if type(item) == "table" then
+                iconNum = tonumber(item.iconNum) or 0
+            end
+        end
+    end
+    if iconNum > 0 then
+        name = towstring(string.format("<icon%05d>", iconNum)) .. L" " .. name
+    end
     local rows = {
-        { text = summary.name or L"Potion", kind = "title" },
+        { text = name, kind = "title" },
         { text = L"Potion", kind = "meta" },
     }
     local iLevel = tonumber(summary.iLevel) or 0

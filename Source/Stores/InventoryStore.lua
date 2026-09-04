@@ -491,7 +491,8 @@ function Inv.CanUseUniqueId(uid)
     if type(sample) == "table" then
         return Inv.CanUseCraftingItem(sample)
     end
-    return true
+    -- No sample: do not assume usable (skill-gated seeds were planted then failed).
+    return false
 end
 
 ----------------------------------------------------------------

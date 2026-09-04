@@ -62,6 +62,10 @@ local function LogBuyJobLines(jobs, force)
 end
 
 function Buy.IsEnabled()
+    local Caps = StockPiler2.TradeSkillCaps
+    if Caps and Caps.CanAutoBuy and Caps.CanAutoBuy() ~= true then
+        return false
+    end
     if StockPiler2.Watch and StockPiler2.Watch.IsAutoBuyEnabled then
         return StockPiler2.Watch.IsAutoBuyEnabled() == true
     end
@@ -109,6 +113,10 @@ end
 ----------------------------------------------------------------
 
 local function TradeSkillIds()
+    local Caps = StockPiler2.TradeSkillCaps
+    if Caps and Caps.CultivationId and Caps.ApothecaryId then
+        return Caps.CultivationId(), Caps.ApothecaryId()
+    end
     local cult = 3
     local apo = 4
     if GameData and GameData.TradeSkills then
@@ -118,13 +126,39 @@ local function TradeSkillIds()
     return cult, apo
 end
 
-local function IsCraftTradeSkill(item)
+--- Vendor rows often have tradeSkill=0; cultivationType still marks Cultivating mats.
+local function InferStoreTradeSkill(item)
     local ts = tonumber(item and item.tradeSkill) or 0
+    if ts > 0 then
+        return ts
+    end
+    if (tonumber(item and item.cultivationType) or 0) ~= 0 then
+        local cult = TradeSkillIds()
+        return cult
+    end
+    return 0
+end
+
+local function IsCraftTradeSkill(item)
+    local ts = InferStoreTradeSkill(item)
+    local Caps = StockPiler2.TradeSkillCaps
+    if Caps and Caps.IsPotionCraftTradeSkill then
+        return Caps.IsPotionCraftTradeSkill(ts) == true
+    end
     if ts <= 0 then
         return false
     end
     local cult, apo = TradeSkillIds()
     return ts == cult or ts == apo
+end
+
+local function PlayerCanBuyItemTradeSkill(item)
+    local ts = InferStoreTradeSkill(item)
+    local Caps = StockPiler2.TradeSkillCaps
+    if Caps and Caps.CanBuyTradeSkill then
+        return Caps.CanBuyTradeSkill(ts) == true
+    end
+    return IsCraftTradeSkill(item)
 end
 
 local function VendorItemsTable()
@@ -207,7 +241,10 @@ end
 function Buy.CollectBuyJobs()
     local snapGen = StockPiler2.Inventory and tonumber(StockPiler2.Inventory.GetSnapGen and StockPiler2.Inventory.GetSnapGen())
         or tonumber(StockPiler2.Inventory and StockPiler2.Inventory._snapGen) or 0
-    if type(Buy._jobsCache) == "table" and Buy._jobsSnapGen == snapGen then
+    local Caps = StockPiler2.TradeSkillCaps
+    local skillHash = Caps and Caps.LevelsHash and Caps.LevelsHash() or ""
+    local cacheKey = tostring(snapGen) .. ":" .. skillHash
+    if type(Buy._jobsCache) == "table" and Buy._jobsSnapGen == cacheKey then
         return Buy._jobsCache
     end
     local jobs = {}
@@ -215,7 +252,7 @@ function Buy.CollectBuyJobs()
         jobs = StockPiler2.Planner.CollectVendorBuyJobs() or {}
     end
     Buy._jobsCache = jobs
-    Buy._jobsSnapGen = snapGen
+    Buy._jobsSnapGen = cacheKey
     return jobs
 end
 
@@ -249,6 +286,11 @@ function Buy.DumpBuyPlan(opts)
     else
         LogBuyJobLines(jobs, force)
     end
+    if Buy.DumpOpenStoreRawRows then
+        Buy.DumpOpenStoreRawRows(force)
+    elseif Buy.DumpOpenStoreCultApoRows then
+        Buy.DumpOpenStoreCultApoRows(force)
+    end
     EmitBuyTrace("=== end buy plan ===", force)
 end
 
@@ -281,6 +323,7 @@ local function PlayerCanUseStoreItem(item)
     return canUse == true
 end
 
+--- Cheap: vendor scan must not call SeedMap / MaterialSpec (that froze buyplan).
 local function IsGrowablePlantItem(item)
     if type(item) ~= "table" then
         return false
@@ -288,23 +331,127 @@ local function IsGrowablePlantItem(item)
     local cult = tonumber(item.cultivationType) or 0
     local seed = (GameData and GameData.CultivationTypes and GameData.CultivationTypes.SEED) or 1
     local spore = (GameData and GameData.CultivationTypes and GameData.CultivationTypes.SPORE) or 5
-    if cult == seed or cult == spore then
-        return true
+    return cult == seed or cult == spore
+end
+
+local function TradeSkillDumpLabel(tradeSkillId)
+    tradeSkillId = tonumber(tradeSkillId) or 0
+    local cult, apo = TradeSkillIds()
+    if tradeSkillId == cult then
+        return "cult"
     end
-    local MS = StockPiler2.MaterialSpec
-    if not (MS and MS.FromItemDataCached) then
-        return false
+    if tradeSkillId == apo then
+        return "apo"
     end
-    local spec = MS.FromItemDataCached(item, nil)
-    if type(spec) ~= "table" then
-        return false
+    return tostring(tradeSkillId)
+end
+
+local function FirstItemKeyList(item)
+    if type(item) ~= "table" then
+        return ""
     end
-    if StockPiler2.SeedMap and StockPiler2.SeedMap.IsGrowableSpec
-        and StockPiler2.SeedMap.IsGrowableSpec(spec)
-    then
-        return true
+    local names = {}
+    for k, _ in pairs(item) do
+        if type(k) == "string" then
+            names[#names + 1] = k
+        end
     end
-    return MS.IsGrowable and MS.IsGrowable(spec) == true
+    table.sort(names)
+    local maxKeys = 24
+    local out = ""
+    for i = 1, math.min(#names, maxKeys) do
+        if i > 1 then
+            out = out .. ","
+        end
+        out = out .. names[i]
+    end
+    if #names > maxKeys then
+        out = out .. ",+" .. tostring(#names - maxKeys)
+    end
+    return out
+end
+
+--- Debug: sample the open NPC store (unfiltered). Keep this cheap — chat-print of 170 rows disconnects.
+function Buy.DumpOpenStoreRawRows(force)
+    force = force == true
+    local VA = StockPiler2.VendorAdapter
+    if not VA or not VA.IsStoreOpen or VA.IsStoreOpen() ~= true then
+        EmitBuyTrace("--- store raw (0) ---", force)
+        EmitBuyTrace("  (store closed)", force)
+        return
+    end
+    if VA.IsBuybackView and VA.IsBuybackView() then
+        EmitBuyTrace("--- store raw (0) ---", force)
+        EmitBuyTrace("  (buyback view — no sell list)", force)
+        return
+    end
+    local list = VA.StoreRows and VA.StoreRows() or nil
+    if type(list) ~= "table" then
+        EmitBuyTrace("--- store raw (0) ---", force)
+        EmitBuyTrace("  (no store rows type=" .. type(list) .. ")", force)
+        return
+    end
+    local rows = {}
+    local skipped = 0
+    for k, item in pairs(list) do
+        if type(item) ~= "table" then
+            skipped = skipped + 1
+        else
+            rows[#rows + 1] = { key = k, item = item }
+        end
+    end
+    table.sort(rows, function(a, b)
+        local sa = tonumber(a.item.slotNum) or 0
+        local sb = tonumber(b.item.slotNum) or 0
+        if sa ~= sb then
+            return sa < sb
+        end
+        return (tonumber(a.item.uniqueID) or 0) < (tonumber(b.item.uniqueID) or 0)
+    end)
+    EmitBuyTrace(string.format(
+        "--- store raw (%d) skippedNonTable=%d ---",
+        #rows,
+        skipped
+    ), force)
+    if #rows == 0 then
+        EmitBuyTrace("  (store table empty of item rows)", force)
+        return
+    end
+    EmitBuyTrace("  keys=" .. FirstItemKeyList(rows[1].item), force)
+    local maxLines = 20
+    for i = 1, math.min(#rows, maxLines) do
+        local wrap = rows[i]
+        local item = wrap.item
+        local ts = tonumber(item.tradeSkill) or 0
+        local inferred = InferStoreTradeSkill(item)
+        local craftingSkill = tonumber(item.craftingSkillRequirement) or 0
+        local cultType = tonumber(item.cultivationType) or 0
+        local itemType = tonumber(item.type) or tonumber(item.itemType) or 0
+        local canbuy = item.canbuy ~= false and 1 or 0
+        EmitBuyTrace(string.format(
+            "  #%d slot=%s uid=%s ts=%s inf=%s(%s) req=%s ct=%s type=%s cost=%s canbuy=%d name=%s",
+            i,
+            tostring(tonumber(item.slotNum) or 0),
+            tostring(tonumber(item.uniqueID) or tonumber(item.id) or 0),
+            tostring(ts),
+            tostring(inferred),
+            TradeSkillDumpLabel(inferred),
+            tostring(craftingSkill),
+            tostring(cultType),
+            tostring(itemType),
+            tostring(tonumber(item.cost) or 0),
+            canbuy,
+            ToNarrow(item.name)
+        ), force)
+    end
+    if #rows > maxLines then
+        EmitBuyTrace("  ... +" .. tostring(#rows - maxLines) .. " more", force)
+    end
+end
+
+--- Debug: list Cultivating + Apothecary craft mats on the open NPC store.
+function Buy.DumpOpenStoreCultApoRows(force)
+    Buy.DumpOpenStoreRawRows(force)
 end
 
 local function IsHarvestByproductItem(item)
@@ -323,7 +470,29 @@ local function ItemMatchesJob(item, job)
     if type(item) ~= "table" or type(job) ~= "table" then
         return false
     end
-    if IsGrowablePlantItem(item) or IsHarvestByproductItem(item) then
+    local Caps = StockPiler2.TradeSkillCaps
+    local ts = InferStoreTradeSkill(item)
+    if ts > 0 then
+        if Caps and Caps.IsPotionCraftTradeSkill and Caps.IsPotionCraftTradeSkill(ts) ~= true then
+            return false
+        end
+        if not (Caps and Caps.IsPotionCraftTradeSkill) and not IsCraftTradeSkill(item) then
+            return false
+        end
+    elseif not (Caps and Caps.CanAutoBuy and Caps.CanAutoBuy() == true) then
+        -- Vendor omitted tradeSkill (common); still require Cult or Apo to AutoBuy.
+        return false
+    end
+    local canAutoGrow = Caps and Caps.CanAutoGrow and Caps.CanAutoGrow() == true
+    local growable = IsGrowablePlantItem(item)
+    if growable then
+        if canAutoGrow then
+            return false
+        end
+        if not (Caps and Caps.CanAutoBuy and Caps.CanAutoBuy() == true) then
+            return false
+        end
+    elseif ts > 0 and not PlayerCanBuyItemTradeSkill(item) then
         return false
     end
     if type(job.spec) ~= "table" or not (StockPiler2.MaterialSpec and StockPiler2.MaterialSpec.Matches) then
@@ -513,23 +682,77 @@ local function VisitMoneyBrass()
     return tracked
 end
 
+local function LogVisitStart(tag)
+    local jobs = Buy.IsEnabled() and Buy.CollectBuyJobs() or {}
+    LogBuyOp(string.format(
+        "%s enabled=%s jobs=%d money=%d reserveGold=%d budgetGold=%d",
+        tostring(tag or "visit-start"),
+        tostring(Buy.IsEnabled()),
+        type(jobs) == "table" and #jobs or 0,
+        tonumber(Buy._visitMoneyBrass) or 0,
+        Buy.GetReserveGold(),
+        Buy.GetBudgetGold()
+    ))
+    if Buy.IsEnabled() and type(jobs) == "table" and #jobs > 0 then
+        LogBuyJobLines(jobs, false)
+    end
+end
+
+--- Clear reserved/budget visit stop so AutoBuy can continue (chips / resume).
+--- Bag deficit is authoritative; wipe visit-acquired so we do not double-count.
+function Buy.ClearMoneyGateStop(via)
+    local stop = Buy._visitStopReason
+    if stop ~= "reserved" and stop ~= "budget" then
+        return false
+    end
+    Buy._visitStopReason = nil
+    Buy._visitChatted = false
+    Buy._visitSpentBrass = 0
+    Buy._visitAcquiredByKey = {}
+    Buy._visitSkipLogged = {}
+    Buy._visitMoneyBrass = PlayerMoneyBrass()
+    Buy.InvalidateJobsCache()
+    LogBuyOp(string.format(
+        "resume clear-stop was=%s via=%s money=%d reserveGold=%d",
+        tostring(stop),
+        tostring(via or "?"),
+        tonumber(Buy._visitMoneyBrass) or 0,
+        Buy.GetReserveGold()
+    ))
+    if StockPiler2.Scheduler and StockPiler2.Scheduler.WakeAutoBuy then
+        StockPiler2.Scheduler.WakeAutoBuy()
+    end
+    return true
+end
+
+--- Observe store hide even when AutoBuy is not ticking (NeedsTick is open-only).
+function Buy.PollStorePresence()
+    if Buy._visitStoreOpen ~= true then
+        return
+    end
+    local VA = StockPiler2.VendorAdapter
+    if VA and VA.IsStoreOpen and VA.IsStoreOpen() == true then
+        return
+    end
+    Buy.OnStoreUpdated()
+end
+
 function Buy.OnStoreUpdated()
     local VA = StockPiler2.VendorAdapter
     local showing = VA and VA.IsStoreOpen and VA.IsStoreOpen() == true
-    if showing and Buy._visitStoreOpen ~= true then
-        Buy._visitStoreOpen = true
-        ResetVisit()
-        local jobs = Buy.IsEnabled() and Buy.CollectBuyJobs() or {}
-        LogBuyOp(string.format(
-            "visit-start enabled=%s jobs=%d money=%d reserveGold=%d budgetGold=%d",
-            tostring(Buy.IsEnabled()),
-            type(jobs) == "table" and #jobs or 0,
-            tonumber(Buy._visitMoneyBrass) or 0,
-            Buy.GetReserveGold(),
-            Buy.GetBudgetGold()
-        ))
-        if Buy.IsEnabled() and type(jobs) == "table" and #jobs > 0 then
-            LogBuyJobLines(jobs, false)
+    if showing then
+        local wasOpen = Buy._visitStoreOpen == true
+        local stop = Buy._visitStopReason
+        local moneyStop = (stop == "reserved" or stop == "budget")
+        if not wasOpen then
+            Buy._visitStoreOpen = true
+            ResetVisit()
+            LogVisitStart("visit-start")
+        elseif moneyStop then
+            -- Stuck after reserved/budget: reopen/ShowStore never saw a close edge.
+            ResetVisit()
+            Buy._visitStoreOpen = true
+            LogVisitStart("visit-resume")
         end
     elseif not showing and Buy._visitStoreOpen == true then
         Buy._visitStoreOpen = false

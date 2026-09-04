@@ -163,6 +163,8 @@ local EFFECT_ID_TO_KEY = {
     [36] = "hytounocrit",
     [37] = "hyhpregencritdmg",
     [38] = "hywsarmpen",
+    -- SP2 fingerprint for Weapon Skill + Reduced Crit Chance (Swift Tergiversation).
+    [39] = "hywsnocrit",
     [41] = "trapoth",
     [42] = "trcult",
     [43] = "trsalv",
@@ -224,6 +226,7 @@ local EFFECT_KEY_TO_ID = {
     hytounocrit = 36,
     hyhpregencritdmg = 37,
     hywsarmpen = 38,
+    hywsnocrit = 39,
     trapoth = 41,
     trcult = 42,
     trsalv = 43,
@@ -278,6 +281,7 @@ local EFFECT_ID_TO_NAME = {
     hytounocrit = L"Toughness+Reduced chance to be Crit",
     hyhpregencritdmg = L"Healthregen+Reduced Crit Dmg",
     hywsarmpen = L"Weapon Skill+Reduced armor pen.",
+    hywsnocrit = L"Weapon Skill+Reduced chance to be Crit",
     trapoth = L"Apothecary Skill",
     trcult = L"Cultivation Skill",
     trsalv = L"Magical Salvaging Skill",
@@ -622,7 +626,18 @@ function MS.Matches(itemData, spec)
         if tonumber(other.slotType) ~= tonumber(spec.slotType) then
             return false
         end
-        return tonumber(other.effectId) == tonumber(spec.effectId)
+        if tonumber(other.effectId) ~= tonumber(spec.effectId) then
+            return false
+        end
+        -- Liniment / hybrid mains share slot+fx families; stab/power separate powders.
+        local B = CraftBonusRefs()
+        if not BonusMatch(other.bonuses, spec.bonuses, B.STABILITY) then
+            return false
+        end
+        if not BonusMatch(other.bonuses, spec.bonuses, B.POWER) then
+            return false
+        end
+        return true
     end
     if role == "container" then
         -- Must match skill tier. Slot-only match bought every vial on the vendor
@@ -736,6 +751,48 @@ function MS.ProductKey(specOrItem, roleHint)
     return MS.Key(product)
 end
 
+--- Incomplete bag mains (powders / Primals) omit EFFECT; brew learn stamps Items[uid].
+local function EnrichIncompleteProductFromLearnedItems(product, itemData)
+    if type(product) ~= "table" or product.incomplete ~= true then
+        return product
+    end
+    if product.role ~= "main" or not MS.ApplyMainEffectId then
+        return product
+    end
+    local uid = 0
+    if type(itemData) == "table" then
+        uid = tonumber(itemData.uniqueID) or 0
+    end
+    if uid <= 0 or not StockPiler2.Items or not StockPiler2.Items.ToSpec then
+        return product
+    end
+    local learned = StockPiler2.Items.ToSpec(uid)
+    if type(learned) ~= "table" or learned.incomplete == true then
+        return product
+    end
+    local effectId = tonumber(learned.effectId) or 0
+    if effectId <= 0 then
+        return product
+    end
+    local enriched = MS.Copy(product)
+    if type(enriched) ~= "table" then
+        return product
+    end
+    MS.ApplyMainEffectId(enriched, effectId)
+    -- Fill missing stab/power from the learned row when bag parse was thin.
+    if type(learned.bonuses) == "table" then
+        if type(enriched.bonuses) ~= "table" then
+            enriched.bonuses = {}
+        end
+        for k, v in pairs(learned.bonuses) do
+            if enriched.bonuses[k] == nil then
+                enriched.bonuses[k] = v
+            end
+        end
+    end
+    return enriched
+end
+
 --- Stat-equivalent match across uid variants and cultivation forms.
 function MS.ProductMatches(itemData, spec)
     if type(itemData) ~= "table" or type(spec) ~= "table" then
@@ -750,12 +807,20 @@ function MS.ProductMatches(itemData, spec)
     end
     local role = spec.role or nil
     local product = MS.AsApothecaryProduct(itemData, role)
-    if type(product) ~= "table" or product.incomplete == true then
+    if type(product) ~= "table" then
         return false
     end
     local target = MS.AsApothecaryProduct(spec, role)
     if type(target) ~= "table" or target.incomplete == true then
         return false
+    end
+    -- Do not stamp the recipe fx onto every incomplete bag main (pools Primals).
+    -- Resolve fx from the learned Items fingerprint for this uid after first brew.
+    if product.incomplete == true then
+        product = EnrichIncompleteProductFromLearnedItems(product, itemData)
+        if type(product) ~= "table" or product.incomplete == true then
+            return false
+        end
     end
     return MS.Matches(product, target)
 end

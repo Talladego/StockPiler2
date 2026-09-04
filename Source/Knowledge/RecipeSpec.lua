@@ -1950,10 +1950,44 @@ function RS.ClearCountCaches()
     RS._specHaveCache = nil
     RS._demandCache = nil
     RS._demandSnapGen = nil
+    RS._autoGrowSeedLines = nil
+    RS._autoGrowSeedLinesKey = nil
+end
+
+local function AutoGrowSeedLinesCacheKey()
+    local snapGen = 0
+    if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
+        snapGen = tonumber(StockPiler2.Inventory.GetSnapGen()) or 0
+    end
+    local gardenGen = 0
+    if StockPiler2.Garden and StockPiler2.Garden.GetGen then
+        gardenGen = tonumber(StockPiler2.Garden.GetGen()) or 0
+    end
+    local watchGen = 0
+    if StockPiler2.Watch and StockPiler2.Watch.GetGen then
+        watchGen = tonumber(StockPiler2.Watch.GetGen()) or 0
+    end
+    local buffer = 5
+    local enabled = "0"
+    if StockPiler2.Watch then
+        if StockPiler2.Watch.GetSeedBufferMin then
+            buffer = tonumber(StockPiler2.Watch.GetSeedBufferMin()) or 5
+        end
+        if StockPiler2.Watch.IsSeedBufferEnabled
+            and StockPiler2.Watch.IsSeedBufferEnabled() == true
+        then
+            enabled = "1"
+        end
+    end
+    return tostring(snapGen) .. ":" .. tostring(gardenGen) .. ":" .. tostring(watchGen)
+        .. ":" .. tostring(buffer) .. ":" .. enabled
 end
 
 function RS.CountItemsMatchingSpec(spec)
-    if type(spec) ~= "table" or not MS or not MS.Matches then
+    if type(spec) ~= "table" or not MS then
+        return 0
+    end
+    if not MS.ProductMatches and not MS.Matches then
         return 0
     end
     local specKey = MS.Key and MS.Key(spec) or nil
@@ -1974,7 +2008,13 @@ function RS.CountItemsMatchingSpec(spec)
             then
                 return
             end
-            if MS.Matches(item, spec) then
+            local match = false
+            if MS.ProductMatches then
+                match = MS.ProductMatches(item, spec) == true
+            elseif MS.Matches then
+                match = MS.Matches(item, spec) == true
+            end
+            if match then
                 local n = tonumber(item.stackCount) or tonumber(item.StackCount) or 1
                 total = total + math.max(1, n)
             end
@@ -2325,15 +2365,23 @@ function RS.WatchStillNeedsGrow(potion, recipe, target, watchKey)
     return map[watchKey] == true
 end
 
---- Growable seed/plant lines from AutoGrow-enabled watches, even when
+--- Growable refinable seed/plant lines from AutoGrow-enabled watches, even when
 --- Stock+Craftable already covers Target (seed-buffer maintenance set).
+--- Excludes one-way / non-refinable harvest (no plant→seed refine path).
+--- Cached per snap/garden/buffer settings (hot path: refine gates / intents).
 function RS.CollectAutoGrowSeedLines()
+    local cacheKey = AutoGrowSeedLinesCacheKey()
+    if RS._autoGrowSeedLinesKey == cacheKey and type(RS._autoGrowSeedLines) == "table" then
+        return RS._autoGrowSeedLines
+    end
     local lines = {}
     local seen = {}
     local s = EnsureSettings()
     local SM = StockPiler2.SeedMap
     local MS = StockPiler2.MaterialSpec
     if type(s.watches) ~= "table" or type(SM) ~= "table" or not SM.IsGrowableSpec then
+        RS._autoGrowSeedLinesKey = cacheKey
+        RS._autoGrowSeedLines = lines
         return lines
     end
     for watchKey, watch in pairs(s.watches) do
@@ -2348,37 +2396,41 @@ function RS.CollectAutoGrowSeedLines()
                     local slot = slots[i]
                     local spec = slot and (slot.spec or (RS.ResolveSlotSpec and RS.ResolveSlotSpec(slot)))
                     if type(spec) == "table" and SM.IsGrowableSpec(spec) then
-                        local productKey = (MS and MS.ProductKey and MS.ProductKey(spec))
-                            or (MS and MS.Key and MS.Key(spec))
-                            or ""
-                        if productKey ~= "" and seen[productKey] ~= true then
-                            local seed = SM.ResolveSeedForSpec and SM.ResolveSeedForSpec(spec)
-                            local seedUid = 0
-                            local plantUid = 0
-                            if type(seed) == "table" then
-                                seedUid = tonumber(seed.uniqueID) or 0
-                                if seedUid <= 0 and type(seed.itemData) == "table" then
-                                    seedUid = tonumber(seed.itemData.uniqueID) or 0
+                        if SM.IsOneWayHarvestSpec and SM.IsOneWayHarvestSpec(spec) == true then
+                            -- One-way (e.g. Blackbell Powder): no refine path for buffer.
+                        else
+                            local productKey = (MS and MS.ProductKey and MS.ProductKey(spec))
+                                or (MS and MS.Key and MS.Key(spec))
+                                or ""
+                            if productKey ~= "" and seen[productKey] ~= true then
+                                local seed = SM.ResolveSeedForSpec and SM.ResolveSeedForSpec(spec)
+                                local seedUid = 0
+                                local plantUid = 0
+                                if type(seed) == "table" then
+                                    seedUid = tonumber(seed.uniqueID) or 0
+                                    if seedUid <= 0 and type(seed.itemData) == "table" then
+                                        seedUid = tonumber(seed.itemData.uniqueID) or 0
+                                    end
+                                    plantUid = tonumber(seed.plantUid) or 0
                                 end
-                                plantUid = tonumber(seed.plantUid) or 0
-                            end
-                            if plantUid <= 0 and SM.FindPlantUidForSpec then
-                                plantUid = tonumber(SM.FindPlantUidForSpec(spec)) or 0
-                            end
-                            if seedUid <= 0 and plantUid > 0 and SM.PickBestSeedUid then
-                                local seedUids = SM.GetSeedUidsForPlant and SM.GetSeedUidsForPlant(plantUid) or {}
-                                seedUid = tonumber(SM.PickBestSeedUid(plantUid, seedUids, spec)) or 0
-                            end
-                            -- Require a known plant↔seed refine path (non-refinable harvest excluded).
-                            if seedUid > 0 and plantUid > 0 then
-                                seen[productKey] = true
-                                lines[#lines + 1] = {
-                                    spec = spec,
-                                    specKey = productKey,
-                                    seedUid = seedUid,
-                                    plantUid = plantUid,
-                                    seed = seed,
-                                }
+                                if plantUid <= 0 and SM.FindPlantUidForSpec then
+                                    plantUid = tonumber(SM.FindPlantUidForSpec(spec)) or 0
+                                end
+                                if seedUid <= 0 and plantUid > 0 and SM.PickBestSeedUid then
+                                    local seedUids = SM.GetSeedUidsForPlant and SM.GetSeedUidsForPlant(plantUid) or {}
+                                    seedUid = tonumber(SM.PickBestSeedUid(plantUid, seedUids, spec)) or 0
+                                end
+                                -- Require a known plant↔seed refine path (non-refinable harvest excluded).
+                                if seedUid > 0 and plantUid > 0 then
+                                    seen[productKey] = true
+                                    lines[#lines + 1] = {
+                                        spec = spec,
+                                        specKey = productKey,
+                                        seedUid = seedUid,
+                                        plantUid = plantUid,
+                                        seed = seed,
+                                    }
+                                end
                             end
                         end
                     end
@@ -2386,11 +2438,13 @@ function RS.CollectAutoGrowSeedLines()
             end
         end
     end
+    RS._autoGrowSeedLinesKey = cacheKey
+    RS._autoGrowSeedLines = lines
     return lines
 end
 
---- True when Seed Buffer is on and any growable recipe line for this watch
---- is below the buffer (live + outstanding).
+--- True when Seed Buffer is on and any growable refinable recipe line for this watch
+--- is below the buffer (bag + in-ground + outstanding).
 function RS.WatchHasSeedBufferShort(recipe)
     if not (StockPiler2.Watch and StockPiler2.Watch.IsSeedBufferEnabled
         and StockPiler2.Watch.IsSeedBufferEnabled() == true)
@@ -2415,34 +2469,36 @@ function RS.WatchHasSeedBufferShort(recipe)
         local slot = slots[i]
         local spec = slot and (slot.spec or (RS.ResolveSlotSpec and RS.ResolveSlotSpec(slot)))
         if type(spec) == "table" and SM.IsGrowableSpec(spec) then
-            local productKey = StockPiler2.MaterialSpec and StockPiler2.MaterialSpec.ProductKey
-                and StockPiler2.MaterialSpec.ProductKey(spec) or tostring(i)
-            if seen[productKey] ~= true then
-                seen[productKey] = true
-                local seed = SM.ResolveSeedForSpec and SM.ResolveSeedForSpec(spec)
-                local seedUid = 0
-                local plantUid = 0
-                if type(seed) == "table" then
-                    seedUid = tonumber(seed.uniqueID) or 0
-                    plantUid = tonumber(seed.plantUid) or 0
-                end
-                if plantUid <= 0 and SM.FindPlantUidForSpec then
-                    plantUid = tonumber(SM.FindPlantUidForSpec(spec)) or 0
-                end
-                if seedUid <= 0 or plantUid <= 0 then
-                    -- Unmapped / non-refinable: ignore for buffer short.
-                else
-                    local live = 0
-                    local outstanding = 0
-                    if Refine and Refine.GetSeedBudgetForSpec then
-                        local budget = Refine.GetSeedBudgetForSpec(spec, seedUid)
-                        live = tonumber(budget and budget.live) or 0
-                        outstanding = tonumber(budget and budget.outstanding) or 0
-                    elseif SM.CountSeedsInBagsForSpec then
-                        live = tonumber(SM.CountSeedsInBagsForSpec(spec)) or 0
+            if SM.IsOneWayHarvestSpec and SM.IsOneWayHarvestSpec(spec) == true then
+                -- One-way: ignore for buffer short.
+            else
+                local productKey = StockPiler2.MaterialSpec and StockPiler2.MaterialSpec.ProductKey
+                    and StockPiler2.MaterialSpec.ProductKey(spec) or tostring(i)
+                if seen[productKey] ~= true then
+                    seen[productKey] = true
+                    local seed = SM.ResolveSeedForSpec and SM.ResolveSeedForSpec(spec)
+                    local seedUid = 0
+                    local plantUid = 0
+                    if type(seed) == "table" then
+                        seedUid = tonumber(seed.uniqueID) or 0
+                        plantUid = tonumber(seed.plantUid) or 0
                     end
-                    if (live + outstanding) < buffer then
-                        return true
+                    if plantUid <= 0 and SM.FindPlantUidForSpec then
+                        plantUid = tonumber(SM.FindPlantUidForSpec(spec)) or 0
+                    end
+                    if seedUid <= 0 or plantUid <= 0 then
+                        -- Unmapped / non-refinable: ignore for buffer short.
+                    else
+                        local credit = 0
+                        if Refine and Refine.GetSeedBudgetForSpec then
+                            local budget = Refine.GetSeedBudgetForSpec(spec, seedUid)
+                            credit = tonumber(budget and budget.credit) or 0
+                        elseif SM.CountSeedsInBagsForSpec then
+                            credit = tonumber(SM.CountSeedsInBagsForSpec(spec)) or 0
+                        end
+                        if credit < buffer then
+                            return true
+                        end
                     end
                 end
             end
@@ -2700,8 +2756,13 @@ function RS.FocusWatchNames(focus)
     return text
 end
 
--- Plant/refine only when BOTH the global switch and this potion's AutoGrow are on.
+-- Plant/refine only when Cultivation is trained AND BOTH the global switch
+-- and this potion's AutoGrow are on.
 function RS.ShouldAutoGrowPotion(potionKey, watch)
+    local Caps = StockPiler2.TradeSkillCaps
+    if Caps and Caps.CanAutoGrow and Caps.CanAutoGrow() ~= true then
+        return false
+    end
     local s = EnsureSettings()
     if type(s) ~= "table" or s.autoGrowEnabled ~= true then
         return false

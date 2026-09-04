@@ -24,8 +24,11 @@ local function StageEmpty()
 end
 
 local function RefreshUiIfLearned()
-    if StockPiler2.Ui and StockPiler2.Ui.RefreshIfOpen then
-        StockPiler2.Ui.RefreshIfOpen({ force = true })
+    -- Coalesced UI dirty — never force a sync RefreshActiveTab mid-UPDATE_PROCESSED.
+    if StockPiler2.Ui and StockPiler2.Ui.MarkWatchUiDirty then
+        StockPiler2.Ui.MarkWatchUiDirty()
+    elseif StockPiler2.Ui and StockPiler2.Ui.RefreshIfOpen then
+        StockPiler2.Ui.RefreshIfOpen()
     end
 end
 
@@ -284,7 +287,10 @@ function LB.OnUpdateProcessed()
         and StockPiler2.SeedMap.TryCompletePendingHarvest
         and type(StockPiler2.SeedMap._pendingHarvest) == "table"
     then
-        if StockPiler2.Perf and StockPiler2.Perf.Begin then
+        local pending = StockPiler2.SeedMap._pendingHarvest
+        -- Pending harvest exists for the whole grow; only instrument when loot
+        -- is dirty (otherwise every UPDATE_PROCESSED polluted Perf trails x1000+).
+        if pending.lootDirty == true and StockPiler2.Perf and StockPiler2.Perf.Begin then
             StockPiler2.Perf.Begin("LearnBridge.OnUpdate")
             marked = true
         end

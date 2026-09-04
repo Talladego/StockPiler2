@@ -271,6 +271,10 @@ function AD.LearnFromPlotRow(row)
 end
 
 function AD.PlayerCultivationSkill()
+    local Caps = StockPiler2.TradeSkillCaps
+    if Caps and Caps.Level and Caps.CultivationId then
+        return Caps.Level(Caps.CultivationId())
+    end
     local cult = (GameData and GameData.TradeSkills and GameData.TradeSkills.CULTIVATION) or 3
     if GameData and GameData.Player and type(GameData.Player.tradeSkills) == "table" then
         local row = GameData.Player.tradeSkills[cult]

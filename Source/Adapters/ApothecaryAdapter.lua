@@ -20,23 +20,16 @@ function AA.CraftingBackpackType()
 end
 
 function AA.IsApothecary()
+    local Caps = StockPiler2.TradeSkillCaps
+    if Caps and Caps.HasApothecary then
+        return Caps.HasApothecary() == true
+    end
     local apoId = AA.TradeSkill()
     local level = 0
     if GameData and type(GameData.TradeSkillLevels) == "table" then
         level = tonumber(GameData.TradeSkillLevels[apoId]) or 0
     end
-    if level > 0 then
-        return true
-    end
-    local talisman = 5
-    if GameData and GameData.TradeSkills and GameData.TradeSkills.TALISMAN then
-        talisman = GameData.TradeSkills.TALISMAN
-    end
-    local talLevel = 0
-    if GameData and type(GameData.TradeSkillLevels) == "table" then
-        talLevel = tonumber(GameData.TradeSkillLevels[talisman]) or 0
-    end
-    return talLevel <= 0
+    return level > 0
 end
 
 function AA.WindowName()

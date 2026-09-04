@@ -65,7 +65,11 @@ local function HasAutoGrowWork()
         return true
     end
     local Refine = StockPiler2.Refine
-    if Refine and Refine.ShouldAllowRefineNow and Refine.ShouldAllowRefineNow() == true then
+    if Refine and Refine._refineDirty == true then
+        return true
+    end
+    -- Cheap gate: cached buffer pending (full ShouldAllowRefineNow only on refine path).
+    if Grow and Grow.HasPendingBufferRefine and Grow.HasPendingBufferRefine() == true then
         return true
     end
     return false

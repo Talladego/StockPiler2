@@ -3,7 +3,7 @@
 ----------------------------------------------------------------
 
 StockPiler2 = StockPiler2 or {}
-StockPiler2.Version = L"0.3.0"
+StockPiler2.Version = L"0.4.13"
 
 local function EmitLog(msg)
     if StockPiler2.Debug and StockPiler2.Debug.LogAlways then
@@ -275,6 +275,9 @@ function StockPiler2.Initialize()
     if StockPiler2.Orchestrator and StockPiler2.Orchestrator.Initialize then
         StockPiler2.Orchestrator.Initialize()
     end
+    if StockPiler2.Macro and StockPiler2.Macro.Initialize then
+        StockPiler2.Macro.Initialize()
+    end
     if StockPiler2.EngineEventBridge and StockPiler2.EngineEventBridge.Register then
         StockPiler2.EngineEventBridge.Register()
     end
@@ -301,6 +304,9 @@ function StockPiler2.Initialize()
 end
 
 function StockPiler2.Shutdown()
+    if StockPiler2.Macro and StockPiler2.Macro.Shutdown then
+        StockPiler2.Macro.Shutdown()
+    end
     if StockPiler2.LearnBridge and StockPiler2.LearnBridge.Shutdown then
         StockPiler2.LearnBridge.Shutdown()
     end
