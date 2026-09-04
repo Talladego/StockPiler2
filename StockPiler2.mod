@@ -2,7 +2,7 @@
 
 <ModuleFile xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 
-    <UiMod name="StockPiler2" version="0.4.13" date="2026-09-04">
+    <UiMod name="StockPiler2" version="0.4.23" date="2026-09-04">
 
         <Author name="Talladego" email="" />
 

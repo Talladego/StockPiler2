@@ -275,6 +275,34 @@ function Brew.PickReadyWatch()
     return best
 end
 
+--- Print once when a watch becomes footer-ready; clear when none are.
+function Brew.MaybeNotifyBrewReady()
+    local row = Brew.PickReadyWatch()
+    if type(row) == "table" then
+        local name = row.name
+        if name == nil or name == L"" then
+            name = L"potion"
+        end
+        local printed = false
+        if StockPiler2.Debug and StockPiler2.Debug.NotifyOnce then
+            printed = StockPiler2.Debug.NotifyOnce("brew-ready", L"Brew ready: " .. name .. L".") == true
+        else
+            Notify(L"Brew ready: " .. name .. L".")
+            printed = true
+        end
+        if printed then
+            local soundId = GameData and GameData.Sound and GameData.Sound.HELP_TIPS_HIGHTLIGHT_WINDOW
+            if StockPiler2.Debug and StockPiler2.Debug.PlayUiSound then
+                StockPiler2.Debug.PlayUiSound(soundId)
+            elseif type(PlaySound) == "function" and soundId ~= nil then
+                pcall(PlaySound, soundId)
+            end
+        end
+    elseif StockPiler2.Debug and StockPiler2.Debug.ClearNotifyOnce then
+        StockPiler2.Debug.ClearNotifyOnce("brew-ready")
+    end
+end
+
 function Brew.HasReadyToCraft()
     if Brew.PickReadyWatch() ~= nil then
         return true
@@ -339,6 +367,13 @@ end
 
 --- Same gate as Watch footer Brew button (enabled when click would do useful work).
 function Brew.CanBrewNow()
+    if Brew.MaybeNotifyBrewReady then
+        Brew.MaybeNotifyBrewReady()
+    end
+    local Caps = StockPiler2.TradeSkillCaps
+    if Caps and Caps.CanBrewPotions and Caps.CanBrewPotions() ~= true then
+        return false
+    end
     local session = GetSession()
     local phase = session and session.phase
     if phase == "loading" then
@@ -762,6 +797,9 @@ end
 ----------------------------------------------------------------
 
 local function RefreshBrewUi()
+    if Brew.MaybeNotifyBrewReady then
+        Brew.MaybeNotifyBrewReady()
+    end
     if StockPiler2Window and StockPiler2Window.RefreshFooterButtons then
         StockPiler2Window.RefreshFooterButtons()
     end
@@ -1193,22 +1231,38 @@ local function JobShouldRelease(job)
 end
 
 function Brew.Tick()
+    local Perf = StockPiler2.Perf
+    if Perf and Perf.Begin then
+        Perf.Begin("Brew.Tick")
+    end
     local job = Brew._job
     if type(job) ~= "table" then
+        if Perf and Perf.End then
+            Perf.End("Brew.Tick")
+        end
         return
     end
     job.waitTicks = (tonumber(job.waitTicks) or 0) + 1
     job.totalTicks = (tonumber(job.totalTicks) or 0) + 1
     if job.totalTicks > 400 then
         FailJob(L"Load timed out.")
+        if Perf and Perf.End then
+            Perf.End("Brew.Tick")
+        end
         return
     end
     if job.phase == "load" and JobShouldRelease(job) then
         FinishLoadSuccess()
+        if Perf and Perf.End then
+            Perf.End("Brew.Tick")
+        end
         return
     end
     if job.phase == "reset" or job.phase == "open" or job.phase == "clear" then
         if not RunSetupPhases(job) then
+            if Perf and Perf.End then
+                Perf.End("Brew.Tick")
+            end
             return
         end
     end
@@ -1221,33 +1275,54 @@ function Brew.Tick()
             else
                 FailJob(L"Materials did not load into Apothecary slots.")
             end
+            if Perf and Perf.End then
+                Perf.End("Brew.Tick")
+            end
             return
         end
         if StepSatisfied(step) then
             ConfirmStepBagUse(job, step)
             job.stepIndex = job.stepIndex + 1
             job.waitTicks = 0
+            if Perf and Perf.End then
+                Perf.End("Brew.Tick")
+            end
             return
         end
         if not step.loadIssued then
             if SlotHasWrongItem(step) then
                 FailJob(L"Apothecary slot has the wrong material.")
+                if Perf and Perf.End then
+                    Perf.End("Brew.Tick")
+                end
                 return
             end
             if not IssueLoadStep(job, step) then
                 FailJob(L"Missing a recipe material in the crafting bag.")
+                if Perf and Perf.End then
+                    Perf.End("Brew.Tick")
+                end
                 return
             end
             job.waitTicks = 0
+            if Perf and Perf.End then
+                Perf.End("Brew.Tick")
+            end
             return
         end
         if SlotHasWrongItem(step) then
             FailJob(L"Apothecary slot has the wrong material.")
+            if Perf and Perf.End then
+                Perf.End("Brew.Tick")
+            end
             return
         end
         if job.waitTicks > STEP_WAIT_TICKS then
             FailJob(L"Timed out loading materials into the Apothecary.")
         end
+    end
+    if Perf and Perf.End then
+        Perf.End("Brew.Tick")
     end
 end
 
@@ -1450,6 +1525,16 @@ local function FindSessionRow()
 end
 
 function Brew.BeginForRow(row, opts)
+    local Perf = StockPiler2.Perf
+    if Perf and Perf.Begin then
+        Perf.Begin("Brew.BeginForRow")
+    end
+    local function done(result)
+        if Perf and Perf.End then
+            Perf.End("Brew.BeginForRow")
+        end
+        return result
+    end
     opts = type(opts) == "table" and opts or {}
     local source = opts.source
     if source ~= "manual" and source ~= "auto" then
@@ -1458,30 +1543,30 @@ function Brew.BeginForRow(row, opts)
     local a = AA()
     if a and a.IsApothecary and not a.IsApothecary() then
         Notify(L"Load is only available to Apothecaries.")
-        return false
+        return done(false)
     end
     local ok, msg = Brew.CanStartBrewLoad()
     if ok ~= true then
         Notify(msg or L"Brew held: AutoGrow is busy.")
-        return false
+        return done(false)
     end
     -- Block only real load/perform work — not post-load op-lock (allows switch Load).
     if type(Brew._job) == "table" then
-        return false
+        return done(false)
     end
     if IsPerformingState() then
-        return false
+        return done(false)
     end
     if type(row) ~= "table" then
-        return false
+        return done(false)
     end
     local recipe = RowRecipe(row)
     if type(recipe) ~= "table" then
         Notify(L"No learned recipe for this potion.")
-        return false
+        return done(false)
     end
     if (tonumber(row.craftable) or 0) <= 0 and row.canLoad ~= true then
-        return false
+        return done(false)
     end
     if not Brew.MaterialsReadyInCraftingBag(recipe) then
         local missing = Brew.DescribeMissingInCraftingBag(recipe)
@@ -1493,12 +1578,12 @@ function Brew.BeginForRow(row, opts)
         Brew._lastLoad = nil
         ClearSession()
         RefreshBrewUi()
-        return false
+        return done(false)
     end
     local steps = BuildLoadSteps(recipe)
     if #steps == 0 then
         Notify(L"Could not build brew steps for this recipe.")
-        return false
+        return done(false)
     end
     local session = GetSession()
     if session.phase == "loaded" or session.phase == "loading" then
@@ -1524,7 +1609,7 @@ function Brew.BeginForRow(row, opts)
         .. " steps=" .. tostring(#steps))
     Brew.Tick()
     RefreshBrewUi()
-    return true
+    return done(true)
 end
 
 --- Row craft button: Idle / Load / Brew (row performs when loaded).
@@ -2057,6 +2142,9 @@ end
 
 function Brew.BrewTooltipFingerprint(row)
     local parts = {}
+    local Caps = StockPiler2.TradeSkillCaps
+    local canBrew = Caps and Caps.CanBrewPotions and Caps.CanBrewPotions() == true
+    parts[#parts + 1] = canBrew and "apo1" or "apo0"
     if Brew.IsBusy() then
         parts[#parts + 1] = "busy"
     end
@@ -2122,10 +2210,27 @@ function Brew.ShowBrewTooltip(anchorWindow, anchor, liveRefresh)
         Tooltips.SetTooltipText(line, 1, text, false)
         line = line + 1
     end
-    local a = AA()
-    if a and a.IsApothecary and not a.IsApothecary() then
-        body(L"Brew is only available to Apothecaries.")
-    elseif Brew.IsBusy() and type(Brew._job) == "table" then
+    local function warnBody(text)
+        Tooltips.SetTooltipText(line, 1, text, false)
+        local warn = (Tooltips and Tooltips.COLOR_WARNING) or { r = 220, g = 120, b = 120 }
+        if Tooltips.SetTooltipColor then
+            Tooltips.SetTooltipColor(line, 1, warn.r or 220, warn.g or 120, warn.b or 120)
+        end
+        line = line + 1
+    end
+    local Caps = StockPiler2.TradeSkillCaps
+    local canBrew = Caps and Caps.CanBrewPotions and Caps.CanBrewPotions() == true
+    if not canBrew then
+        warnBody(L"Brew requires Apothecary.")
+        Tooltips.Finalize()
+        Tooltips.AnchorTooltip(anchor or Tooltips.ANCHOR_WINDOW_TOP)
+        local tip = Brew._liveBrewTip
+        if tip and tip.anchor == anchorWindow then
+            tip.fingerprint = Brew.BrewTooltipFingerprint()
+        end
+        return
+    end
+    if Brew.IsBusy() and type(Brew._job) == "table" then
         local session = GetSession()
         local row = FindSessionRow()
         local name = (row and row.name) or session.name
@@ -2235,10 +2340,27 @@ function Brew.ShowRowBrewTooltip(anchorWindow, row, anchor, liveRefresh)
         Tooltips.SetTooltipText(line, 1, text, false)
         line = line + 1
     end
-    local a = AA()
-    if a and a.IsApothecary and not a.IsApothecary() then
-        body(L"Brew is only available to Apothecaries.")
-    elseif type(row) ~= "table" then
+    local function warnBody(text)
+        Tooltips.SetTooltipText(line, 1, text, false)
+        local warn = (Tooltips and Tooltips.COLOR_WARNING) or { r = 220, g = 120, b = 120 }
+        if Tooltips.SetTooltipColor then
+            Tooltips.SetTooltipColor(line, 1, warn.r or 220, warn.g or 120, warn.b or 120)
+        end
+        line = line + 1
+    end
+    local Caps = StockPiler2.TradeSkillCaps
+    local canBrew = Caps and Caps.CanBrewPotions and Caps.CanBrewPotions() == true
+    if not canBrew then
+        warnBody(L"Brew requires Apothecary.")
+        Tooltips.Finalize()
+        Tooltips.AnchorTooltip(anchor or Tooltips.ANCHOR_WINDOW_TOP)
+        local tip = Brew._liveBrewTip
+        if tip and tip.anchor == anchorWindow then
+            tip.fingerprint = Brew.BrewTooltipFingerprint(row)
+        end
+        return
+    end
+    if type(row) ~= "table" then
         body(L"No watch selected.")
     else
         local session = GetSession()

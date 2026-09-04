@@ -57,10 +57,15 @@ local function WatchContentKey()
     return tostring(snapGen) .. ":" .. tostring(planGen) .. ":" .. tostring(autoGrowOn)
 end
 
---- True during harvest or AutoGrow fill wave — skip heavy Watch list rebuild.
+--- True during harvest, AutoBuy visit, or AutoGrow fill wave — skip heavy Watch list rebuild.
 local function IsWatchUiFillBurst()
     local Orch = StockPiler2.Orchestrator
     if Orch and Orch.IsHarvestActive and Orch.IsHarvestActive() == true then
+        return true
+    end
+    -- AutoBuy visit: bag snaps during purchases otherwise stack Flatten + RefreshWatch.
+    local Buy = StockPiler2.Buy
+    if type(Buy) == "table" and Buy._visitStoreOpen == true then
         return true
     end
     local Grow = StockPiler2.Grow

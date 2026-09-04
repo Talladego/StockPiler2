@@ -123,6 +123,9 @@ function Bridge.OnUpdateProcessed(timeElapsed)
     if StockPiler2.Perf and StockPiler2.Perf.OnFrame then
         StockPiler2.Perf.OnFrame(timeElapsed)
     end
+    if StockPiler2.Macro and StockPiler2.Macro.DrainEnabledSync then
+        StockPiler2.Macro.DrainEnabledSync()
+    end
     if StockPiler2.LearnBridge and StockPiler2.LearnBridge.OnUpdateProcessed then
         StockPiler2.LearnBridge.OnUpdateProcessed()
     end

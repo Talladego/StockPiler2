@@ -921,6 +921,38 @@ function StockPiler2.BrewLearn.CompletePendingCraftLearn(opts)
     local mainConsumed = mainStillThere ~= true
     -- Brew chat "Critical Success" pairs with Potent output (name/uid), not main-kept.
     -- Main kept is only from cauldron still holding the main after brew.
+    local chatCrit = pending.chatCriticalSuccess == true
+        or (type(chatCues) == "table" and chatCues.criticalSuccess == true)
+    local function NotifyBrewOutcome(msg)
+        if StockPiler2.Debug and StockPiler2.Debug.Notify then
+            StockPiler2.Debug.Notify(msg)
+        elseif StockPiler2.Debug and StockPiler2.Debug.Print then
+            StockPiler2.Debug.Print(msg)
+        end
+    end
+    if #outputs > 0 then
+        for i = 1, #outputs do
+            local out = outputs[i]
+            local delta = tonumber(out.lastDelta) or tonumber(out.crafts) or 1
+            local name = out.name
+            if name == nil or name == L"" then
+                name = L"potion"
+            end
+            local line = L"Brewed " .. name .. L" x" .. towstring(tostring(delta))
+            if chatCrit then
+                line = line .. L" (critical)"
+            end
+            NotifyBrewOutcome(line)
+        end
+    elseif opts.failed == true then
+        local failName = L"potion"
+        if pending.chatCreatedName ~= nil and pending.chatCreatedName ~= L"" then
+            failName = pending.chatCreatedName
+        elseif type(chatCues) == "table" and chatCues.createdName ~= nil and chatCues.createdName ~= "" then
+            failName = towstring(tostring(chatCues.createdName))
+        end
+        NotifyBrewOutcome(L"Brew failed: " .. failName .. L".")
+    end
     StockPiler2.BrewLearn._pendingCraft = nil
     if StockPiler2.CraftChat and StockPiler2.CraftChat.TakeCues then
         StockPiler2.CraftChat.TakeCues()
@@ -933,8 +965,6 @@ function StockPiler2.BrewLearn.CompletePendingCraftLearn(opts)
         }) == true
     end
     if StockPiler2.Trace then
-        local chatCrit = pending.chatCriticalSuccess == true
-            or (type(chatCues) == "table" and chatCues.criticalSuccess == true)
         if #outputs == 0 then
             StockPiler2.Trace("Brew recorded as failure (no potion produced)"
                 .. " mainConsumed=" .. tostring(mainConsumed)

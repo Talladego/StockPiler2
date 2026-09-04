@@ -3,7 +3,7 @@
 ----------------------------------------------------------------
 
 StockPiler2 = StockPiler2 or {}
-StockPiler2.Version = L"0.4.13"
+StockPiler2.Version = L"0.4.23"
 
 local function EmitLog(msg)
     if StockPiler2.Debug and StockPiler2.Debug.LogAlways then
@@ -64,7 +64,16 @@ local function SetPerfThreshold(thresholdMs)
     if thresholdMs < 50 then
         thresholdMs = 50
     end
-    StockPiler2.Perf.FrameThresholdMs = thresholdMs
+    if StockPiler2.Perf.SetFrameThreshold then
+        thresholdMs = StockPiler2.Perf.SetFrameThreshold(thresholdMs)
+    else
+        StockPiler2.Perf.FrameThresholdMs = thresholdMs
+    end
+    local s = StockPiler2.Persistence and StockPiler2.Persistence.EnsureSettings
+        and StockPiler2.Persistence.EnsureSettings()
+    if type(s) == "table" then
+        s.perfThresholdMs = thresholdMs
+    end
     Print(L"Perf threshold " .. towstring(tostring(thresholdMs)) .. L"ms")
 end
 

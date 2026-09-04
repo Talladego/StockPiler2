@@ -1802,16 +1802,41 @@ local function IsPotionBagItem(itemData)
     if type(itemData) ~= "table" then
         return false
     end
+    local t = tonumber(itemData.type) or tonumber(itemData.itemType)
     if GameData and GameData.ItemTypes and GameData.ItemTypes.POTION then
-        return itemData.type == GameData.ItemTypes.POTION
+        return t == GameData.ItemTypes.POTION
     end
-    return tonumber(itemData.type) == 31
+    return t == 31
 end
 
 --- Live bag counts without InvalidateSnapshot / itemsDirty.
 --- Harvest-watch used to force a full engine bag rebuild + grow-plan
 --- rebuild every second while plots sat Ready to harvest (~300ms spikes).
+--- Prefer Inventory L0 counts when ready (avoids dual DataUtils bag scans on
+--- LearnBridge harvest complete — the 188ms LearnBridge.OnUpdate + RefreshWatch trail).
 local function SnapshotCraftingMatCounts()
+    local Inv = StockPiler2.Inventory
+    if Inv and Inv._ready == true and type(Inv.GetCountsCopy) == "function" then
+        local raw = Inv.GetCountsCopy()
+        local counts = {}
+        for uid, n in pairs(raw) do
+            uid = tonumber(uid) or 0
+            n = tonumber(n) or 0
+            if uid > 0 and n > 0 then
+                local item = nil
+                if type(Inv.FindSampleByUid) == "function" then
+                    item = Inv.FindSampleByUid(uid)
+                end
+                if type(item) ~= "table" then
+                    item = LookupItemData(uid)
+                end
+                if IsCraftingItem(item) and not IsPotionBagItem(item) then
+                    counts[uid] = n
+                end
+            end
+        end
+        return counts
+    end
     local counts = {}
     local function addBag(bag)
         if type(bag) ~= "table" then

@@ -491,7 +491,12 @@ function Macro.ApplyButtonAppearance(button, opts)
         return
     end
     opts = opts or {}
-    local canUse = canHarvestMacro()
+    local canUse = opts.canUse
+    if canUse == nil then
+        canUse = canHarvestMacro()
+    else
+        canUse = canUse == true
+    end
     setButtonEnabledVisual(button, canUse)
     if canUse then
         bindHarvestGameActionForButton(button)
@@ -505,32 +510,91 @@ function Macro.ApplyBrewButtonAppearance(button, opts)
         return
     end
     opts = opts or {}
-    local canUse = canBrewMacro()
+    local canUse = opts.canUse
+    if canUse == nil then
+        canUse = canBrewMacro()
+    else
+        canUse = canUse == true
+    end
     setButtonEnabledVisual(button, canUse)
     -- Keep apo bind for chrome; activation uses Lua FirePerform.
     bindBrewGameActionForButton(button)
 end
 
-function Macro.RefreshMacroButtonAppearance()
+--- Coalesce hotbar enable sync (footer/cultivation storms). Drain via DrainEnabledSync.
+function Macro.RequestEnabledSync(canHarvest, canBrew)
+    Macro._enabledSyncPending = true
+    if canHarvest ~= nil then
+        Macro._pendingCanHarvest = canHarvest == true
+    end
+    if canBrew ~= nil then
+        Macro._pendingCanBrew = canBrew == true
+    end
+end
+
+--- Apply pending RequestEnabledSync once (EngineEventBridge.OnUpdateProcessed).
+function Macro.DrainEnabledSync()
+    if Macro._enabledSyncPending ~= true then
+        return
+    end
+    Macro._enabledSyncPending = false
+    local opts = {}
+    if Macro._pendingCanHarvest ~= nil then
+        opts.canHarvest = Macro._pendingCanHarvest
+        Macro._pendingCanHarvest = nil
+    end
+    if Macro._pendingCanBrew ~= nil then
+        opts.canBrew = Macro._pendingCanBrew
+        Macro._pendingCanBrew = nil
+    end
+    Macro.RefreshMacroButtonAppearance(opts)
+end
+
+function Macro.RefreshMacroButtonAppearance(opts)
+    opts = type(opts) == "table" and opts or {}
     if Macro._refreshingAppearance == true then
         Macro._appearanceDirty = true
+        if opts.canHarvest ~= nil then
+            Macro._pendingCanHarvest = opts.canHarvest == true
+        end
+        if opts.canBrew ~= nil then
+            Macro._pendingCanBrew = opts.canBrew == true
+        end
         return
     end
     if not ActionBars or not ActionBars.m_Bars then
         return
     end
+
+    local canHarvest = opts.canHarvest
+    if canHarvest == nil then
+        canHarvest = canHarvestMacro()
+    else
+        canHarvest = canHarvest == true
+    end
+    local canBrew = opts.canBrew
+    if canBrew == nil then
+        canBrew = canBrewMacro()
+    else
+        canBrew = canBrew == true
+    end
+    local appearanceKey = tostring(canHarvest) .. ":" .. tostring(canBrew)
+    if Macro._lastAppearanceKey == appearanceKey then
+        return
+    end
+
+    local Perf = StockPiler2.Perf
+    if Perf and Perf.Begin then
+        Perf.Begin("Macro.Appearance")
+    end
     Macro._refreshingAppearance = true
     local ok, err = pcall(function()
-        local canHarvest = canHarvestMacro()
-        local canBrew = canBrewMacro()
-        local appearanceKey = tostring(canHarvest) .. ":" .. tostring(canBrew)
-        if Macro._lastAppearanceKey == appearanceKey then
-            return
-        end
         Macro._lastAppearanceKey = appearanceKey
 
         local macroId = Macro.GetMacroId()
         local brewId = Macro.GetBrewMacroId()
+        local harvestOpts = { canUse = canHarvest }
+        local brewOpts = { canUse = canBrew }
 
         if macroId then
             local slots = Macro.GetMacroSlots(macroId)
@@ -546,7 +610,7 @@ function Macro.RefreshMacroButtonAppearance()
                     local hbar, buttonId = ActionBars:BarAndButtonIdFromSlot(slots[i])
                     local button = hbar and hbar.m_Buttons and hbar.m_Buttons[buttonId]
                     if button then
-                        Macro.ApplyButtonAppearance(button)
+                        Macro.ApplyButtonAppearance(button, harvestOpts)
                     end
                 end
             end
@@ -566,26 +630,38 @@ function Macro.RefreshMacroButtonAppearance()
                     local hbar, buttonId = ActionBars:BarAndButtonIdFromSlot(slots[i])
                     local button = hbar and hbar.m_Buttons and hbar.m_Buttons[buttonId]
                     if button then
-                        Macro.ApplyBrewButtonAppearance(button)
+                        Macro.ApplyBrewButtonAppearance(button, brewOpts)
                     end
                 end
             end
         end
     end)
     Macro._refreshingAppearance = false
+    if Perf and Perf.End then
+        Perf.End("Macro.Appearance")
+    end
     if ok ~= true then
         D("refresh failed: " .. tostring(err))
     end
     if Macro._appearanceDirty == true then
         Macro._appearanceDirty = false
-        Macro._lastAppearanceKey = nil
-        Macro.RefreshMacroButtonAppearance()
+        -- Keep _lastAppearanceKey; key check no-ops if can-state unchanged.
+        local dirtyOpts = {}
+        if Macro._pendingCanHarvest ~= nil then
+            dirtyOpts.canHarvest = Macro._pendingCanHarvest
+            Macro._pendingCanHarvest = nil
+        end
+        if Macro._pendingCanBrew ~= nil then
+            dirtyOpts.canBrew = Macro._pendingCanBrew
+            Macro._pendingCanBrew = nil
+        end
+        Macro.RefreshMacroButtonAppearance(dirtyOpts)
     end
 end
 
---- Sync enabled visuals with footer canHarvest/canBrew (appearance-key short-circuits).
-function Macro.SyncEnabledState()
-    Macro.RefreshMacroButtonAppearance()
+--- Queue hotbar enable sync (coalesced). Prefer RequestEnabledSync from callers.
+function Macro.SyncEnabledState(canHarvest, canBrew)
+    Macro.RequestEnabledSync(canHarvest, canBrew)
 end
 
 local function applySetActionDataAppearance(button, actionType, actionId)
@@ -764,8 +840,18 @@ local function installMacroTooltipHook()
 end
 
 function Macro.OnHotBarUpdated()
+    -- ApplyButtonAppearance / WindowSetGameActionData can fire this event while
+    -- we refresh. Ignoring those echoes stops Macro.Appearance xN under trail hold.
+    if Macro._refreshingAppearance == true then
+        return
+    end
     ClearGameActionBindCache()
-    Macro.SyncEnabledState()
+    -- Slots may have changed with the same canHarvest/canBrew; force re-apply.
+    Macro._lastAppearanceKey = nil
+    if Macro._enabledSyncPending == true then
+        return
+    end
+    Macro.RequestEnabledSync()
 end
 
 function Macro.RegisterHotbarEventHandler()

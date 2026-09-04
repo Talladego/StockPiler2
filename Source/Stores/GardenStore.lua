@@ -75,8 +75,15 @@ function Garden.GetPlotsCopy()
 end
 
 function Garden.SyncAll()
+    local Perf = StockPiler2.Perf
+    if Perf and Perf.Begin then
+        Perf.Begin("Garden.SyncAll")
+    end
     local CA = StockPiler2.CultivatorAdapter
     if not CA then
+        if Perf and Perf.End then
+            Perf.End("Garden.SyncAll")
+        end
         return
     end
     local n = CA.NumPlots()
@@ -102,6 +109,9 @@ function Garden.SyncAll()
         if B and E and E.GARDEN_SNAPSHOT then
             B.Fire(E.GARDEN_SNAPSHOT, { gardenGen = Garden._gen })
         end
+    end
+    if Perf and Perf.End then
+        Perf.End("Garden.SyncAll")
     end
 end
 

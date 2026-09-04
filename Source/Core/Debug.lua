@@ -199,3 +199,66 @@ function D.Print(msg)
         d("StockPiler2| " .. D.LogText(body))
     end
 end
+
+--- User-facing ops chat (alias of Print).
+function D.Notify(msg)
+    D.Print(msg)
+end
+
+local _notifyOnce = {}
+
+--- Print once per key until ClearNotifyOnce; safe to call from polled paths.
+--- Returns true when the message was printed (first time for this key).
+function D.NotifyOnce(key, msg)
+    key = tostring(key or "")
+    if key == "" then
+        D.Notify(msg)
+        return true
+    end
+    if _notifyOnce[key] == true then
+        return false
+    end
+    _notifyOnce[key] = true
+    D.Notify(msg)
+    return true
+end
+
+function D.ClearNotifyOnce(key)
+    key = tostring(key or "")
+    if key == "" then
+        return
+    end
+    _notifyOnce[key] = nil
+end
+
+function D.ClearNotifyOncePrefix(prefix)
+    prefix = tostring(prefix or "")
+    if prefix == "" then
+        return
+    end
+    local n = string.len(prefix)
+    for k, _ in pairs(_notifyOnce) do
+        if type(k) == "string" and string.sub(k, 1, n) == prefix then
+            _notifyOnce[k] = nil
+        end
+    end
+end
+
+--- Play a GameData.Sound / numeric id (no-op while loading or if PlaySound missing).
+function D.PlayUiSound(soundId)
+    soundId = tonumber(soundId)
+    if soundId == nil then
+        return
+    end
+    if SystemData and SystemData.LoadingData and SystemData.LoadingData.isLoading == true then
+        return
+    end
+    if type(PlaySound) ~= "function" then
+        return
+    end
+    if StockPiler2.TryCall then
+        StockPiler2.TryCall("PlaySound", PlaySound, soundId)
+    else
+        pcall(PlaySound, soundId)
+    end
+end

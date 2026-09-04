@@ -51,13 +51,15 @@ end
 function StockPiler2Window.RefreshFooterButtons()
     local onWatch = StockPiler2Window.SelectedTab == StockPiler2Window.TABS_WATCH
     local onPotions = StockPiler2Window.SelectedTab == StockPiler2Window.TABS_POTIONS
+    local canHarvest = false
+    local canBrew = false
     if DoesWindowExist(CLEAR_WATCHES_WIN) then
         WindowSetShowing(CLEAR_WATCHES_WIN, onPotions)
     end
     if DoesWindowExist(HARVEST_WIN) then
         WindowSetShowing(HARVEST_WIN, onWatch)
         if onWatch then
-            local canHarvest = StockPiler2.Grow and StockPiler2.Grow.CanHarvestNow
+            canHarvest = StockPiler2.Grow and StockPiler2.Grow.CanHarvestNow
                 and StockPiler2.Grow.CanHarvestNow() == true
             ButtonSetDisabledFlag(HARVEST_WIN, not canHarvest)
             -- Disabled buttons still fire gameactionbutton if bound — bind/clear with ready state.
@@ -75,13 +77,23 @@ function StockPiler2Window.RefreshFooterButtons()
     if DoesWindowExist(BREW_WIN) then
         WindowSetShowing(BREW_WIN, onWatch)
         if onWatch then
-            local canBrew = StockPiler2.Brew and StockPiler2.Brew.CanBrewNow
+            canBrew = StockPiler2.Brew and StockPiler2.Brew.CanBrewNow
                 and StockPiler2.Brew.CanBrewNow() == true
             ButtonSetDisabledFlag(BREW_WIN, not canBrew)
         end
     end
-    if StockPiler2.Macro and StockPiler2.Macro.SyncEnabledState then
-        StockPiler2.Macro.SyncEnabledState()
+    if StockPiler2.Macro and StockPiler2.Macro.RequestEnabledSync then
+        if onWatch then
+            StockPiler2.Macro.RequestEnabledSync(canHarvest, canBrew)
+        else
+            StockPiler2.Macro.RequestEnabledSync()
+        end
+    elseif StockPiler2.Macro and StockPiler2.Macro.SyncEnabledState then
+        if onWatch then
+            StockPiler2.Macro.SyncEnabledState(canHarvest, canBrew)
+        else
+            StockPiler2.Macro.SyncEnabledState()
+        end
     end
 end
 

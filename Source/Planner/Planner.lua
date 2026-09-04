@@ -61,6 +61,52 @@ local function ApplyNeedApothecaryStatus(row)
     row.statusLines = lines
 end
 
+-- Red traffic-light statusKeys (TabWatch STATUS_COLORS COLOR_BLOCK).
+local RED_STATUS_KEYS = {
+    no_recipe = true,
+    enable_autogrow = true,
+    need_apothecary = true,
+    buy_ingredients = true,
+    need_materials = true,
+}
+
+Planner._watchBlockOnceKeys = Planner._watchBlockOnceKeys or {}
+
+local function NotifyWatchRedBlocks(rows)
+    local D = StockPiler2.Debug
+    if not D or not D.NotifyOnce then
+        return
+    end
+    local prev = Planner._watchBlockOnceKeys or {}
+    local now = {}
+    for i = 1, #rows do
+        local row = rows[i]
+        if type(row) == "table" then
+            local statusKey = tostring(row.statusKey or "")
+            if RED_STATUS_KEYS[statusKey] == true then
+                local watchKey = tostring(row.potionKey or row.id or i)
+                local onceKey = "watch-block:" .. watchKey .. ":" .. statusKey
+                now[watchKey] = onceKey
+                local name = row.name
+                if name == nil or name == L"" then
+                    name = L"watch"
+                end
+                local statusText = row.statusText
+                if statusText == nil or statusText == L"" then
+                    statusText = towstring(statusKey)
+                end
+                D.NotifyOnce(onceKey, name .. L": " .. statusText)
+            end
+        end
+    end
+    for watchKey, onceKey in pairs(prev) do
+        if now[watchKey] ~= onceKey and D.ClearNotifyOnce then
+            D.ClearNotifyOnce(onceKey)
+        end
+    end
+    Planner._watchBlockOnceKeys = now
+end
+
 local function CompareGrowPriority(a, b)
     local ca = tonumber(a.craftsHave) or 0
     local cb = tonumber(b.craftsHave) or 0
@@ -384,7 +430,20 @@ local function ApplySpecPlanStatus(row, target, recipe, demand)
     row.statusLines = lines
     row.statusNeedLine = lines[1]
 
+    -- Byproduct convert only claims "Restocking" when AutoGrow can feed it:
+    -- plant-kind deficits, or any recipe slot with seed credit (surplus grow for convert).
+    local convertFeedable = limiting ~= nil
+    if byproductShort ~= nil and not convertFeedable then
+        for i = 1, #slots do
+            local entry = RecipeSlotPlanEntry(slots[i], slots, craftsNeeded, demand)
+            if entry ~= nil and (tonumber(entry.seedCredit) or 0) > 0 then
+                convertFeedable = true
+                break
+            end
+        end
+    end
     if byproductShort ~= nil
+        and convertFeedable
         and (limiting == nil or (byproductShort.craftsHave or 0) <= (limiting.craftsHave or 0))
     then
         row.growable = wantsGrow
@@ -424,6 +483,14 @@ local function ApplySpecPlanStatus(row, target, recipe, demand)
         row.statusKey = "buy_ingredients"
         row.statusText = L"Buy materials"
         row.statusDetail = lines[2] or lines[1]
+        return
+    end
+    -- Byproduct short but no seed/plant feedstock and no other buy shorts.
+    if byproductShort ~= nil then
+        row.statusKey = "buy_ingredients"
+        row.statusText = L"Buy materials"
+        row.statusDetail = lines[2] or lines[1]
+        row.specDeficit = byproductShort
         return
     end
     row.statusKey = "ready_to_craft"
@@ -557,6 +624,7 @@ function Planner.BuildWatchRows(ctx)
         end
         ApplyNeedApothecaryStatus(row)
     end
+    NotifyWatchRedBlocks(rows)
     return rows
 end
 
@@ -716,6 +784,9 @@ function Planner.Build(opts)
     end
     if StockPiler2.Debug and StockPiler2.Debug.LogOp then
         StockPiler2.Debug.LogOp("plan", string.format("rebuild gen=%d key=%s", planGen, key))
+    end
+    if StockPiler2.Brew and StockPiler2.Brew.MaybeNotifyBrewReady then
+        StockPiler2.Brew.MaybeNotifyBrewReady()
     end
     local B = StockPiler2.EventBus
     local E = StockPiler2.Events

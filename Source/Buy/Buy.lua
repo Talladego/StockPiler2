@@ -771,39 +771,41 @@ function Buy.OnStoreUpdated()
     end
 end
 
+--- After a successful BuyItem: do not Flatten / invalidate plan / rebuild jobs.
+--- VisitAcquired already gates remaining qty this visit; bag slot events L0-update
+--- counts; store-close InvalidateJobsCache + snap coalesce rebuild plan/jobs.
+--- Per-purchase full MarkDirty + PlanSnapshot.Invalidate was Planner.Build +
+--- Buy.TryBuyNext dominating perf summaries.
 local function AfterPurchaseRefresh()
-    Buy.InvalidateJobsCache()
-    if StockPiler2.RecipeSpec and StockPiler2.RecipeSpec.ClearCountCaches then
-        StockPiler2.RecipeSpec.ClearCountCaches()
-    end
-    if StockPiler2.Inventory and StockPiler2.Inventory.MarkDirty then
-        StockPiler2.Inventory.MarkDirty({ reason = "autobuy", full = true })
-    end
-    if StockPiler2.Scheduler and StockPiler2.Scheduler.EnqueueBagFlush then
-        StockPiler2.Scheduler.EnqueueBagFlush(false)
-    end
-    if StockPiler2.PlanSnapshot and StockPiler2.PlanSnapshot.Invalidate then
-        StockPiler2.PlanSnapshot.Invalidate()
-    end
 end
 
 function Buy.TryBuyNext()
+    local Perf = StockPiler2.Perf
+    if Perf and Perf.Begin then
+        Perf.Begin("Buy.TryBuyNext")
+    end
+    local function done(result)
+        if Perf and Perf.End then
+            Perf.End("Buy.TryBuyNext")
+        end
+        return result
+    end
     if Buy._visitStopReason ~= nil then
-        return false
+        return done(false)
     end
     if not Buy.IsEnabled() then
-        return false
+        return done(false)
     end
     local VA = StockPiler2.VendorAdapter
     if not VA or not VA.IsStoreOpen or VA.IsStoreOpen() ~= true then
-        return false
+        return done(false)
     end
     if VA.IsBuybackView and VA.IsBuybackView() then
         if Buy._visitBuybackSkipLogged ~= true then
             Buy._visitBuybackSkipLogged = true
             LogBuyOp("skip buyback-view")
         end
-        return false
+        return done(false)
     end
     local busy = BuyBlockedReason()
     if busy ~= nil then
@@ -811,14 +813,14 @@ function Buy.TryBuyNext()
             Buy._lastBusyLog = busy
             LogBuyOp("wait " .. busy)
         end
-        return false
+        return done(false)
     end
     Buy._lastBusyLog = nil
 
     local purchases = tonumber(Buy._visitPurchases) or 0
     if purchases >= MAX_PURCHASES_PER_VISIT then
         ChatVisitStop("cap")
-        return false
+        return done(false)
     end
 
     local jobs = Buy.CollectBuyJobs()
@@ -832,7 +834,7 @@ function Buy.TryBuyNext()
         if (tonumber(Buy._visitBought) or 0) > 0 then
             ChatVisitStop("bought")
         end
-        return false
+        return done(false)
     end
     Buy._visitHadJobs = true
 
@@ -904,7 +906,7 @@ function Buy.TryBuyNext()
                     local slotNum = tonumber(item.slotNum)
                     if slotNum == nil or acquireKey == nil then
                         LogBuyOp("skip bad-slot-or-key job=" .. ToNarrow(job.name or job.kind))
-                        return false
+                        return done(false)
                     end
                     local ok, err = VA.BuyItem(item, qty)
                     if ok ~= true then
@@ -914,7 +916,7 @@ function Buy.TryBuyNext()
                             qty,
                             tostring(err)
                         ))
-                        return false
+                        return done(false)
                     end
                     Buy._visitSpentBrass = spent + costTotal
                     Buy._visitBought = (tonumber(Buy._visitBought) or 0) + qty
@@ -932,7 +934,7 @@ function Buy.TryBuyNext()
                         tonumber(Buy._visitSpentBrass) or 0,
                         tonumber(Buy._visitMoneyBrass) or 0
                     ))
-                    return true
+                    return done(true)
                 end
             end
         end
@@ -943,7 +945,7 @@ function Buy.TryBuyNext()
     elseif budgetBlock then
         ChatVisitStop("budget")
     end
-    return false
+    return done(false)
 end
 
 function Buy.OnTick()

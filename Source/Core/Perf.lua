@@ -160,6 +160,14 @@ function Perf.ShouldHoldTrail()
             return true
         end
     end
+    local Grow = StockPiler2.Grow
+    if Grow and Grow.IsHarvestOpActive and Grow.IsHarvestOpActive() == true then
+        return true
+    end
+    local Orch = StockPiler2.Orchestrator
+    if Orch and Orch.IsBrewSessionActive and Orch.IsBrewSessionActive() == true then
+        return true
+    end
     return false
 end
 
@@ -201,6 +209,13 @@ function Perf.SetFrameThreshold(ms)
         ms = 10000
     end
     Perf.FrameThresholdMs = ms
+    local s = StockPiler2.Settings
+    if type(s) ~= "table" and StockPiler2.Persistence and StockPiler2.Persistence.EnsureSettings then
+        s = StockPiler2.Persistence.EnsureSettings()
+    end
+    if type(s) == "table" then
+        s.perfThresholdMs = ms
+    end
     return ms
 end
 

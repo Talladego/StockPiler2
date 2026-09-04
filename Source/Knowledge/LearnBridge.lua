@@ -282,7 +282,6 @@ function LB.OnCultivationUpdated()
 end
 
 function LB.OnUpdateProcessed()
-    local marked = false
     if StockPiler2.SeedMap
         and StockPiler2.SeedMap.TryCompletePendingHarvest
         and type(StockPiler2.SeedMap._pendingHarvest) == "table"
@@ -290,20 +289,21 @@ function LB.OnUpdateProcessed()
         local pending = StockPiler2.SeedMap._pendingHarvest
         -- Pending harvest exists for the whole grow; only instrument when loot
         -- is dirty (otherwise every UPDATE_PROCESSED polluted Perf trails x1000+).
-        if pending.lootDirty == true and StockPiler2.Perf and StockPiler2.Perf.Begin then
+        -- End before Refine so Refine.OnUpdateProcessed is not attributed here.
+        local marked = pending.lootDirty == true
+        if marked and StockPiler2.Perf and StockPiler2.Perf.Begin then
             StockPiler2.Perf.Begin("LearnBridge.OnUpdate")
-            marked = true
         end
         local learned = StockPiler2.SeedMap.TryCompletePendingHarvest(false) == true
+        if marked and StockPiler2.Perf and StockPiler2.Perf.End then
+            StockPiler2.Perf.End("LearnBridge.OnUpdate")
+        end
         if learned then
             RefreshUiIfLearned()
         end
     end
     if StockPiler2.Refine and StockPiler2.Refine.OnUpdateProcessed then
         StockPiler2.Refine.OnUpdateProcessed()
-    end
-    if marked and StockPiler2.Perf and StockPiler2.Perf.End then
-        StockPiler2.Perf.End("LearnBridge.OnUpdate")
     end
 end
 

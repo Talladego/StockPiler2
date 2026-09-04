@@ -378,6 +378,25 @@ local function BumpWatch()
     end
 end
 
+local function NotifySettings(msg)
+    if StockPiler2.Debug and StockPiler2.Debug.Notify then
+        StockPiler2.Debug.Notify(msg)
+    elseif StockPiler2.Debug and StockPiler2.Debug.Print then
+        StockPiler2.Debug.Print(msg)
+    end
+end
+
+local function OnOff(flag)
+    return flag and L"ON" or L"OFF"
+end
+
+local function PotionLabel(data)
+    if type(data) == "table" and data.name ~= nil and data.name ~= L"" then
+        return data.name
+    end
+    return L"watch"
+end
+
 local function RowDataFromActiveChild()
     local win = SystemData.ActiveWindow and SystemData.ActiveWindow.name
     for _ = 1, 6 do
@@ -414,6 +433,7 @@ function StockPiler2TabWatch.OnToggleEnabled()
         return
     end
     row.autoGrowEnabled = ButtonGetPressedFlag(ENABLE_WIN) == true
+    NotifySettings(L"AutoGrow " .. OnOff(row.autoGrowEnabled))
     BumpWatch()
     if row.autoGrowEnabled == true then
         if StockPiler2.Scheduler and StockPiler2.Scheduler.WakeAutoGrow then
@@ -440,6 +460,7 @@ function StockPiler2TabWatch.OnToggleAdditives()
         return
     end
     row.autoGrowAdditives = ButtonGetPressedFlag(ADDITIVES_WIN) == true
+    NotifySettings(L"Additives " .. OnOff(row.autoGrowAdditives))
     BumpWatch()
 end
 
@@ -456,6 +477,7 @@ function StockPiler2TabWatch.OnToggleSeedBuffer()
         return
     end
     row.growSeedBufferEnabled = ButtonGetPressedFlag(SEED_BUFFER_ENABLE_WIN) == true
+    NotifySettings(L"Seed buffer " .. OnOff(row.growSeedBufferEnabled))
     BumpWatch()
 end
 
@@ -472,6 +494,7 @@ function StockPiler2TabWatch.OnToggleAutoBuy()
         return
     end
     row.autoBuyEnabled = ButtonGetPressedFlag(AUTOBUY_WIN) == true
+    NotifySettings(L"AutoBuy " .. OnOff(row.autoBuyEnabled))
     if StockPiler2.Buy and StockPiler2.Buy.InvalidateJobsCache then
         StockPiler2.Buy.InvalidateJobsCache()
     end
@@ -500,6 +523,12 @@ local function ChipStep(flags)
     return 1
 end
 
+local CHIP_NOTIFY_LABEL = {
+    growSeedBufferMin = L"Seed buffer",
+    autoBuyReserveGold = L"Reserve",
+    autoBuyBudgetGold = L"Budget",
+}
+
 local function AdjustChip(field, delta, lo, hi)
     local row = CharRow()
     if type(row) ~= "table" then
@@ -509,6 +538,10 @@ local function AdjustChip(field, delta, lo, hi)
     if n < lo then n = lo end
     if n > hi then n = hi end
     row[field] = n
+    local label = CHIP_NOTIFY_LABEL[field]
+    if label then
+        NotifySettings(label .. L" = " .. towstring(tostring(n)))
+    end
     BumpWatch()
     StockPiler2TabWatch.Refresh()
     if field == "autoBuyReserveGold" or field == "autoBuyBudgetGold" then
@@ -562,6 +595,7 @@ function StockPiler2TabWatch.OnToggleRowAutoGrow()
     end
     local watch = StockPiler2.Catalog.EnsureWatch(potionKey)
     watch.autoGrow = ButtonGetPressedFlag(clickWin) == true
+    NotifySettings(PotionLabel(data) .. L": AutoGrow " .. OnOff(watch.autoGrow))
     BumpWatch()
 end
 
@@ -581,6 +615,7 @@ function StockPiler2TabWatch.OnTargetLButtonUp(flags)
     end
     watch.targetStock = target
     watch.enabled = true
+    NotifySettings(PotionLabel(data) .. L": target = " .. towstring(tostring(target)))
     BumpWatch()
     StockPiler2TabWatch.Refresh()
 end
@@ -603,6 +638,7 @@ function StockPiler2TabWatch.OnTargetRButtonUp(flags)
     if target > 0 then
         watch.enabled = true
     end
+    NotifySettings(PotionLabel(data) .. L": target = " .. towstring(tostring(target)))
     BumpWatch()
     StockPiler2TabWatch.Refresh()
 end
@@ -772,6 +808,7 @@ local function CollectSeedBufferTooltipData()
                     rec = {
                         key = key,
                         name = SeedSpecLabel(spec),
+                        spec = spec,
                         count = 0,
                         plantNeed = 0,
                         seedBuffer = 0,
@@ -819,6 +856,31 @@ function StockPiler2TabWatch.OnMouseOverSeedBuffer()
         return
     end
 
+    local MS = StockPiler2.MaterialSpec
+    local colorOk = RgbDef(COLOR_OK)
+    local colorWarn = RgbDef(COLOR_WARN)
+    local colorBlock = RgbDef(COLOR_BLOCK)
+    local sepLine = (StockPiler2RecipeTooltip and StockPiler2RecipeTooltip.SEP_LINE)
+        or L"----------------------------------------"
+
+    local function AppendSep(rows)
+        if StockPiler2RecipeTooltip and StockPiler2RecipeTooltip.AppendSeparator then
+            StockPiler2RecipeTooltip.AppendSeparator(rows)
+        else
+            rows[#rows + 1] = { text = sepLine, kind = "separator" }
+        end
+    end
+
+    local function SpecHeaderDetail(spec, fallbackName)
+        local parts = MS and MS.NeedLabelParts and MS.NeedLabelParts(spec) or nil
+        local header = parts and parts.header
+        if header == nil or header == L"" then
+            header = fallbackName or L"Watched seed"
+        end
+        local detail = parts and parts.detail or L""
+        return header, detail
+    end
+
     local rows = {
         { text = L"StockPiler2 Seed Buffer", kind = "title" },
         {
@@ -832,29 +894,47 @@ function StockPiler2TabWatch.OnMouseOverSeedBuffer()
         { text = L"Watched seeds", kind = "meta" },
     }
 
+    -- Multi-line blocks (~3–4 rows each + seps); DefaultTooltip ~17 rows.
+    local maxWatched = 4
+    local maxIntents = 3
+
     if #data.watched == 0 then
         rows[#rows + 1] = { text = L"No growable watched seed lines found.", kind = "meta" }
     else
-        local maxWatched = 6
-        for i = 1, math.min(#data.watched, maxWatched) do
+        local shown = math.min(#data.watched, maxWatched)
+        for i = 1, shown do
+            AppendSep(rows)
             local w = data.watched[i]
+            local header, detail = SpecHeaderDetail(w.spec, w.name)
+            rows[#rows + 1] = { text = ToW(header), kind = "ingredient" }
+            if detail ~= nil and detail ~= L"" then
+                rows[#rows + 1] = { text = ToW(detail), kind = "bonus" }
+            end
+
             local liveText = towstring(tostring(w.live))
             if (tonumber(w.ground) or 0) > 0 then
                 liveText = liveText .. L"+" .. towstring(tostring(w.ground)) .. L"g"
             end
-            local line = ToW(w.name)
-                .. L": live "
+            local statusText = L"live "
                 .. liveText
                 .. L" + planned "
                 .. towstring(tostring(w.planned))
                 .. L" / "
                 .. towstring(tostring(data.buffer))
-            if w.shortBy > 0 then
-                line = line .. L" (SHORT by " .. towstring(tostring(w.shortBy)) .. L")"
-                rows[#rows + 1] = { text = line, kind = "warning" }
+            local credit = tonumber(w.total) or ((tonumber(w.live) or 0) + (tonumber(w.ground) or 0) + (tonumber(w.planned) or 0))
+            local shortBy = tonumber(w.shortBy) or 0
+            local statusColor = colorOk
+            if shortBy > 0 then
+                statusText = statusText .. L" (SHORT by " .. towstring(tostring(shortBy)) .. L")"
+                if credit <= 0 then
+                    statusColor = colorBlock
+                else
+                    statusColor = colorWarn
+                end
             else
-                rows[#rows + 1] = { text = line .. L" (OK)", kind = "stocked" }
+                statusText = statusText .. L" (OK)"
             end
+            rows[#rows + 1] = { text = statusText, kind = "body", color = statusColor }
         end
         if #data.watched > maxWatched then
             rows[#rows + 1] = {
@@ -868,9 +948,15 @@ function StockPiler2TabWatch.OnMouseOverSeedBuffer()
     if #data.intents == 0 then
         rows[#rows + 1] = { text = L"No refine ops queued.", kind = "meta" }
     else
-        local maxIntents = 6
-        for i = 1, math.min(#data.intents, maxIntents) do
+        local shown = math.min(#data.intents, maxIntents)
+        for i = 1, shown do
+            AppendSep(rows)
             local it = data.intents[i]
+            local header, detail = SpecHeaderDetail(it.spec, it.name)
+            rows[#rows + 1] = { text = ToW(header), kind = "ingredient" }
+            if detail ~= nil and detail ~= L"" then
+                rows[#rows + 1] = { text = ToW(detail), kind = "bonus" }
+            end
             local reason = L"buffer"
             if it.plantNeed > 0 and it.seedBuffer > 0 then
                 reason = L"need+buffer"
@@ -878,12 +964,7 @@ function StockPiler2TabWatch.OnMouseOverSeedBuffer()
                 reason = L"need"
             end
             rows[#rows + 1] = {
-                text = ToW(it.name)
-                    .. L": "
-                    .. towstring(tostring(it.count))
-                    .. L" queued ("
-                    .. reason
-                    .. L")",
+                text = towstring(tostring(it.count)) .. L" queued (" .. reason .. L")",
                 kind = "body",
             }
         end
@@ -1303,12 +1384,24 @@ function StockPiler2TabWatch.OnMouseOverStatus()
                     }
                 end
 
-                local isGrowPath = entry.kind == "plant" or entry.kind == "convert"
-                local isBuyPath = not isGrowPath
+                local isBuyPath = entry.kind ~= "plant" and entry.kind ~= "convert"
                 local stocked = entry.stocked == true or (tonumber(entry.deficit) or 0) <= 0
                 local haveColor = colorOk
                 if not stocked then
-                    haveColor = isBuyPath and colorBlock or colorWarn
+                    if entry.kind == "convert" then
+                        -- Byproduct: yellow only while a plant-kind sibling can feed convert.
+                        local feedable = false
+                        for j = 1, #slots do
+                            local sibling = slots[j]
+                            if type(sibling) == "table" and sibling.kind == "plant" then
+                                feedable = true
+                                break
+                            end
+                        end
+                        haveColor = feedable and colorWarn or colorBlock
+                    else
+                        haveColor = isBuyPath and colorBlock or colorWarn
+                    end
                 end
                 local statusNote = nil
                 local noteKind = stocked and "stocked" or "body"

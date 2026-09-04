@@ -2,7 +2,7 @@
 
 Greenfield rewrite of StockPiler using an **Orchestrator + Stores + Planner + Executors** architecture. Runs as a **separate addon** alongside v1 — does not modify the original StockPiler folder.
 
-**Version:** 0.4.13
+**Version:** 0.4.23
 
 Repository: [Talladego/StockPiler2](https://github.com/Talladego/StockPiler2)
 
@@ -30,10 +30,12 @@ On first load, StockPiler2 creates ActionBar macros **StockPiler2 Harvest** and 
 | `/sp2 buyplan` | Buy job dump |
 | `/sp2 bags` / `bags force` | Bag snapshot dump |
 | `/sp2 events` / `on` / `off` / `dump` | Internal event bus trace |
-| `/sp2 perf` / `on` / `off` / `summary` | Frametime hitch logger |
-| `/sp2 perf on [ms]` / `baseline [ms]` | Hitch threshold / baseline |
+| `/sp2 perf` / `on` / `off` / `summary` | Frametime hitch logger (trail breadcrumbs in uilog) |
+| `/sp2 perf on [ms]` / `baseline [ms]` | Hitch threshold (persisted) / baseline |
 | `/sp2 audit` | Saved variables health |
 | `/sp2 harvest` | Prepare next ready plot (macro/CMD path) |
+
+Perf tip: spikes with `trail=(none)` / high `emptyTrail%` on baseline are usually **engine** stalls (native craft/UI), not missing Lua sites. Threshold from `/sp2 perf on [ms]` is saved in settings.
 
 ## UI
 
@@ -92,6 +94,20 @@ StockPiler2 starts with **empty** learned data. Relearn recipes in-game (brew on
 
 Separate from v1 `StockPiler.*` saved variables.
 
+## Future considerations
+
+Optional ideas for later — not commitments:
+
+- **Bank / alts** — stock targets stay bag-local; no cross-character or bank-aware targets
+- **Multi-character / shared Account learnings** — deeper “this alt can’t grow that tier” UX on top of shared Account knowledge
+- **Scenario / combat / travel policy** — finer “pause AutoGrow in context X” rules
+- **Vendor / AH strategy** — AutoBuy is store-visit only; no auction house or route planning
+- **Idle plant-bag floors** without raising potion targets — consciously deferred (raise the potion target instead)
+- **Bulk refine / queue craft** — not a full refine-automation product
+- **Export/import watch presets** — convenience
+
+A dedicated **Plants** tab was considered and rejected; surplus plant materials are handled by raising potion stock targets instead.
+
 ## Versioning
 
 On each user-facing ship, bump together:
@@ -107,6 +123,26 @@ On each user-facing ship, bump together:
 | **Major** (`N+1.0.0`) | Breaking saved-var / architecture break (rare in 0.x) |
 
 ## Changelog
+
+**0.4.23:** Perf — Macro ignore hotbar echoes during appearance refresh; harvest mat snapshot prefers Inventory L0; LearnBridge perf excludes Refine; AutoBuy skips per-purchase Flatten/plan/jobs invalidate; Watch UI defers during AutoBuy visit.
+
+**0.4.22:** Macro — coalesce hotbar enable sync; short-circuit appearance before Perf.Begin; stop dirty-reentry key wipe (cuts Macro.Appearance trail spam).
+
+**0.4.21:** Perf — breadcrumbs for Garden sync, harvest prepare/wake, Brew tick/load, Buy, Macro appearance; hold trail during harvest/brew; persist `/sp2 perf on [ms]` threshold.
+
+**0.4.20:** Harvest ready chat/sound — only when every planted plot is grown (empty plots ignored).
+
+**0.4.19:** Harvest ready sound — `HELP_TIPS_NEW` (was `PREGAME_DONE_BUTTON`).
+
+**0.4.18:** Sounds — harvest ready (`PREGAME_DONE_BUTTON`) and brew ready (`HELP_TIPS_HIGHTLIGHT_WINDOW`) play with their one-shot chat lines.
+
+**0.4.17:** Chat — plant ops (+ reason), harvest/brew ready (once), brew success/fail, TabWatch settings changes, one-shot red watch status.
+
+**0.4.16:** Watch Restocking tip — byproduct stabilizers red (not yellow) when no plant feedstock; skip "Restocking materials" status with empty seed lines.
+
+**0.4.15:** Harvest/Brew — trade-skill gate enablement (Cultivation / Apothecary); footer and macro tooltips explain when gated.
+
+**0.4.14:** Seed Buffer tooltip — recipe/restocking layout (dashed separators, green material headers, yellow detail, traffic-light SHORT/partial/OK).
 
 **0.4.13:** Macros — mushroom / madened-speed elixir icons; disable hotbar macros with footer rules (disabled DDS); drop checkbox overlays.
 

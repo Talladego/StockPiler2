@@ -89,6 +89,42 @@ local function LogOnce(key, msg)
     end
 end
 
+local function NotifyChat(msg)
+    if StockPiler2.Debug and StockPiler2.Debug.Notify then
+        StockPiler2.Debug.Notify(msg)
+    elseif StockPiler2.Debug and StockPiler2.Debug.Print then
+        StockPiler2.Debug.Print(msg)
+    end
+end
+
+local function NotifyChatOnce(key, msg)
+    if StockPiler2.Debug and StockPiler2.Debug.NotifyOnce then
+        return StockPiler2.Debug.NotifyOnce(key, msg) == true
+    end
+    NotifyChat(msg)
+    return true
+end
+
+local function ClearNotifyChatOnce(key)
+    if StockPiler2.Debug and StockPiler2.Debug.ClearNotifyOnce then
+        StockPiler2.Debug.ClearNotifyOnce(key)
+    end
+end
+
+local function PlayUiSound(soundId)
+    if StockPiler2.Debug and StockPiler2.Debug.PlayUiSound then
+        StockPiler2.Debug.PlayUiSound(soundId)
+    elseif type(PlaySound) == "function" and soundId ~= nil then
+        pcall(PlaySound, soundId)
+    end
+end
+
+local PLANT_REASON_LABEL = {
+    potion_stock = "stock",
+    seed_buffer = "buffer",
+    surplus = "surplus",
+}
+
 function Grow.StageEmpty()
     if GameData and GameData.CultivationStage and GameData.CultivationStage.EMPTY ~= nil then
         return GameData.CultivationStage.EMPTY
@@ -1025,8 +1061,48 @@ function Grow.GetReadyHarvestPlots()
     return ready
 end
 
+--- True when every non-empty plot is grown (ready to harvest); empty plots ignored.
+function Grow.AllPlantedPlotsHarvestReady()
+    local CA = StockPiler2.CultivatorAdapter
+    local n = CA and CA.NumPlots and CA.NumPlots() or 4
+    local planted = 0
+    local ready = 0
+    for plotNum = 1, n do
+        local plot = nil
+        if CA and CA.ReadPlot then
+            plot = CA.ReadPlot(plotNum)
+        else
+            plot = Grow.CachedPlot(plotNum)
+        end
+        if type(plot) == "table" then
+            local stage = Grow.NormalizeStage(plot.stage)
+            if stage ~= Grow.StageEmpty() then
+                planted = planted + 1
+                if Grow.IsPlotGrown(stage) then
+                    ready = ready + 1
+                end
+            end
+        end
+    end
+    return planted > 0 and ready == planted, ready, planted
+end
+
 function Grow.CountReadyHarvestPlots()
-    return #Grow.GetReadyHarvestPlots()
+    local n = #Grow.GetReadyHarvestPlots()
+    local allReady, readyN = Grow.AllPlantedPlotsHarvestReady()
+    if allReady then
+        local printed = NotifyChatOnce(
+            "harvest-ready",
+            L"Harvest ready: " .. towstring(tostring(readyN)) .. L" plot(s)."
+        )
+        if printed then
+            local soundId = GameData and GameData.Sound and GameData.Sound.HELP_TIPS_NEW
+            PlayUiSound(soundId)
+        end
+    else
+        ClearNotifyChatOnce("harvest-ready")
+    end
+    return n
 end
 
 function Grow.HasHarvestInProgress()
@@ -1269,8 +1345,12 @@ function Grow.SelectHarvestPlot(manual)
     return true, pick, plotData
 end
 
---- True when a harvest can proceed (ready plot, not brew-blocked).
+--- True when a harvest can proceed (Cultivation, ready plot, not brew-blocked).
 function Grow.CanHarvestNow()
+    local Caps = StockPiler2.TradeSkillCaps
+    if Caps and Caps.HasCultivation and Caps.HasCultivation() ~= true then
+        return false
+    end
     if StockPiler2.Brew and StockPiler2.Brew.BlocksHarvest
         and StockPiler2.Brew.BlocksHarvest() == true
     then
@@ -1282,12 +1362,23 @@ end
 
 --- Prepare CurrentPlot + harvest watch; game-action button performs the craft.
 function Grow.PrepareHarvestPlot(manual)
+    local Perf = StockPiler2.Perf
+    if Perf and Perf.Begin then
+        Perf.Begin("Grow.PrepareHarvest")
+    end
+    local function done()
+        if Perf and Perf.End then
+            Perf.End("Grow.PrepareHarvest")
+        end
+    end
     if Grow.CanHarvestNow and Grow.CanHarvestNow() ~= true then
+        done()
         return false
     end
     Grow.EnsureHarvestActionBound()
     local ok, plotNum = Grow.SelectHarvestPlot(manual == true)
     if ok ~= true then
+        done()
         return false
     end
     Grow.ArmHarvestOpLock(Grow.HARVEST_OP_LOCK_SEC)
@@ -1297,6 +1388,7 @@ function Grow.PrepareHarvestPlot(manual)
         tostring(manual == true),
         Grow.CountReadyHarvestPlots()
     ))
+    done()
     return true
 end
 
@@ -1306,6 +1398,16 @@ end
 --- Per-plot wakes (P1–P4) share one force-invalidate + plant quiet window so replant
 --- does not stack on the engine harvest hitch.
 function Grow.WakeAfterHarvest(plotNum)
+    local Perf = StockPiler2.Perf
+    if Perf and Perf.Begin then
+        Perf.Begin("Grow.WakeAfterHarvest")
+    end
+    local function done(result)
+        if Perf and Perf.End then
+            Perf.End("Grow.WakeAfterHarvest")
+        end
+        return result
+    end
     plotNum = tonumber(plotNum) or 0
     local now = NowSec()
     local plantDelay = tonumber(Grow.POST_HARVEST_PLANT_DELAY_SEC) or 1.2
@@ -1322,7 +1424,8 @@ function Grow.WakeAfterHarvest(plotNum)
             if StockPiler2.Scheduler and StockPiler2.Scheduler.WakeAutoGrow then
                 StockPiler2.Scheduler.WakeAutoGrow()
             end
-            return Grow.HasSeedsForNextPlant and Grow.HasSeedsForNextPlant() == true
+            local plantable = Grow.HasSeedsForNextPlant and Grow.HasSeedsForNextPlant() == true
+            return done(plantable)
         end
         Grow._lastChatHarvestWakeAt = now
     end
@@ -1360,7 +1463,7 @@ function Grow.WakeAfterHarvest(plotNum)
             plantDelay
         )
     )
-    return plantable
+    return done(plantable)
 end
 
 function Grow.LogSkipPlant(reason)
@@ -1495,6 +1598,12 @@ function Grow.TryPlantNextEmptyPlot(opId)
     if ok ~= true then
         Grow.ClearPendingPlot(plotNum)
         LogGrow("plant failed P" .. tostring(plotNum) .. " err=" .. tostring(err))
+        NotifyChat(
+            L"Plant failed P"
+                .. towstring(tostring(plotNum))
+                .. L": "
+                .. towstring(tostring(err or "unknown"))
+        )
         if StockPiler2.Perf and StockPiler2.Perf.End then
             StockPiler2.Perf.End("Grow.TryPlant")
         end
@@ -1518,6 +1627,23 @@ function Grow.TryPlantNextEmptyPlot(opId)
             StockPiler2.SeedMap.LearnMapping(plantUid, seedUid, "plant", true)
         end
     end
+    local reasonRaw = tostring(job.plantReason or "potion_stock")
+    local reasonLabel = PLANT_REASON_LABEL[reasonRaw] or reasonRaw
+    local seedName = L"seed"
+    if type(item) == "table" and item.name ~= nil and item.name ~= L"" then
+        seedName = item.name
+    elseif type(job.seed) == "table" and job.seed.name ~= nil and job.seed.name ~= L"" then
+        seedName = job.seed.name
+    end
+    NotifyChat(
+        L"Planted P"
+            .. towstring(tostring(plotNum))
+            .. L" "
+            .. seedName
+            .. L" ("
+            .. towstring(reasonLabel)
+            .. L")"
+    )
     LogPlant(string.format(
         "P%d %s uid=%d plantUid=%d reason=%s deficit=%d craftsShort=%d plantable=%d opId=%s",
         plotNum,
@@ -2406,6 +2532,29 @@ function Grow.ShowHarvestTooltip(anchorWindow, anchor, liveRefresh)
     local heading = (Tooltips and Tooltips.COLOR_HEADING) or { r = 255, g = 204, b = 102 }
     setTooltipRowColor(1, 1, heading)
 
+    local Caps = StockPiler2.TradeSkillCaps
+    local hasCult = Caps and Caps.HasCultivation and Caps.HasCultivation() == true
+    if not hasCult then
+        local text = L"Harvest requires Cultivation."
+        local gather = Caps and Caps.GatheringLabel and Caps.GatheringLabel()
+        if gather ~= nil and gather ~= L"Cultivation" then
+            text = text
+                .. L" This character gathers via "
+                .. gather
+                .. L" — plant mats must be bought or grown on a Cultivator."
+        end
+        Tooltips.SetTooltipText(2, 1, text)
+        local warn = (Tooltips and Tooltips.COLOR_WARNING) or { r = 220, g = 120, b = 120 }
+        setTooltipRowColor(2, 1, warn)
+        Tooltips.Finalize()
+        Tooltips.AnchorTooltip(anchor or Tooltips.ANCHOR_WINDOW_TOP)
+        local tip = Grow._liveHarvestTip
+        if tip and tip.anchor == anchorWindow then
+            tip.fingerprint = Grow.HarvestTooltipFingerprint()
+        end
+        return
+    end
+
     local readyN = Grow.CountReadyHarvestPlots and Grow.CountReadyHarvestPlots() or 0
     local brewBlocks = StockPiler2.Brew
         and StockPiler2.Brew.BlocksHarvest
@@ -2517,6 +2666,9 @@ function Grow.HarvestTooltipFingerprint()
         end
     end
     parts[#parts + 1] = (Grow.IsEnabled and Grow.IsEnabled() == true) and "ag1" or "ag0"
+    local Caps = StockPiler2.TradeSkillCaps
+    local hasCult = Caps and Caps.HasCultivation and Caps.HasCultivation() == true
+    parts[#parts + 1] = hasCult and "cult1" or "cult0"
     local readyN = Grow.CountReadyHarvestPlots and Grow.CountReadyHarvestPlots() or 0
     parts[#parts + 1] = ((tonumber(readyN) or 0) > 0) and "rdy" or "wait"
     local brewBlocks = StockPiler2.Brew
