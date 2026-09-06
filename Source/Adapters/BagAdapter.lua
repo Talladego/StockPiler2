@@ -1,5 +1,6 @@
 ----------------------------------------------------------------
 -- StockPiler2 Adapters/BagAdapter — read backpack + craft bag tables
+-- Hot path: DataUtils dirty-gated cache (no force-dirty). FetchForce = recovery only.
 ----------------------------------------------------------------
 
 StockPiler2.BagAdapter = StockPiler2.BagAdapter or {}
@@ -19,36 +20,57 @@ local function TryQuiet(label, fn, ...)
     return pcall(fn, ...)
 end
 
-local function FetchBags(forceRefresh)
-    local bags = {}
-    if forceRefresh == true and GameData and GameData.Player then
-        GameData.Player.itemsDirty = true
-        GameData.Player.craftingItemsDirty = true
+--- Backpack-equivalent: DataUtils.GetItems / GetCraftingItems (or engine fallback).
+--- Does not set dirty flags — trusts engine/DataUtils dirty gate.
+function BA.GetBagTable(bagType)
+    bagType = tostring(bagType or BAG_MAIN)
+    if bagType == BAG_CRAFT then
+        if DataUtils and type(DataUtils.GetCraftingItems) == "function" then
+            local ok, data = TryQuiet("BagAdapter.GetCraftingItems", DataUtils.GetCraftingItems)
+            if ok and type(data) == "table" then
+                return data
+            end
+        elseif type(GetCraftingItemData) == "function" then
+            local ok, data = TryQuiet("BagAdapter.GetCraftingItemData", GetCraftingItemData)
+            if ok and type(data) == "table" then
+                return data
+            end
+        end
+        return nil
     end
     if DataUtils and type(DataUtils.GetItems) == "function" then
         local ok, data = TryQuiet("BagAdapter.GetItems", DataUtils.GetItems)
         if ok and type(data) == "table" then
-            bags[#bags + 1] = { bagType = BAG_MAIN, data = data }
+            return data
         end
     elseif type(GetInventoryItemData) == "function" then
         local ok, data = TryQuiet("BagAdapter.GetInventoryItemData", GetInventoryItemData)
         if ok and type(data) == "table" then
-            bags[#bags + 1] = { bagType = BAG_MAIN, data = data }
+            return data
         end
     end
+    return nil
+end
+
+local function FetchBags(forceRefresh)
+    if forceRefresh == true and GameData and GameData.Player then
+        -- Recovery only: force engine re-dump on next GetItems / GetCraftingItems.
+        GameData.Player.itemsDirty = true
+        GameData.Player.craftingItemsDirty = true
+    end
+    local bags = {}
+    local main = BA.GetBagTable(BAG_MAIN)
+    if type(main) == "table" then
+        bags[#bags + 1] = { bagType = BAG_MAIN, data = main }
+    end
+    -- Stock GetCraftingItems clears itemsDirty (client bug); ensure craft dirty stuck
+    -- if we forced both above so craft still reloads when called second.
     if forceRefresh == true and GameData and GameData.Player then
         GameData.Player.craftingItemsDirty = true
     end
-    if DataUtils and type(DataUtils.GetCraftingItems) == "function" then
-        local ok, data = TryQuiet("BagAdapter.GetCraftingItems", DataUtils.GetCraftingItems)
-        if ok and type(data) == "table" then
-            bags[#bags + 1] = { bagType = BAG_CRAFT, data = data }
-        end
-    elseif type(GetCraftingItemData) == "function" then
-        local ok, data = TryQuiet("BagAdapter.GetCraftingItemData", GetCraftingItemData)
-        if ok and type(data) == "table" then
-            bags[#bags + 1] = { bagType = BAG_CRAFT, data = data }
-        end
+    local craft = BA.GetBagTable(BAG_CRAFT)
+    if type(craft) == "table" then
+        bags[#bags + 1] = { bagType = BAG_CRAFT, data = craft }
     end
     return bags
 end
@@ -57,6 +79,7 @@ function BA.FetchLight()
     return FetchBags(false)
 end
 
+--- Forces engine bag dumps. Use only for session load / explicit desync recovery.
 function BA.FetchForce()
     return FetchBags(true)
 end
@@ -111,35 +134,37 @@ function BA.IterateSlots(bagEntry, fn)
     end
 end
 
+--- Read one slot from a pre-fetched bag table (preferred for multi-slot events).
+function BA.ReadSlotFromTable(bagTable, slot)
+    slot = tonumber(slot) or 0
+    if slot <= 0 or type(bagTable) ~= "table" then
+        return 0, 0, nil
+    end
+    local item = bagTable[slot]
+    local uid, qty = BA.SlotQty(item)
+    return uid, qty, item
+end
+
 function BA.ReadSlot(bagType, slot)
     bagType = tostring(bagType or BAG_MAIN)
     slot = tonumber(slot) or 0
     if slot <= 0 then
         return 0, 0, nil
     end
-    -- Prefer single-slot API (no full bag fetch).
+    -- Index warm DataUtils cache (GetItems/GetCraftingItems); no FetchLight per slot.
+    local bag = BA.GetBagTable(bagType)
+    if type(bag) == "table" then
+        return BA.ReadSlotFromTable(bag, slot)
+    end
     if DataUtils and type(DataUtils.GetItemData) == "function" and GameData and GameData.ItemLocs then
-        local itemLoc = nil
-        if bagType == BAG_CRAFT then
-            itemLoc = GameData.ItemLocs.CRAFTING_ITEM
-        else
-            itemLoc = GameData.ItemLocs.INVENTORY
-        end
+        local itemLoc = bagType == BAG_CRAFT and GameData.ItemLocs.CRAFTING_ITEM
+            or GameData.ItemLocs.INVENTORY
         if itemLoc ~= nil then
             local ok, item = TryQuiet("BagAdapter.GetItemData", DataUtils.GetItemData, itemLoc, slot)
             if ok then
                 local uid, qty = BA.SlotQty(item)
                 return uid, qty, item
             end
-        end
-    end
-    local bags = BA.FetchLight()
-    for i = 1, #bags do
-        local entry = bags[i]
-        if entry.bagType == bagType then
-            local item = entry.data and entry.data[slot]
-            local uid, qty = BA.SlotQty(item)
-            return uid, qty, item
         end
     end
     return 0, 0, nil
@@ -155,30 +180,9 @@ function BA.FetchBag(bagType, forceRefresh)
             GameData.Player.itemsDirty = true
         end
     end
-    if bagType == BAG_CRAFT then
-        if DataUtils and type(DataUtils.GetCraftingItems) == "function" then
-            local ok, data = TryQuiet("BagAdapter.GetCraftingItems", DataUtils.GetCraftingItems)
-            if ok and type(data) == "table" then
-                return { bagType = BAG_CRAFT, data = data }
-            end
-        elseif type(GetCraftingItemData) == "function" then
-            local ok, data = TryQuiet("BagAdapter.GetCraftingItemData", GetCraftingItemData)
-            if ok and type(data) == "table" then
-                return { bagType = BAG_CRAFT, data = data }
-            end
-        end
-    else
-        if DataUtils and type(DataUtils.GetItems) == "function" then
-            local ok, data = TryQuiet("BagAdapter.GetItems", DataUtils.GetItems)
-            if ok and type(data) == "table" then
-                return { bagType = BAG_MAIN, data = data }
-            end
-        elseif type(GetInventoryItemData) == "function" then
-            local ok, data = TryQuiet("BagAdapter.GetInventoryItemData", GetInventoryItemData)
-            if ok and type(data) == "table" then
-                return { bagType = BAG_MAIN, data = data }
-            end
-        end
+    local data = BA.GetBagTable(bagType)
+    if type(data) == "table" then
+        return { bagType = bagType == BAG_CRAFT and BAG_CRAFT or BAG_MAIN, data = data }
     end
     return nil
 end

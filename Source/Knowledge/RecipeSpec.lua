@@ -1104,6 +1104,9 @@ function RS.StoreLearnedRecipeSpec(materials, outputs, opts)
     if StockPiler2.Planner and StockPiler2.Planner.InvalidatePlanCache then
         StockPiler2.Planner.InvalidatePlanCache()
     end
+    if StockPiler2.Scheduler and StockPiler2.Scheduler.EnqueuePlanRebuild then
+        StockPiler2.Scheduler.EnqueuePlanRebuild()
+    end
     if StockPiler2.Knowledge and StockPiler2.Knowledge.Touch then
         StockPiler2.Knowledge.Touch()
     end
@@ -1947,11 +1950,188 @@ function RS.MigrateWatchesToPotionRecipeKeys()
 end
 
 function RS.ClearCountCaches()
-    RS._specHaveCache = nil
+    RS._specHaveCache = {}
+    RS._specHaveSnapGen = nil
     RS._demandCache = nil
     RS._demandSnapGen = nil
     RS._autoGrowSeedLines = nil
     RS._autoGrowSeedLinesKey = nil
+    RS._expectedCraftableCache = nil
+    RS._expectedCraftableSnapGen = nil
+    RS._orchTickDemand = nil
+    RS._orchTickDemandTick = nil
+    RS._orchTickSeedLines = nil
+    RS._orchTickSeedLinesTick = nil
+    RS._craftsPossibleMemo = nil
+end
+
+--- Cleared at Planner.Build start; memoizes CountCraftsPossible (non-reserve) for the build.
+function RS.BeginPlanCraftsMemo()
+    RS._craftsPossibleMemo = {}
+end
+
+--- Incomplete+boundUid specs match by uniqueID only (see MaterialSpec.ProductMatches).
+local function SpecHaveBoundUid(spec)
+    if type(spec) ~= "table" or spec.incomplete ~= true then
+        return 0
+    end
+    return tonumber(spec.boundUid) or 0
+end
+
+local function EnsureSpecHaveCacheForSnap()
+    local snapGen = 0
+    if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
+        snapGen = tonumber(StockPiler2.Inventory.GetSnapGen()) or 0
+    end
+    if type(RS._specHaveCache) ~= "table" or RS._specHaveSnapGen ~= snapGen then
+        RS._specHaveCache = {}
+        RS._specHaveSnapGen = snapGen
+    end
+    return RS._specHaveCache
+end
+
+local function ItemStackQty(item)
+    local n = tonumber(item.stackCount) or tonumber(item.StackCount) or 1
+    if n < 1 then
+        n = 1
+    end
+    return n
+end
+
+local function ItemUsableForSpecHave(item)
+    if type(item) ~= "table" then
+        return false
+    end
+    if StockPiler2.Inventory and StockPiler2.Inventory.CanUseCraftingItem
+        and not StockPiler2.Inventory.CanUseCraftingItem(item)
+    then
+        return false
+    end
+    if StockPiler2.Inventory and StockPiler2.Inventory.IsSeedOrSporeItem
+        and StockPiler2.Inventory.IsSeedOrSporeItem(item)
+    then
+        return false
+    end
+    return true
+end
+
+--- One bag walk for all uncached fuzzy specs; CountByUid for uid-bound incomplete specs.
+--- specs: array of MaterialSpec tables, or map of rows with .spec, or map of specs.
+function RS.WarmSpecHaveCache(specs)
+    if type(specs) ~= "table" or not MS then
+        return 0
+    end
+    if not MS.ProductMatches and not MS.Matches then
+        return 0
+    end
+    local cache = EnsureSpecHaveCacheForSnap()
+    local list = {}
+    if specs[1] ~= nil then
+        for i = 1, #specs do
+            local v = specs[i]
+            if type(v) == "table" then
+                if type(v.spec) == "table" then
+                    list[#list + 1] = v.spec
+                else
+                    list[#list + 1] = v
+                end
+            end
+        end
+    else
+        for _, v in pairs(specs) do
+            if type(v) == "table" then
+                if type(v.spec) == "table" then
+                    list[#list + 1] = v.spec
+                else
+                    list[#list + 1] = v
+                end
+            end
+        end
+    end
+    local pending = {}
+    local pendingKeys = {}
+    local filled = 0
+    for i = 1, #list do
+        local spec = list[i]
+        local specKey = MS.Key and MS.Key(spec) or nil
+        if specKey ~= nil and cache[specKey] == nil then
+            local boundUid = SpecHaveBoundUid(spec)
+            if boundUid > 0 and StockPiler2.Inventory and StockPiler2.Inventory.CountByUid then
+                cache[specKey] = tonumber(StockPiler2.Inventory.CountByUid(boundUid)) or 0
+                filled = filled + 1
+            elseif pendingKeys[specKey] ~= true then
+                pendingKeys[specKey] = true
+                pending[#pending + 1] = { key = specKey, spec = spec }
+            end
+        end
+    end
+    if #pending == 0 then
+        return filled
+    end
+    for i = 1, #pending do
+        cache[pending[i].key] = 0
+    end
+    if StockPiler2.Inventory and StockPiler2.Inventory.ForEachItem then
+        StockPiler2.Inventory.ForEachItem(function(item)
+            if not ItemUsableForSpecHave(item) then
+                return
+            end
+            local qty = ItemStackQty(item)
+            for i = 1, #pending do
+                local entry = pending[i]
+                local match = false
+                if MS.ProductMatches then
+                    match = MS.ProductMatches(item, entry.spec) == true
+                elseif MS.Matches then
+                    match = MS.Matches(item, entry.spec) == true
+                end
+                if match then
+                    cache[entry.key] = cache[entry.key] + qty
+                end
+            end
+        end)
+    end
+    return filled + #pending
+end
+
+--- Warm have-cache from every enabled watch recipe slot (Planner.Build entry).
+function RS.WarmSpecHaveCacheForWatches()
+    local s = EnsureSettings()
+    if type(s) ~= "table" or type(s.watches) ~= "table" then
+        EnsureSpecHaveCacheForSnap()
+        return 0
+    end
+    local specs = {}
+    for watchKey, watch in pairs(s.watches) do
+        if type(watch) == "table" and watch.enabled == true then
+            local recipe = RS.RecipeSpecForPotion and RS.RecipeSpecForPotion(watchKey)
+            if type(recipe) == "table" then
+                if RS.HydrateRecipeSlots then
+                    RS.HydrateRecipeSlots(recipe)
+                end
+                local slots = recipe.slots
+                if type(slots) == "table" then
+                    for i = 1, #slots do
+                        local spec = slots[i] and slots[i].spec
+                        if type(spec) == "table" then
+                            specs[#specs + 1] = spec
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return RS.WarmSpecHaveCache(specs)
+end
+
+--- Call at start of Orchestrator.Tick so PickPlantCandidate + CollectIntents share one
+--- BuildBalancedSpecDemand / CollectAutoGrowSeedLines result for the tick.
+function RS.BeginOrchTick()
+    RS._orchTickId = (tonumber(RS._orchTickId) or 0) + 1
+    RS._orchTickDemand = nil
+    RS._orchTickDemandTick = nil
+    RS._orchTickSeedLines = nil
+    RS._orchTickSeedLinesTick = nil
 end
 
 local function AutoGrowSeedLinesCacheKey()
@@ -1991,21 +2171,22 @@ function RS.CountItemsMatchingSpec(spec)
         return 0
     end
     local specKey = MS.Key and MS.Key(spec) or nil
-    local cache = RS._specHaveCache
-    if type(cache) == "table" and specKey ~= nil and cache[specKey] ~= nil then
+    local cache = EnsureSpecHaveCacheForSnap()
+    if specKey ~= nil and cache[specKey] ~= nil then
         return cache[specKey]
+    end
+    local boundUid = SpecHaveBoundUid(spec)
+    if boundUid > 0 and StockPiler2.Inventory and StockPiler2.Inventory.CountByUid then
+        local total = tonumber(StockPiler2.Inventory.CountByUid(boundUid)) or 0
+        if specKey ~= nil then
+            cache[specKey] = total
+        end
+        return total
     end
     local total = 0
     if StockPiler2.Inventory and StockPiler2.Inventory.ForEachItem then
         StockPiler2.Inventory.ForEachItem(function(item)
-            if StockPiler2.Inventory.CanUseCraftingItem
-                and not StockPiler2.Inventory.CanUseCraftingItem(item)
-            then
-                return
-            end
-            if StockPiler2.Inventory.IsSeedOrSporeItem
-                and StockPiler2.Inventory.IsSeedOrSporeItem(item)
-            then
+            if not ItemUsableForSpecHave(item) then
                 return
             end
             local match = false
@@ -2015,12 +2196,11 @@ function RS.CountItemsMatchingSpec(spec)
                 match = MS.Matches(item, spec) == true
             end
             if match then
-                local n = tonumber(item.stackCount) or tonumber(item.StackCount) or 1
-                total = total + math.max(1, n)
+                total = total + ItemStackQty(item)
             end
         end)
     end
-    if type(cache) == "table" and specKey ~= nil then
+    if specKey ~= nil then
         cache[specKey] = total
     end
     return total
@@ -2070,9 +2250,21 @@ function RS.CountCraftsPossible(recipe, opts)
         return 0
     end
     opts = type(opts) == "table" and opts or nil
+    local respectReserve = opts and opts.respectGrowReserve == true
+    local memoKey = nil
+    if respectReserve ~= true then
+        memoKey = tostring(recipe.specKey or recipe.recipeSpecKey or recipe.key or "")
+        local memo = RS._craftsPossibleMemo
+        if type(memo) == "table" and memoKey ~= "" and memo[memoKey] ~= nil then
+            return memo[memoKey]
+        end
+    end
     RS.HydrateRecipeSlots(recipe)
     local slots = recipe.slots
     if type(slots) ~= "table" or #slots == 0 then
+        if memoKey ~= nil and memoKey ~= "" and type(RS._craftsPossibleMemo) == "table" then
+            RS._craftsPossibleMemo[memoKey] = 0
+        end
         return 0
     end
     local possible = nil
@@ -2085,7 +2277,7 @@ function RS.CountCraftsPossible(recipe, opts)
                 perCraft = 1
             end
             local have = RS.CountItemsMatchingSpec(spec)
-            if opts and opts.respectGrowReserve == true
+            if respectReserve == true
                 and StockPiler2.Planner
                 and StockPiler2.Planner.BrewAvailableForSpec
             then
@@ -2100,7 +2292,11 @@ function RS.CountCraftsPossible(recipe, opts)
             end
         end
     end
-    return possible or 0
+    local result = possible or 0
+    if memoKey ~= nil and memoKey ~= "" and type(RS._craftsPossibleMemo) == "table" then
+        RS._craftsPossibleMemo[memoKey] = result
+    end
+    return result
 end
 
 --- Observed bottles of this potion per successful brew of its fingerprint.
@@ -2199,6 +2395,7 @@ function RS.ApplyDeficitCraftableShared(infos)
         local info = infos[i]
         if type(info) == "table" then
             info.craftableShared = false
+            info.contestedSpecKeys = nil
             local deficit = tonumber(info.potionDeficit) or 0
             local craftable = tonumber(info.craftable) or 0
             if deficit > 0 and craftable > 0 then
@@ -2247,8 +2444,10 @@ function RS.ApplyDeficitCraftableShared(infos)
             -- skip
         elseif (tonumber(info.potionDeficit) or 0) <= 0 or (tonumber(info.craftable) or 0) <= 0 then
             info.craftableShared = false
+            info.contestedSpecKeys = nil
         else
             local contested = false
+            local contestedSpecKeys = {}
             local recipe = info.recipe
             if type(recipe) == "table" and type(recipe.slots) == "table" and MS and MS.Key then
                 local slots = recipe.slots
@@ -2269,13 +2468,14 @@ function RS.ApplyDeficitCraftableShared(infos)
                             end
                             if have < combinedNeed then
                                 contested = true
-                                break
+                                contestedSpecKeys[specKey] = true
                             end
                         end
                     end
                 end
             end
             info.craftableShared = contested
+            info.contestedSpecKeys = contested and contestedSpecKeys or nil
         end
     end
 end
@@ -2370,8 +2570,19 @@ end
 --- Excludes one-way / non-refinable harvest (no plant→seed refine path).
 --- Cached per snap/garden/buffer settings (hot path: refine gates / intents).
 function RS.CollectAutoGrowSeedLines()
+    local orchTick = tonumber(RS._orchTickId) or 0
+    if orchTick > 0
+        and RS._orchTickSeedLinesTick == orchTick
+        and type(RS._orchTickSeedLines) == "table"
+    then
+        return RS._orchTickSeedLines
+    end
     local cacheKey = AutoGrowSeedLinesCacheKey()
     if RS._autoGrowSeedLinesKey == cacheKey and type(RS._autoGrowSeedLines) == "table" then
+        if orchTick > 0 then
+            RS._orchTickSeedLines = RS._autoGrowSeedLines
+            RS._orchTickSeedLinesTick = orchTick
+        end
         return RS._autoGrowSeedLines
     end
     local lines = {}
@@ -2382,6 +2593,10 @@ function RS.CollectAutoGrowSeedLines()
     if type(s.watches) ~= "table" or type(SM) ~= "table" or not SM.IsGrowableSpec then
         RS._autoGrowSeedLinesKey = cacheKey
         RS._autoGrowSeedLines = lines
+        if orchTick > 0 then
+            RS._orchTickSeedLines = lines
+            RS._orchTickSeedLinesTick = orchTick
+        end
         return lines
     end
     for watchKey, watch in pairs(s.watches) do
@@ -2440,6 +2655,11 @@ function RS.CollectAutoGrowSeedLines()
     end
     RS._autoGrowSeedLinesKey = cacheKey
     RS._autoGrowSeedLines = lines
+    local orchTick = tonumber(RS._orchTickId) or 0
+    if orchTick > 0 then
+        RS._orchTickSeedLines = lines
+        RS._orchTickSeedLinesTick = orchTick
+    end
     return lines
 end
 
@@ -2535,6 +2755,27 @@ end
 --- expected = Craftable* × rate. Returns expected, rate, bestCase, crafts.
 function RS.ExpectedCraftableBottles(recipe, potionUid)
     potionUid = tonumber(potionUid) or tonumber(recipe and recipe.outputUid) or 0
+    local snapGen = 0
+    if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
+        snapGen = tonumber(StockPiler2.Inventory.GetSnapGen()) or 0
+    end
+    local recipeKey = ""
+    if type(recipe) == "table" then
+        recipeKey = tostring(recipe.specKey or recipe.recipeSpecKey or recipe.key or "")
+        if recipeKey == "" and StockPiler2.MaterialSpec and type(recipe.slots) == "table" then
+            -- Stable-ish fallback: output uid + slot count.
+            recipeKey = "uid:" .. tostring(potionUid) .. "|n:" .. tostring(#recipe.slots)
+        end
+    end
+    local cacheKey = tostring(snapGen) .. "|" .. recipeKey .. "|" .. tostring(potionUid)
+    if type(RS._expectedCraftableCache) == "table"
+        and RS._expectedCraftableSnapGen == snapGen
+        and type(RS._expectedCraftableCache[cacheKey]) == "table"
+    then
+        local hit = RS._expectedCraftableCache[cacheKey]
+        return hit.expected, hit.rate, hit.best, hit.crafts
+    end
+
     local crafts = RS.CountCraftsPossible(recipe)
     local yield = RS.RecipeOutputYield(recipe, potionUid)
     if yield < 1 then
@@ -2545,15 +2786,28 @@ function RS.ExpectedCraftableBottles(recipe, potionUid)
     if RS.OutcomeSuccessRate then
         rate = RS.OutcomeSuccessRate(recipe, potionUid)
     end
+    local expected = nil
     if rate == nil then
-        return nil, nil, best, crafts
+        expected = nil
+    else
+        if rate < 0 then
+            rate = 0
+        elseif rate > 1 then
+            rate = 1
+        end
+        expected = best * rate
     end
-    if rate < 0 then
-        rate = 0
-    elseif rate > 1 then
-        rate = 1
+    if type(RS._expectedCraftableCache) ~= "table" or RS._expectedCraftableSnapGen ~= snapGen then
+        RS._expectedCraftableCache = {}
+        RS._expectedCraftableSnapGen = snapGen
     end
-    return best * rate, rate, best, crafts
+    RS._expectedCraftableCache[cacheKey] = {
+        expected = expected,
+        rate = rate,
+        best = best,
+        crafts = crafts,
+    }
+    return expected, rate, best, crafts
 end
 
 --- Crafts expected to cover a deficit when only `rate` of brews produce this potion.
@@ -2673,13 +2927,14 @@ function RS.WatchContributesGrowDemand(potionKey, watch)
         and RS.WatchWantsAutoGrow(watch)
 end
 
--- AutoGrow watches still below target, with the lowest Craftable count.
--- Plot assignment uses only these recipes so a 0-craftable watch is not
--- starved by another watch's Goldweed (or any other extra plant).
+-- AutoGrow watches still below target, with the largest bottle gap
+-- (Target - Stock - Craftable). Plot assignment prefers these recipes so a
+-- zero-craftable watch is not starved by another watch's shared plants.
 function RS.CollectAutoGrowFocus()
     local s = EnsureSettings()
     local focus = {
-        minCraftable = nil,
+        maxBottleGap = nil,
+        minCraftable = nil, -- legacy alias: craftable of a max-gap watch
         watches = {},
     }
     if type(s.watches) ~= "table" or type(s.knownPotions) ~= "table" then
@@ -2693,12 +2948,13 @@ function RS.CollectAutoGrowFocus()
             local recipe = RS.RecipeSpecForPotion(watchKey)
             if type(potion) == "table" and RS.RecipeEligibleForGrow(recipe) then
                 local target = tonumber(watch.targetStock) or 0
-                local have = RS.PotionHaveCombined(potion)
-                local deficit = math.max(0, target - have)
+                local stock = RS.PotionHaveCombined(potion)
+                local deficit = math.max(0, target - stock)
                 if deficit > 0 and target > 0
                     and RS.WatchStillNeedsGrow(potion, recipe, target, watchKey)
                 then
                     local craftable = RS.CountPotionsCraftable(recipe)
+                    local bottleGap = math.max(0, target - stock - craftable)
                     candidates[#candidates + 1] = {
                         potionKey = watchKey,
                         potionBaseKey = resolved.potionKey,
@@ -2706,18 +2962,93 @@ function RS.CollectAutoGrowFocus()
                         name = potion.name or L"",
                         nameNarrow = potion.nameNarrow or ToNarrow(potion.name),
                         craftable = craftable,
+                        stock = stock,
+                        target = target,
+                        bottleGap = bottleGap,
                         recipe = recipe,
                     }
-                    if focus.minCraftable == nil or craftable < focus.minCraftable then
-                        focus.minCraftable = craftable
+                    if focus.maxBottleGap == nil or bottleGap > focus.maxBottleGap then
+                        focus.maxBottleGap = bottleGap
                     end
                 end
             end
         end
     end
+    local maxGap = tonumber(focus.maxBottleGap) or 0
     for i = 1, #candidates do
-        if candidates[i].craftable == focus.minCraftable then
+        if (tonumber(candidates[i].bottleGap) or 0) == maxGap then
             focus.watches[#focus.watches + 1] = candidates[i]
+            local c = tonumber(candidates[i].craftable) or 0
+            if focus.minCraftable == nil or c < focus.minCraftable then
+                focus.minCraftable = c
+            end
+        end
+    end
+    return focus
+end
+
+-- Enabled watches still below target, with the largest bottle gap
+-- (Target - Stock - Craftable). AutoBuy prefers mats for these recipes so a
+-- zero-craftable watch is not starved by another watch closer to its target.
+-- Independent of AutoGrow: does not require WatchContributesGrowDemand.
+function RS.CollectAutoBuyFocus()
+    local s = EnsureSettings()
+    local focus = {
+        maxBottleGap = nil,
+        minCraftable = nil,
+        watches = {},
+    }
+    if type(s.watches) ~= "table" or type(s.knownPotions) ~= "table" then
+        return focus
+    end
+    local candidates = {}
+    for watchKey, watch in pairs(s.watches) do
+        if type(watch) == "table" and watch.enabled == true then
+            local resolved = RS.ResolveWatchPotion(watchKey)
+            local potion = resolved and resolved.potion
+            local recipe = nil
+            if resolved and resolved.recipeSpecKey and RS.RecipeSpecForPotionRecipe then
+                recipe = RS.RecipeSpecForPotionRecipe(resolved.recipeSpecKey)
+            end
+            if type(recipe) ~= "table" then
+                recipe = RS.RecipeSpecForPotion(watchKey)
+            end
+            if type(potion) == "table" and type(recipe) == "table" then
+                local target = tonumber(watch.targetStock) or 0
+                local stock = RS.PotionHaveCombined(potion)
+                local deficit = math.max(0, target - stock)
+                if deficit > 0 and target > 0
+                    and RS.WatchStillNeedsGrow(potion, recipe, target, watchKey)
+                then
+                    local craftable = RS.CountPotionsCraftable(recipe)
+                    local bottleGap = math.max(0, target - stock - craftable)
+                    candidates[#candidates + 1] = {
+                        potionKey = watchKey,
+                        potionBaseKey = resolved and resolved.potionKey or nil,
+                        recipeSpecKey = resolved and resolved.recipeSpecKey or nil,
+                        name = potion.name or L"",
+                        nameNarrow = potion.nameNarrow or ToNarrow(potion.name),
+                        craftable = craftable,
+                        stock = stock,
+                        target = target,
+                        bottleGap = bottleGap,
+                        recipe = recipe,
+                    }
+                    if focus.maxBottleGap == nil or bottleGap > focus.maxBottleGap then
+                        focus.maxBottleGap = bottleGap
+                    end
+                end
+            end
+        end
+    end
+    local maxGap = tonumber(focus.maxBottleGap) or 0
+    for i = 1, #candidates do
+        if (tonumber(candidates[i].bottleGap) or 0) == maxGap then
+            focus.watches[#focus.watches + 1] = candidates[i]
+            local c = tonumber(candidates[i].craftable) or 0
+            if focus.minCraftable == nil or c < focus.minCraftable then
+                focus.minCraftable = c
+            end
         end
     end
     return focus
@@ -2732,7 +3063,8 @@ function RS.FocusSpecKeys(focus)
         local slots = focus.watches[i].recipe and focus.watches[i].recipe.slots
         if type(slots) == "table" then
             for j = 1, #slots do
-                local spec = slots[j] and slots[j].spec
+                local slot = slots[j]
+                local spec = slot and (RS.ResolveSlotSpec and RS.ResolveSlotSpec(slot) or slot.spec)
                 if type(spec) == "table" then
                     keys[MS.Key(spec)] = true
                 end
@@ -2773,6 +3105,13 @@ end
 -- Sum ingredient need across every watched potion that should AutoGrow.
 -- Shared specs share one bag count; deficit = total need − have.
 function RS.BuildBalancedSpecDemand()
+    local orchTick = tonumber(RS._orchTickId) or 0
+    if orchTick > 0
+        and RS._orchTickDemandTick == orchTick
+        and type(RS._orchTickDemand) == "table"
+    then
+        return RS._orchTickDemand
+    end
     local snapGen = 0
     if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
         snapGen = tonumber(StockPiler2.Inventory.GetSnapGen()) or 0
@@ -2783,14 +3122,22 @@ function RS.BuildBalancedSpecDemand()
     end
     local cacheKey = tostring(snapGen) .. ":" .. tostring(watchGen)
     if type(RS._demandCache) == "table" and RS._demandSnapGen == cacheKey then
+        if orchTick > 0 then
+            RS._orchTickDemand = RS._demandCache
+            RS._orchTickDemandTick = orchTick
+        end
         return RS._demandCache
     end
-    RS._specHaveCache = {}
+    -- Do not wipe _specHaveCache here — Planner.Build / WarmSpecHaveCache owns snapGen keying.
     local s = EnsureSettings()
     local demand = {}
     if type(s.watches) ~= "table" or type(s.knownPotions) ~= "table" then
         RS._demandCache = demand
         RS._demandSnapGen = cacheKey
+        if orchTick > 0 then
+            RS._orchTickDemand = demand
+            RS._orchTickDemandTick = orchTick
+        end
         return demand
     end
     local watchPass = {}
@@ -2910,6 +3257,8 @@ function RS.BuildBalancedSpecDemand()
             end
         end
     end
+    -- One bag walk for all demand specs before per-row have fills.
+    RS.WarmSpecHaveCache(demand)
     for _, row in pairs(demand) do
         row.have = RS.CountItemsMatchingSpec(row.spec)
         row.deficit = math.max(0, row.absolute - row.have)
@@ -3100,6 +3449,11 @@ function RS.BuildBalancedSpecDemand()
     end
     RS._demandCache = demand
     RS._demandSnapGen = cacheKey
+    local orchTickEnd = tonumber(RS._orchTickId) or 0
+    if orchTickEnd > 0 then
+        RS._orchTickDemand = demand
+        RS._orchTickDemandTick = orchTickEnd
+    end
     return demand
 end
 

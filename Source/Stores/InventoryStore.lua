@@ -14,6 +14,9 @@ Inv._sampleByUid = {}
 Inv._dirty = false
 Inv._dirtyFull = false
 Inv._needQueue = false
+-- L0 AdjustUid storms: coalesce snapGen + INVENTORY_SNAPSHOT to once per UPDATE_PROCESSED.
+Inv._snapPending = false
+Inv._snapPendingReason = nil
 
 local function Bus()
     return StockPiler2.EventBus
@@ -21,6 +24,44 @@ end
 
 local function Events()
     return StockPiler2.Events
+end
+
+local function BumpGenImmediate(reason)
+    if StockPiler2.Scheduler and StockPiler2.Scheduler.IsInventorySideEffectsSuppressed
+        and StockPiler2.Scheduler.IsInventorySideEffectsSuppressed()
+    then
+        return
+    end
+    Inv._snapGen = (tonumber(Inv._snapGen) or 0) + 1
+    Inv._snapPending = false
+    Inv._snapPendingReason = nil
+    local E = Events()
+    local B = Bus()
+    if B and E and E.INVENTORY_SNAPSHOT then
+        B.Fire(E.INVENTORY_SNAPSHOT, { snapGen = Inv._snapGen, reason = reason })
+    end
+end
+
+--- Mark snap dirty without firing; FlushPendingSnapGen publishes once.
+local function BumpGenDeferred(reason)
+    if StockPiler2.Scheduler and StockPiler2.Scheduler.IsInventorySideEffectsSuppressed
+        and StockPiler2.Scheduler.IsInventorySideEffectsSuppressed()
+    then
+        return
+    end
+    Inv._snapPending = true
+    if Inv._snapPendingReason == nil then
+        Inv._snapPendingReason = reason
+    end
+end
+
+--- Publish one snapGen for all L0 AdjustUid since last flush (call from UPDATE_PROCESSED).
+function Inv.FlushPendingSnapGen()
+    if Inv._snapPending ~= true then
+        return false
+    end
+    BumpGenImmediate(Inv._snapPendingReason or "L0-batch")
+    return true
 end
 
 function Inv.GetSnapshotMeta()
@@ -34,6 +75,7 @@ function Inv.GetSnapshotMeta()
         uidCount = n,
         dirty = Inv._dirty,
         dirtyFull = Inv._dirtyFull,
+        snapPending = Inv._snapPending == true,
     }
 end
 
@@ -58,20 +100,6 @@ function Inv.GetCountsCopy()
         out[uid] = n
     end
     return out
-end
-
-local function BumpGen(reason)
-    if StockPiler2.Scheduler and StockPiler2.Scheduler.IsInventorySideEffectsSuppressed
-        and StockPiler2.Scheduler.IsInventorySideEffectsSuppressed()
-    then
-        return
-    end
-    Inv._snapGen = (tonumber(Inv._snapGen) or 0) + 1
-    local E = Events()
-    local B = Bus()
-    if B and E and E.INVENTORY_SNAPSHOT then
-        B.Fire(E.INVENTORY_SNAPSHOT, { snapGen = Inv._snapGen, reason = reason })
-    end
 end
 
 local function SetSample(uid, item)
@@ -111,7 +139,7 @@ function Inv.AdjustUid(uid, delta, reason)
     else
         Inv._countByUid[uid] = nextCount
     end
-    BumpGen(reason or "adjust")
+    BumpGenDeferred(reason or "adjust")
     return true
 end
 
@@ -142,7 +170,7 @@ function Inv.MarkDirty(opts)
     end
 end
 
-function Inv.OnSlotUpdated(bagType, slot)
+function Inv.OnSlotUpdated(bagType, slot, bagTable)
     bagType = tostring(bagType or "main")
     slot = tonumber(slot) or 0
     if slot <= 0 then
@@ -172,21 +200,36 @@ function Inv.OnSlotUpdated(bagType, slot)
     if type(old) ~= "table" then
         old = { uid = 0, qty = 0 }
     end
-    local newUid, newQty, item = BA.ReadSlot(bagType, slot)
+    local newUid, newQty, item
+    if type(bagTable) == "table" and BA.ReadSlotFromTable then
+        newUid, newQty, item = BA.ReadSlotFromTable(bagTable, slot)
+    else
+        newUid, newQty, item = BA.ReadSlot(bagType, slot)
+    end
     newUid = tonumber(newUid) or 0
     newQty = tonumber(newQty) or 0
     if old.uid == newUid then
         local delta = newQty - (tonumber(old.qty) or 0)
         if delta ~= 0 then
             Inv.AdjustUid(newUid, delta, "L0-slot")
+            if StockPiler2.BrewLearn and StockPiler2.BrewLearn.NotePendingPotionDelta then
+                StockPiler2.BrewLearn.NotePendingPotionDelta(newUid, delta, item)
+            end
         end
     else
         if (tonumber(old.uid) or 0) > 0 then
-            Inv.AdjustUid(old.uid, -(tonumber(old.qty) or 0), "L0-slot-clear")
+            local clearQty = -(tonumber(old.qty) or 0)
+            Inv.AdjustUid(old.uid, clearQty, "L0-slot-clear")
+            if StockPiler2.BrewLearn and StockPiler2.BrewLearn.NotePendingPotionDelta then
+                StockPiler2.BrewLearn.NotePendingPotionDelta(old.uid, clearQty, nil)
+            end
             ClearSampleIfUnused(old.uid)
         end
         if newUid > 0 then
             Inv.AdjustUid(newUid, newQty, "L0-slot-set")
+            if StockPiler2.BrewLearn and StockPiler2.BrewLearn.NotePendingPotionDelta then
+                StockPiler2.BrewLearn.NotePendingPotionDelta(newUid, newQty, item)
+            end
         end
     end
     if newUid > 0 and newQty > 0 then
@@ -205,6 +248,7 @@ function Inv.OnSlotUpdated(bagType, slot)
 end
 
 --- Apply engine updatedSlots list to L0 snapshot; fall back to full dirty on failure.
+--- One DataUtils bag table per event (backpack pattern); never FetchForce here.
 function Inv.ApplySlotUpdates(bagType, updatedSlots, reason)
     bagType = tostring(bagType or "main")
     reason = tostring(reason or "slot-updates")
@@ -237,8 +281,18 @@ function Inv.ApplySlotUpdates(bagType, updatedSlots, reason)
         Inv.MarkDirty({ reason = reason .. "-empty", full = true })
         return false
     end
+    local BA = StockPiler2.BagAdapter
+    local bagTable = nil
+    if BA and BA.GetBagTable then
+        bagTable = BA.GetBagTable(bagType)
+    end
+    if type(bagTable) ~= "table" and Inv._ready == true then
+        -- Warm cache missing: light Flatten once, never force-dirty first.
+        Inv.MarkDirty({ reason = reason .. "-nobag" })
+        return false
+    end
     for i = 1, n do
-        if Inv.OnSlotUpdated(bagType, slots[i]) ~= true then
+        if Inv.OnSlotUpdated(bagType, slots[i], bagTable) ~= true then
             return false
         end
     end
@@ -287,7 +341,7 @@ local function RebuildFromBags(forceRefresh)
     Inv._ready = true
     Inv._dirty = false
     Inv._dirtyFull = false
-    BumpGen(forceRefresh and "L3-full" or "L2-light")
+    BumpGenImmediate(forceRefresh and "L3-full" or "L2-light")
     if Perf and Perf.End then
         Perf.End(forceRefresh and "SnapshotItems" or "Flatten")
     end
@@ -361,7 +415,8 @@ function Inv.ForEachItem(fn)
         return
     end
     if Inv._ready ~= true then
-        Inv.Flush({ force = true })
+        -- Light rebuild only — do not FetchForce on cold ForEachItem.
+        Inv.Flush({ force = true, forceEngine = false })
     end
     if Inv._ready == true and type(Inv._itemBySlot) == "table" then
         for bagType, slots in pairs(Inv._itemBySlot) do
@@ -423,7 +478,7 @@ function Inv.CountByUniqueId(uid)
         return 0, nil
     end
     if Inv._ready ~= true then
-        Inv.Flush({ force = true })
+        Inv.Flush({ force = true, forceEngine = false })
     end
     local count = Inv.CountByUid(uid)
     if count <= 0 then
@@ -437,7 +492,7 @@ end
 --- becomes tonumber(count, sampleTable) and errors when a sample item exists.
 function Inv.UniqueIdCount(uid)
     if Inv._ready ~= true then
-        Inv.Flush({ force = true })
+        Inv.Flush({ force = true, forceEngine = false })
     end
     return Inv.CountByUid(tonumber(uid) or 0)
 end

@@ -44,14 +44,20 @@ local function LogBuyJobLines(jobs, force)
     for i = 1, math.min(#jobs, 20) do
         local job = jobs[i]
         if type(job) == "table" then
+            local gap = tonumber(job.bottleGap)
+            local gapPart = ""
+            if gap ~= nil then
+                gapPart = string.format(" bottleGap=%d", gap)
+            end
             EmitBuyTrace(string.format(
-                "  job #%d kind=%s specKey=%s have=%d need=%d deficit=%d name=%s",
+                "  job #%d kind=%s specKey=%s have=%d need=%d deficit=%d%s name=%s",
                 i,
                 tostring(job.kind or "buy"),
                 tostring(job.specKey or "?"),
                 tonumber(job.have) or 0,
                 tonumber(job.need) or 0,
                 tonumber(job.deficit) or 0,
+                gapPart,
                 ToNarrow(job.label or job.name or "?")
             ), force)
         end
@@ -106,6 +112,21 @@ end
 function Buy.InvalidateJobsCache()
     Buy._jobsCache = nil
     Buy._jobsSnapGen = nil
+end
+
+--- After bag snap: deficits are authoritative. Clear visit-acquired so the next
+--- focus watch is not starved by purchases counted for the previous focus.
+--- Only while store is open (ResetVisit already clears on open).
+function Buy.OnInventorySnapshot()
+    Buy.InvalidateJobsCache()
+    if Buy._visitStoreOpen ~= true then
+        return
+    end
+    Buy._visitAcquiredByKey = {}
+    if type(Buy._visitSkipLogged) == "table" then
+        Buy._visitSkipLogged = {}
+    end
+    Buy._visitNoJobsIdleLogged = nil
 end
 
 ----------------------------------------------------------------
@@ -278,6 +299,21 @@ function Buy.DumpBuyPlan(opts)
         tostring(snapDone),
         snapGen
     ), force)
+    local meta = StockPiler2.Planner and StockPiler2.Planner._vendorBuyJobsMeta
+    if type(meta) == "table" then
+        local focusNames = L""
+        local RS = StockPiler2.RecipeSpec
+        if RS and RS.CollectAutoBuyFocus and RS.FocusWatchNames then
+            focusNames = RS.FocusWatchNames(RS.CollectAutoBuyFocus()) or L""
+        end
+        EmitBuyTrace(string.format(
+            "focus source=%s maxBottleGap=%s focusWatches=%d names=%s",
+            tostring(meta.source or "?"),
+            tostring(meta.maxBottleGap),
+            tonumber(meta.focusWatchCount) or 0,
+            ToNarrow(focusNames)
+        ), force)
+    end
     EmitBuyTrace("--- jobs (" .. tostring(#jobs) .. ") ---", force)
     if not snapDone then
         EmitBuyTrace("  (snapshot not ready — job list may be empty)", force)
@@ -608,6 +644,7 @@ local function ResetVisit()
     Buy._visitSkipLogged = {}
     Buy._visitSnapshotSkipLogged = false
     Buy._visitBuybackSkipLogged = false
+    Buy._visitNoJobsIdleLogged = nil
     Buy._visitMoneyBrass = PlayerMoneyBrass()
     Buy.InvalidateJobsCache()
 end
@@ -742,18 +779,14 @@ function Buy.OnStoreUpdated()
     local showing = VA and VA.IsStoreOpen and VA.IsStoreOpen() == true
     if showing then
         local wasOpen = Buy._visitStoreOpen == true
-        local stop = Buy._visitStopReason
-        local moneyStop = (stop == "reserved" or stop == "budget")
         if not wasOpen then
             Buy._visitStoreOpen = true
             ResetVisit()
             LogVisitStart("visit-start")
-        elseif moneyStop then
-            -- Stuck after reserved/budget: reopen/ShowStore never saw a close edge.
-            ResetVisit()
-            Buy._visitStoreOpen = true
-            LogVisitStart("visit-resume")
         end
+        -- Do not auto ResetVisit/resume while store stays open after reserved/budget.
+        -- That re-entered every ShowStore/OnStoreUpdated and logged visit-resume ~1/s.
+        -- Resume only on close→open (above) or Buy.ClearMoneyGateStop (chips/budget).
     elseif not showing and Buy._visitStoreOpen == true then
         Buy._visitStoreOpen = false
         if (tonumber(Buy._visitBought) or 0) > 0 then
@@ -772,8 +805,9 @@ function Buy.OnStoreUpdated()
 end
 
 --- After a successful BuyItem: do not Flatten / invalidate plan / rebuild jobs.
---- VisitAcquired already gates remaining qty this visit; bag slot events L0-update
---- counts; store-close InvalidateJobsCache + snap coalesce rebuild plan/jobs.
+--- VisitAcquired gates remaining qty until INVENTORY_SNAPSHOT; then
+--- Buy.OnInventorySnapshot clears acquired and invalidates jobs so focus can
+--- advance to the next watch without reopening the store.
 --- Per-purchase full MarkDirty + PlanSnapshot.Invalidate was Planner.Build +
 --- Buy.TryBuyNext dominating perf summaries.
 local function AfterPurchaseRefresh()
@@ -830,13 +864,16 @@ function Buy.TryBuyNext()
                 Buy._visitSnapshotSkipLogged = true
                 LogBuyOp("skip snapshot-not-ready")
             end
-        end
-        if (tonumber(Buy._visitBought) or 0) > 0 then
-            ChatVisitStop("bought")
+        elseif Buy._visitNoJobsIdleLogged ~= true then
+            -- Do not ChatVisitStop("bought") mid-visit — next inventory snap
+            -- rebuilds focus so other watches can buy without reopening.
+            Buy._visitNoJobsIdleLogged = true
+            LogBuyOp("idle no-jobs bought=" .. tostring(Buy._visitBought or 0))
         end
         return done(false)
     end
     Buy._visitHadJobs = true
+    Buy._visitNoJobsIdleLogged = nil
 
     local money = VisitMoneyBrass()
     local liveMoney = PlayerMoneyBrass()

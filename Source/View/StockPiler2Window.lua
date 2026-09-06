@@ -61,14 +61,11 @@ function StockPiler2Window.RefreshFooterButtons()
         if onWatch then
             canHarvest = StockPiler2.Grow and StockPiler2.Grow.CanHarvestNow
                 and StockPiler2.Grow.CanHarvestNow() == true
-            ButtonSetDisabledFlag(HARVEST_WIN, not canHarvest)
-            -- Disabled buttons still fire gameactionbutton if bound — bind/clear with ready state.
-            if canHarvest then
-                if StockPiler2.Grow and StockPiler2.Grow.EnsureHarvestActionBound then
-                    StockPiler2.Grow.EnsureHarvestActionBound()
-                end
-            elseif StockPiler2.Grow and StockPiler2.Grow.ClearHarvestActionBound then
-                StockPiler2.Grow.ClearHarvestActionBound()
+            -- Transition-only bind/clear via clickable gate (keeps HandleInput on for tooltips).
+            if StockPiler2.Grow and StockPiler2.Grow.SetFooterHarvestClickable then
+                StockPiler2.Grow.SetFooterHarvestClickable(canHarvest)
+            else
+                ButtonSetDisabledFlag(HARVEST_WIN, not canHarvest)
             end
         elseif StockPiler2.Grow and StockPiler2.Grow.ClearHarvestActionBound then
             StockPiler2.Grow.ClearHarvestActionBound()
@@ -81,6 +78,43 @@ function StockPiler2Window.RefreshFooterButtons()
                 and StockPiler2.Brew.CanBrewNow() == true
             ButtonSetDisabledFlag(BREW_WIN, not canBrew)
         end
+    end
+    -- Skip macro sync when footer readiness unchanged (cultivation update storms).
+    local prevOnWatch = StockPiler2Window._footerOnWatch
+    local prevHarvest = StockPiler2Window._footerCanHarvest
+    local prevBrew = StockPiler2Window._footerCanBrew
+    StockPiler2Window._footerOnWatch = onWatch
+    StockPiler2Window._footerCanHarvest = canHarvest
+    StockPiler2Window._footerCanBrew = canBrew
+    local readinessChanged = prevOnWatch ~= onWatch
+        or prevHarvest ~= canHarvest
+        or prevBrew ~= canBrew
+    -- Also resync when footer state and last hotbar appearance disagree (e.g. brew
+    -- macro stayed lit after footer already disabled). Skip drift while brew is
+    -- busy/loading — craft-slot storms otherwise spam Macro.Appearance.
+    if not readinessChanged and StockPiler2.Macro then
+        local skipDrift = false
+        if StockPiler2.Brew then
+            if StockPiler2.Brew.IsBusy and StockPiler2.Brew.IsBusy() == true then
+                skipDrift = true
+            else
+                local session = StockPiler2.Brew.GetSession and StockPiler2.Brew.GetSession()
+                if type(session) == "table" and session.phase == "loading" then
+                    skipDrift = true
+                end
+            end
+        end
+        if not skipDrift then
+            local appearanceKey = tostring(canHarvest) .. ":" .. tostring(canBrew)
+            if onWatch and StockPiler2.Macro._lastAppearanceKey ~= nil
+                and StockPiler2.Macro._lastAppearanceKey ~= appearanceKey
+            then
+                readinessChanged = true
+            end
+        end
+    end
+    if not readinessChanged then
+        return
     end
     if StockPiler2.Macro and StockPiler2.Macro.RequestEnabledSync then
         if onWatch then
@@ -153,7 +187,15 @@ function StockPiler2Window.FlushPendingListRepopulate()
     if WindowGetShowing("StockPiler2Window") ~= true then
         return
     end
+    -- Coalesce via Watch UI dirty/flush (interval + fill-burst gates).
     StockPiler2Window._repopulatePending = false
+    if StockPiler2.Ui and StockPiler2.Ui.MarkWatchUiDirty then
+        StockPiler2.Ui.MarkWatchUiDirty()
+        if StockPiler2.Ui.FlushWatchUiIfDirty then
+            StockPiler2.Ui.FlushWatchUiIfDirty()
+        end
+        return
+    end
     StockPiler2Window.RefreshActiveTab()
 end
 
@@ -201,6 +243,10 @@ function StockPiler2Window.OnShow()
     end
     if StockPiler2.PlanSnapshot and StockPiler2.PlanSnapshot.Invalidate then
         StockPiler2.PlanSnapshot.Invalidate()
+    end
+    -- Trade skills may have been missing at CreateWindow Initialize — refresh gates.
+    if StockPiler2TabWatch and StockPiler2TabWatch.RefreshSkillGates then
+        StockPiler2TabWatch.RefreshSkillGates()
     end
     StockPiler2Window.PrimeTabListsIfNeeded()
     StockPiler2Window.RefreshActiveTab()
@@ -298,9 +344,9 @@ function StockPiler2Window.OnHarvestPrepare()
     end
 end
 
---- Native gameactionbutton fires harvest; L-up only refreshes footer chrome.
+--- Native gameactionbutton fires harvest. CultivationUpdated refreshes enable state;
+--- avoid L-up bind/clear (chrome thrash + CanHarvestNow / macro sync cost).
 function StockPiler2Window.OnHarvest()
-    StockPiler2Window.RefreshFooterButtons()
 end
 
 function StockPiler2Window.OnMouseOverHarvest()

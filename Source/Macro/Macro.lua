@@ -17,9 +17,13 @@ local BREW_MACRO_ICON = 10985 -- abi_de_elixirofmaddenedspeed.dds (+ _disabled)
 
 local actionButtonHooksInstalled = false
 local setActionDataHooked = false
+local updateEnabledStateHooked = false
 local hotbarEventRegistered = false
 local tooltipHookInstalled = false
 local gameActionBindCache = {}
+
+-- ActionButton BASE_ICON window index (ea_actionbars actionbutton.lua).
+local ACTION_BUTTON_BASE_ICON = 0
 
 Macro.MacroId = 0
 Macro.BrewMacroId = 0
@@ -100,10 +104,22 @@ local function ActionWindowName(button)
     return nil
 end
 
+local function forceGreyMacroIcon(button)
+    -- Macro icons often ship a colorful *_disabled texture; ActionButton only greys
+    -- via tint when no disabled texture exists. Force tint so SP2-off always looks off.
+    local icon = button and button.m_Windows and button.m_Windows[ACTION_BUTTON_BASE_ICON]
+    if icon and type(icon.SetTintColor) == "function" then
+        icon:SetTintColor(125, 125, 125)
+    end
+end
+
 local function setButtonEnabledVisual(button, canUse)
     canUse = canUse == true
     if type(button.UpdateEnabledState) == "function" then
         button:UpdateEnabledState(canUse, true, false)
+        if not canUse then
+            forceGreyMacroIcon(button)
+        end
         return
     end
     local win = button.m_Name
@@ -208,6 +224,69 @@ function Macro.GetMacroSlots(macroId)
         end
     end
     return slots
+end
+
+local function InvalidateSlotCache()
+    Macro._cachedHarvestSlots = nil
+    Macro._cachedBrewSlots = nil
+    Macro._slotCacheFp = nil
+    Macro._cachedHarvestId = nil
+    Macro._cachedBrewId = nil
+end
+
+--- Stable fingerprint of harvest/brew hotbar placements (sorted slot ids).
+--- Caches slot lists so Refresh does not walk ActionBars 4× per apply.
+local function SlotFingerprint()
+    local harvestId = tonumber(Macro.GetMacroId()) or 0
+    local brewId = tonumber(Macro.GetBrewMacroId()) or 0
+    local hSlots
+    local bSlots
+    if Macro._slotCacheFp ~= nil
+        and Macro._cachedHarvestId == harvestId
+        and Macro._cachedBrewId == brewId
+        and type(Macro._cachedHarvestSlots) == "table"
+        and type(Macro._cachedBrewSlots) == "table"
+    then
+        hSlots = Macro._cachedHarvestSlots
+        bSlots = Macro._cachedBrewSlots
+    else
+        hSlots = Macro.GetMacroSlots(harvestId)
+        bSlots = Macro.GetMacroSlots(brewId)
+        table.sort(hSlots)
+        table.sort(bSlots)
+        Macro._cachedHarvestSlots = hSlots
+        Macro._cachedBrewSlots = bSlots
+        Macro._cachedHarvestId = harvestId
+        Macro._cachedBrewId = brewId
+    end
+    local parts = { "h", tostring(harvestId) }
+    for i = 1, #hSlots do
+        parts[#parts + 1] = tostring(hSlots[i])
+    end
+    parts[#parts + 1] = "b"
+    parts[#parts + 1] = tostring(brewId)
+    for i = 1, #bSlots do
+        parts[#parts + 1] = tostring(bSlots[i])
+    end
+    local fp = table.concat(parts, ",")
+    Macro._slotCacheFp = fp
+    return fp
+end
+
+local function RememberSlotFingerprint()
+    Macro._lastSlotFingerprint = SlotFingerprint()
+end
+
+local function CachedSlotsForMacro(macroId)
+    macroId = tonumber(macroId) or 0
+    SlotFingerprint()
+    if macroId > 0 and macroId == Macro._cachedHarvestId then
+        return Macro._cachedHarvestSlots or {}
+    end
+    if macroId > 0 and macroId == Macro._cachedBrewId then
+        return Macro._cachedBrewSlots or {}
+    end
+    return Macro.GetMacroSlots(macroId)
 end
 
 local function SetMacroSlot(slot, name, text, iconId, kind)
@@ -379,6 +458,25 @@ local function clearHarvestGameActionForButton(button)
     return ok == true
 end
 
+local function clearBrewGameActionForButton(button)
+    if not button or WindowSetGameActionData == nil then
+        return false
+    end
+    local actionName = ActionWindowName(button)
+    if actionName == nil or not DoesWindowExist(actionName) then
+        return false
+    end
+    local ok = TryCall(
+        "WindowSetGameActionData.clear", WindowSetGameActionData,
+        actionName,
+        NonePlayerAction(),
+        0,
+        L""
+    )
+    ForgetGameActionBind(button)
+    return ok == true
+end
+
 local function bindBrewGameAction(button)
     if not button or not button.m_Name or WindowSetGameActionData == nil then
         return false
@@ -517,8 +615,13 @@ function Macro.ApplyBrewButtonAppearance(button, opts)
         canUse = canUse == true
     end
     setButtonEnabledVisual(button, canUse)
-    -- Keep apo bind for chrome; activation uses Lua FirePerform.
-    bindBrewGameActionForButton(button)
+    -- Match Harvest: clear craft bind when disabled or the hotbar stays lit.
+    -- Activation uses Lua FirePerform; rebind when enabled for chrome.
+    if canUse then
+        bindBrewGameActionForButton(button)
+    else
+        clearBrewGameActionForButton(button)
+    end
 end
 
 --- Coalesce hotbar enable sync (footer/cultivation storms). Drain via DrainEnabledSync.
@@ -583,6 +686,21 @@ function Macro.RefreshMacroButtonAppearance(opts)
         return
     end
 
+    local prevKey = Macro._lastAppearanceKey
+    local applyHarvest = true
+    local applyBrew = true
+    if type(prevKey) == "string" then
+        local ph, pb = string.match(prevKey, "^([^:]+):([^:]+)$")
+        if ph ~= nil and pb ~= nil then
+            applyHarvest = tostring(canHarvest) ~= ph
+            applyBrew = tostring(canBrew) ~= pb
+            if not applyHarvest and not applyBrew then
+                applyHarvest = true
+                applyBrew = true
+            end
+        end
+    end
+
     local Perf = StockPiler2.Perf
     if Perf and Perf.Begin then
         Perf.Begin("Macro.Appearance")
@@ -590,14 +708,17 @@ function Macro.RefreshMacroButtonAppearance(opts)
     Macro._refreshingAppearance = true
     local ok, err = pcall(function()
         Macro._lastAppearanceKey = appearanceKey
+        -- Forced wants for UpdateEnabledState hook (avoid re-CanBrewNow per button).
+        Macro._refreshCanHarvest = canHarvest
+        Macro._refreshCanBrew = canBrew
 
         local macroId = Macro.GetMacroId()
         local brewId = Macro.GetBrewMacroId()
         local harvestOpts = { canUse = canHarvest }
         local brewOpts = { canUse = canBrew }
 
-        if macroId then
-            local slots = Macro.GetMacroSlots(macroId)
+        if applyHarvest and macroId then
+            local slots = CachedSlotsForMacro(macroId)
             if #slots == 0 then
                 if not Macro.MacroWarningState.unplaced then
                     Print(L"<icon" .. towstring(tostring(MACRO_ICON))
@@ -616,8 +737,8 @@ function Macro.RefreshMacroButtonAppearance(opts)
             end
         end
 
-        if brewId then
-            local slots = Macro.GetMacroSlots(brewId)
+        if applyBrew and brewId then
+            local slots = CachedSlotsForMacro(brewId)
             if #slots == 0 then
                 if not Macro.BrewMacroWarningState.unplaced then
                     Print(L"<icon" .. towstring(tostring(BREW_MACRO_ICON))
@@ -635,8 +756,11 @@ function Macro.RefreshMacroButtonAppearance(opts)
                 end
             end
         end
+        RememberSlotFingerprint()
     end)
     Macro._refreshingAppearance = false
+    Macro._refreshCanHarvest = nil
+    Macro._refreshCanBrew = nil
     if Perf and Perf.End then
         Perf.End("Macro.Appearance")
     end
@@ -695,6 +819,49 @@ local function installSetActionDataHook()
         applySetActionDataAppearance(self, actionType, actionId)
     end
     setActionDataHooked = true
+end
+
+--- Engine ActionBars.UpdateSlotEnabledState / SetActionData re-enable DO_MACRO slots
+--- after SP2 greys them. Appearance-key early-out then skips re-apply until Harvest
+--- readiness flips — Brew stays lit while footer is correctly grey. Force SP2
+--- readiness on every UpdateEnabledState for our macros.
+local function installUpdateEnabledStateHook()
+    if not ActionButton or type(ActionButton.UpdateEnabledState) ~= "function" then
+        return
+    end
+    if updateEnabledStateHooked then
+        return
+    end
+    local orgUpdateEnabledState = ActionButton.UpdateEnabledState
+    ActionButton.UpdateEnabledState = function(self, isSlotEnabled, isTargetValid, isBlocked)
+        local forced = false
+        local want = false
+        if Macro.IsBrewMacroButton(self) then
+            forced = true
+            if Macro._refreshingAppearance == true and Macro._refreshCanBrew ~= nil then
+                want = Macro._refreshCanBrew == true
+            else
+                want = canBrewMacro()
+            end
+        elseif Macro.IsMacroButton(self) then
+            forced = true
+            if Macro._refreshingAppearance == true and Macro._refreshCanHarvest ~= nil then
+                want = Macro._refreshCanHarvest == true
+            else
+                want = canHarvestMacro()
+            end
+        end
+        if forced then
+            isSlotEnabled = want
+            isTargetValid = true
+            isBlocked = false
+        end
+        orgUpdateEnabledState(self, isSlotEnabled, isTargetValid, isBlocked)
+        if forced and want ~= true then
+            forceGreyMacroIcon(self)
+        end
+    end
+    updateEnabledStateHooked = true
 end
 
 local function handleMacroHarvestActivation(flags)
@@ -845,8 +1012,16 @@ function Macro.OnHotBarUpdated()
     if Macro._refreshingAppearance == true then
         return
     end
+    -- Rescan bars for fingerprint; only clear bind cache when slots actually moved.
+    InvalidateSlotCache()
+    local fp = SlotFingerprint()
+    -- Unrelated hotbar noise must not wipe appearance key / force Begin — that
+    -- was Macro.Appearance x67 storms under trail hold (0.4.23 uilog).
+    if Macro._lastSlotFingerprint == fp then
+        return
+    end
     ClearGameActionBindCache()
-    -- Slots may have changed with the same canHarvest/canBrew; force re-apply.
+    Macro._lastSlotFingerprint = fp
     Macro._lastAppearanceKey = nil
     if Macro._enabledSyncPending == true then
         return
@@ -922,6 +1097,7 @@ function Macro.Initialize()
         return
     end
     installSetActionDataHook()
+    installUpdateEnabledStateHook()
     installActionButtonHooks()
     installMacroTooltipHook()
     Macro.UpdateMacro()

@@ -22,6 +22,9 @@ Sch._autoAccum = 0
 Sch._autoGrowFast = true
 Sch._suppressInvTicks = 0
 Sch._initialized = false
+Sch._lastDeferBagLogAt = 0
+Sch._lastDeferBagReason = nil
+Sch.DEFER_BAG_LOG_SEC = 5.0
 
 local function Now()
     if type(GetGameTime) == "function" then
@@ -30,24 +33,64 @@ local function Now()
     return 0
 end
 
-function Sch.ShouldDeferHeavyWork()
+local function PlayerCombatOrScenarioDefer()
     local player = GameData and GameData.Player
-    if type(player) == "table" then
-        if player.inCombat == true or player.isInRvRLake == true then
-            return true, "combat-rvr"
-        end
+    if type(player) ~= "table" then
+        return false, nil
     end
+    if player.inCombat == true or player.isInRvRLake == true then
+        return true, "combat-rvr"
+    end
+    if player.isInScenario == true then
+        return true, "scenario"
+    end
+    return false, nil
+end
+
+local function HarvestOrBrewDefer()
     if StockPiler2.Orchestrator and StockPiler2.Orchestrator.IsHarvestActive then
         if StockPiler2.Orchestrator.IsHarvestActive() then
             return true, "harvest"
         end
     end
-    if StockPiler2.Orchestrator and StockPiler2.Orchestrator.IsBrewSessionActive then
-        if StockPiler2.Orchestrator.IsBrewSessionActive() then
-            return true, "brew-session"
-        end
+    local Orch = StockPiler2.Orchestrator
+    if Orch and Orch._brewPhase == "loading" then
+        return true, "brew-loading"
+    end
+    if StockPiler2.Brew and StockPiler2.Brew.IsBusy and StockPiler2.Brew.IsBusy() == true then
+        return true, "brew-busy"
     end
     return false, nil
+end
+
+--- Expensive bag Flatten — deferred in combat/RvR/scenario (and harvest/brew busy).
+function Sch.ShouldDeferBagFlush()
+    local defer, reason = PlayerCombatOrScenarioDefer()
+    if defer then
+        return true, reason
+    end
+    return HarvestOrBrewDefer()
+end
+
+--- Plan rebuild — NOT deferred in combat (AutoGrow + Watch need live plan).
+--- Still deferred during harvest / brew loading|busy.
+function Sch.ShouldDeferPlanRebuild()
+    return HarvestOrBrewDefer()
+end
+
+--- Compatibility: same as bag-flush defer (combat + harvest/brew).
+function Sch.ShouldDeferHeavyWork()
+    return Sch.ShouldDeferBagFlush()
+end
+
+--- True when bag flush is pending and should run before orch (not combat-held).
+function Sch.BagFlushBlocksOrchestrator()
+    if Sch._bagDue ~= true then
+        return false
+    end
+    local deferBag = Sch.ShouldDeferBagFlush()
+    -- Combat/scenario-held flush must not stall AutoGrow orch ticks.
+    return deferBag ~= true
 end
 
 function Sch.IsInventorySideEffectsSuppressed()
@@ -178,16 +221,30 @@ local function AutoTickIntervalSec()
     return Sch.AUTO_TICK_SEC
 end
 
+local function LogDeferBagOnce(reason)
+    if not (StockPiler2.Debug and StockPiler2.Debug.Enabled == true and StockPiler2.Debug.LogOp) then
+        return
+    end
+    local now = Now()
+    local lastAt = tonumber(Sch._lastDeferBagLogAt) or 0
+    local lastReason = Sch._lastDeferBagReason
+    local gap = tonumber(Sch.DEFER_BAG_LOG_SEC) or 5
+    if reason == lastReason and lastAt > 0 and (now - lastAt) < gap then
+        return
+    end
+    Sch._lastDeferBagLogAt = now
+    Sch._lastDeferBagReason = reason
+    StockPiler2.Debug.LogOp("perf", "defer bag-flush reason=" .. tostring(reason))
+end
+
 local function FlushBagIfDue()
     if Sch._bagDue ~= true then
         return false
     end
-    local defer, reason = Sch.ShouldDeferHeavyWork()
+    local defer, reason = Sch.ShouldDeferBagFlush()
     if defer then
         Sch._bagAt = Now() + Sch.BAG_COALESCE_SEC
-        if StockPiler2.Debug and StockPiler2.Debug.Enabled == true then
-            StockPiler2.Debug.LogOp("perf", "defer bag-flush reason=" .. tostring(reason))
-        end
+        LogDeferBagOnce(reason)
         return false
     end
     if Now() < (tonumber(Sch._bagAt) or 0) then
@@ -217,19 +274,37 @@ local function RebuildPlanIfDue()
     if Sch._planDue ~= true then
         return false
     end
+    local defer, reason = Sch.ShouldDeferPlanRebuild()
+    if defer then
+        -- Hold deadline; do not clear _planDue (SP1: flush/plan wait out harvest storm).
+        Sch._planAt = Now() + (tonumber(Sch.PLAN_MAX_WAIT_SEC) or 0.5)
+        return false
+    end
     if Now() < (tonumber(Sch._planAt) or 0) then
         return false
+    end
+    local Planner = StockPiler2.Planner
+    local PS = StockPiler2.PlanSnapshot
+    if Planner and Planner.CacheKeyFromGens and PS and PS.GetCacheKey then
+        if PS.GetCacheKey() == Planner.CacheKeyFromGens() then
+            local cached = PS.Get and PS.Get()
+            if type(cached) == "table" then
+                Sch._planDue = false
+                Sch._planAt = 0
+                return false
+            end
+        end
     end
     Sch._planDue = false
     Sch._planAt = 0
     if StockPiler2.Perf and StockPiler2.Perf.Begin then
         StockPiler2.Perf.Begin("PlanRebuild")
     end
-    if StockPiler2.Planner then
-        if StockPiler2.Planner.GetOrBuild then
-            StockPiler2.Planner.GetOrBuild()
-        elseif StockPiler2.Planner.Build then
-            StockPiler2.Planner.Build()
+    if Planner then
+        if Planner.GetOrBuild then
+            Planner.GetOrBuild()
+        elseif Planner.Build then
+            Planner.Build()
         end
     end
     if StockPiler2.Perf and StockPiler2.Perf.End then
@@ -275,6 +350,9 @@ local function HasAutoGrowWork()
 end
 
 local function ShouldRunOrchestratorTick()
+    if Sch._skipOrchThisFrame == true then
+        return false
+    end
     local Watch = StockPiler2.Watch
     if Watch and Watch.IsAutoBuyEnabled and Watch.IsAutoBuyEnabled() == true then
         if StockPiler2.Buy and StockPiler2.Buy.NeedsTick and StockPiler2.Buy.NeedsTick() then
@@ -301,6 +379,39 @@ local function ShouldRunOrchestratorTick()
         end
     end
     return false
+end
+
+--- Fill-blocked + refine wait: decay ticks only — skip expensive Orch plant/refine rebuild.
+local function ShouldSkipOrchIdleWait()
+    local Grow = StockPiler2.Grow
+    if not (Grow and Grow.IsFillBlocked and Grow.IsFillBlocked() == true) then
+        return false
+    end
+    if StockPiler2.Buy and StockPiler2.Buy.NeedsTick and StockPiler2.Buy.NeedsTick() == true then
+        return false
+    end
+    local Orch = StockPiler2.Orchestrator
+    if Orch and Orch.IsBrewSessionActive and Orch.IsBrewSessionActive() == true then
+        return false
+    end
+    if Orch and Orch.IsHarvestActive and Orch.IsHarvestActive() == true then
+        return false
+    end
+    local RP = StockPiler2.RefinePipeline
+    if RP and RP.HasOutstanding and RP.HasOutstanding() == true then
+        return false
+    end
+    local Refine = StockPiler2.Refine
+    if Refine and Refine._refineDirty == true and Refine._refineDirtyReason == "harvest" then
+        return false
+    end
+    local wait = Refine and tonumber(Refine._refineWaitTicks) or 0
+    return wait > 0
+end
+
+--- One-frame skip after brew-learn drain (same UPDATE_PROCESSED hitch).
+function Sch.SkipOrchThisFrame()
+    Sch._skipOrchThisFrame = true
 end
 
 function Sch.OnUpdate(timeElapsed)
@@ -347,10 +458,17 @@ function Sch.OnUpdate(timeElapsed)
         if StockPiler2.Grow and StockPiler2.Grow.DecayPlantWaitTicks then
             StockPiler2.Grow.DecayPlantWaitTicks()
         end
-        if not didHeavy and not Sch.BagWorkPending() and ShouldRunOrchestratorTick()
+        local skipOrch = Sch._skipOrchThisFrame == true or ShouldSkipOrchIdleWait()
+        Sch._skipOrchThisFrame = false
+        -- Combat-held bag flush must not block AutoGrow; only block when flush can run.
+        local bagBlocksOrch = Sch.BagFlushBlocksOrchestrator and Sch.BagFlushBlocksOrchestrator() == true
+        if not didHeavy and not skipOrch and not bagBlocksOrch and ShouldRunOrchestratorTick()
             and StockPiler2.Orchestrator and StockPiler2.Orchestrator.Tick then
             StockPiler2.Orchestrator.Tick()
         end
+    else
+        -- Learn drain may set skip mid-frame before the auto-tick interval elapses.
+        Sch._skipOrchThisFrame = false
     end
 end
 
@@ -366,29 +484,28 @@ function Sch.Initialize()
             -- coalesce already scheduled by InventoryStore.MarkDirty
         end)
         B.Subscribe(E.INVENTORY_SNAPSHOT, function()
-            if StockPiler2.Buy and StockPiler2.Buy.InvalidateJobsCache then
+            if StockPiler2.Buy and StockPiler2.Buy.OnInventorySnapshot then
+                StockPiler2.Buy.OnInventorySnapshot()
+            elseif StockPiler2.Buy and StockPiler2.Buy.InvalidateJobsCache then
                 StockPiler2.Buy.InvalidateJobsCache()
             end
-            -- Do not ClearFillBlocked / WakeAutoGrow on every snap — that kept
-            -- burst mode and forced Planner.Build after each snapGen bump.
+            -- Snap-only (SP1): update plant-job dirtiness / UI — do NOT EnqueuePlanRebuild.
+            -- Plan rebuild is armed by bag flush needQueue, harvest wake, garden dirty, session.
             if StockPiler2.Grow and StockPiler2.Grow.MarkPlantJobDirty then
                 StockPiler2.Grow.MarkPlantJobDirty()
             end
             if Sch.ShouldWakeAutoGrow() then
                 Sch._autoGrowFast = true
-                Sch.EnqueuePlanRebuild()
-            elseif StockPiler2.Ui and StockPiler2.Ui.MarkWatchUiDirty then
+            end
+            if StockPiler2.Ui and StockPiler2.Ui.MarkWatchUiDirty then
                 StockPiler2.Ui.MarkWatchUiDirty()
             end
         end)
         B.Subscribe(E.GARDEN_DIRTY, function()
             if Sch.ShouldWakeAutoGrow() then
-                -- Already in fill burst with a coalesced plan pending: avoid WakeAutoGrow
-                -- churn on every cultivation edge (still keep plan due via Enqueue if needed).
-                if Sch._autoGrowFast == true
-                    and Sch.IsPlanRebuildPending
-                    and Sch.IsPlanRebuildPending() == true
-                then
+                -- Already coalesced plan pending: skip Wake churn + re-enqueue.
+                if Sch.IsPlanRebuildPending and Sch.IsPlanRebuildPending() == true then
+                    Sch._autoGrowFast = true
                     return
                 end
                 Sch.WakeAutoGrow()
@@ -399,6 +516,45 @@ function Sch.Initialize()
         end)
         B.Subscribe(E.SESSION_LOADED, function()
             Sch.EnqueueBagFlush(true)
+            if StockPiler2.PlanSnapshot and StockPiler2.PlanSnapshot.Invalidate then
+                StockPiler2.PlanSnapshot.Invalidate()
+            end
+            if Sch.EnqueuePlanRebuild then
+                Sch.EnqueuePlanRebuild()
+            end
+            if StockPiler2TabWatch and StockPiler2TabWatch.RefreshSkillGates then
+                StockPiler2TabWatch.RefreshSkillGates()
+            end
+            -- Window may stay open across reload (savesettings) without a second OnShow.
+            -- Skill gates alone leave Watch stock/craftable/status from the pre-bag paint.
+            if StockPiler2.Ui then
+                StockPiler2.Ui._watchUiLastKey = nil
+                StockPiler2.Ui._watchUiFlushedAt = 0
+                if StockPiler2.Ui.MarkWatchUiDirty then
+                    StockPiler2.Ui.MarkWatchUiDirty()
+                end
+            end
+            if StockPiler2Window then
+                StockPiler2Window._tabListsPrimed = false
+            end
+            if DoesWindowExist("StockPiler2Window")
+                and WindowGetShowing("StockPiler2Window") == true
+            then
+                -- Session load: rebuild L0 from warm DataUtils; forceEngine only via ForceFullRefresh.
+                if StockPiler2.Inventory and StockPiler2.Inventory.Flush then
+                    StockPiler2.Inventory.Flush({ force = true, forceEngine = false })
+                end
+                if StockPiler2.Planner and StockPiler2.Planner.GetOrBuild then
+                    StockPiler2.Planner.GetOrBuild()
+                end
+                if StockPiler2Window.RefreshActiveTab then
+                    StockPiler2Window.RefreshActiveTab()
+                elseif StockPiler2Window.RefreshFooterButtons then
+                    StockPiler2Window.RefreshFooterButtons()
+                end
+            elseif StockPiler2Window and StockPiler2Window.RefreshFooterButtons then
+                StockPiler2Window.RefreshFooterButtons()
+            end
         end)
     end
 end

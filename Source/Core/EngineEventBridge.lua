@@ -123,6 +123,10 @@ function Bridge.OnUpdateProcessed(timeElapsed)
     if StockPiler2.Perf and StockPiler2.Perf.OnFrame then
         StockPiler2.Perf.OnFrame(timeElapsed)
     end
+    -- Publish one snapGen for all L0 AdjustUid this frame before refine/plan.
+    if StockPiler2.Inventory and StockPiler2.Inventory.FlushPendingSnapGen then
+        StockPiler2.Inventory.FlushPendingSnapGen()
+    end
     if StockPiler2.Macro and StockPiler2.Macro.DrainEnabledSync then
         StockPiler2.Macro.DrainEnabledSync()
     end

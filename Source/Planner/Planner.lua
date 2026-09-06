@@ -164,12 +164,34 @@ local function RecipeSlotPlanEntry(slot, slots, craftsNeeded, specDemand)
     end
 
     local seedUid = type(seedRecord) == "table" and (tonumber(seedRecord.uniqueID) or 0) or 0
+    local plantUid = type(seedRecord) == "table" and (tonumber(seedRecord.plantUid) or 0) or 0
+    if plantUid <= 0 and seedUid > 0 and SM and SM.GetPlantUidForSeed then
+        plantUid = tonumber(SM.GetPlantUidForSeed(seedUid)) or 0
+    end
+    if plantUid <= 0 and SM and SM.FindPlantUidForSpec then
+        plantUid = tonumber(SM.FindPlantUidForSpec(spec)) or 0
+    end
     local seedCredit = 0
     if seedUid > 0 and StockPiler2.Refine and StockPiler2.Refine.GetSeedBudgetForSpec then
         local budget = StockPiler2.Refine.GetSeedBudgetForSpec(spec, seedUid)
         seedCredit = tonumber(budget and budget.credit) or 0
     end
+    local refinable = 0
+    if growable and plantUid > 0 and StockPiler2.Refine and StockPiler2.Refine.CountRefinablePlants then
+        refinable = tonumber(StockPiler2.Refine.CountRefinablePlants(plantUid, spec)) or 0
+    end
     local craftsHave = perCraft > 0 and math.floor(have / perCraft) or 0
+    -- Pooled short across grow-demand watches: this recipe's Need may be covered
+    -- while absolute demand still exceeds bag stock (e.g. 3x Need 40, have 72).
+    local absolute = 0
+    local watchCount = 0
+    if type(demandRow) == "table" then
+        absolute = tonumber(demandRow.absolute) or 0
+        if type(demandRow.watchDetails) == "table" then
+            watchCount = #demandRow.watchDetails
+        end
+    end
+    local sharedPool = absolute > have and (watchCount > 1 or absolute > potionNeed)
     local entry = {
         spec = spec,
         specKey = specKey,
@@ -181,11 +203,15 @@ local function RecipeSlotPlanEntry(slot, slots, craftsNeeded, specDemand)
         craftsHave = craftsHave,
         craftsShort = math.max(0, craftsNeeded - craftsHave),
         stocked = deficit <= 0,
+        sharedPool = sharedPool == true,
+        absoluteNeed = absolute,
         oneWay = oneWay == true,
         seed = seedRecord,
         seedHave = seedHave,
         seedUid = seedUid,
+        plantUid = plantUid,
         seedCredit = seedCredit,
+        refinable = refinable,
     }
     if slot.role == "container" then
         entry.kind = "buy"
@@ -195,8 +221,12 @@ local function RecipeSlotPlanEntry(slot, slots, craftsNeeded, specDemand)
         -- One-way harvest mat with no seeds in bags: buy seed or buy material.
         entry.kind = "buy"
         entry.buySeedOrMat = true
+    elseif growable and deficit > 0 and seedCredit <= 0 and refinable > 0 then
+        -- Plants in bag can refill seeds — not a buy shortage.
+        entry.kind = "plant"
+        entry.needsRefine = true
     elseif growable and deficit > 0 and seedCredit <= 0 then
-        -- Growable plant whose resolved seed-line is exhausted: buy seed.
+        -- Growable plant whose seed-line is exhausted and nothing refinable: buy seed.
         entry.kind = "buy"
         entry.buySeedOrMat = true
     elseif growable or (oneWay and seedCredit > 0) then
@@ -230,6 +260,7 @@ local function ApplySpecPlanStatus(row, target, recipe, demand)
     row.statusLines = nil
     row.statusSlots = nil
     row.statusNeedLine = nil
+    row.statusTipSlots = nil
     if target.min <= 0 then
         row.statusKey = "no_target"
         row.statusText = L"Set target"
@@ -309,30 +340,36 @@ local function ApplySpecPlanStatus(row, target, recipe, demand)
     local convertShort = {}
     local buyShort = {}
     local statusSlots = {}
+    -- One RecipeSlotPlanEntry pass for status + tipSlots (tip pass reuses).
+    local allEntries = {}
     for i = 1, #slots do
         local entry = RecipeSlotPlanEntry(slots[i], slots, craftsNeeded, demand)
-        if entry ~= nil and entry.deficit > 0 then
-            if entry.kind == "buy" and entry.role == "container" then
-                containerShort = entry
-                buyShort[#buyShort + 1] = entry
-            elseif entry.kind == "convert" then
-                if byproductShort == nil or entry.craftsHave < (byproductShort.craftsHave or 0) then
-                    byproductShort = entry
+        if entry ~= nil then
+            allEntries[#allEntries + 1] = entry
+            if entry.deficit > 0 then
+                if entry.kind == "buy" and entry.role == "container" then
+                    containerShort = entry
+                    buyShort[#buyShort + 1] = entry
+                elseif entry.kind == "convert" then
+                    if byproductShort == nil or entry.craftsHave < (byproductShort.craftsHave or 0) then
+                        byproductShort = entry
+                    end
+                    convertShort[#convertShort + 1] = entry
+                elseif entry.kind == "plant" then
+                    if limiting == nil or CompareGrowPriority(entry, limiting) then
+                        limiting = entry
+                    end
+                    plantShort[#plantShort + 1] = entry
+                else
+                    if vendorShort == nil or entry.deficit > vendorShort.deficit then
+                        vendorShort = entry
+                    end
+                    buyShort[#buyShort + 1] = entry
                 end
-                convertShort[#convertShort + 1] = entry
-            elseif entry.kind == "plant" then
-                if limiting == nil or CompareGrowPriority(entry, limiting) then
-                    limiting = entry
-                end
-                plantShort[#plantShort + 1] = entry
-            else
-                if vendorShort == nil or entry.deficit > vendorShort.deficit then
-                    vendorShort = entry
-                end
-                buyShort[#buyShort + 1] = entry
             end
         end
     end
+    row.statusTipSlots = allEntries
 
     for i = 1, #plantShort do
         statusSlots[#statusSlots + 1] = plantShort[i]
@@ -387,10 +424,15 @@ local function ApplySpecPlanStatus(row, target, recipe, demand)
     end
     for i = 1, #plantShort do
         local entry = plantShort[i]
-        local line = L"Plant " .. matName(entry) .. L" (" .. haveNeed(entry) .. L")"
+        local verb = L"Plant "
+        if entry.needsRefine == true then
+            verb = L"Refine "
+        end
+        local line = verb .. matName(entry) .. L" (" .. haveNeed(entry) .. L")"
         local Grow = StockPiler2.Grow
         if Grow and Grow.GrowingNotesForSpec then
             local notes = Grow.GrowingNotesForSpec(entry.spec)
+            entry.growingNotes = notes or L""
             if notes and notes ~= L"" then
                 line = line .. L" -- " .. notes
             end
@@ -434,8 +476,8 @@ local function ApplySpecPlanStatus(row, target, recipe, demand)
     -- plant-kind deficits, or any recipe slot with seed credit (surplus grow for convert).
     local convertFeedable = limiting ~= nil
     if byproductShort ~= nil and not convertFeedable then
-        for i = 1, #slots do
-            local entry = RecipeSlotPlanEntry(slots[i], slots, craftsNeeded, demand)
+        for i = 1, #allEntries do
+            local entry = allEntries[i]
             if entry ~= nil and (tonumber(entry.seedCredit) or 0) > 0 then
                 convertFeedable = true
                 break
@@ -454,6 +496,21 @@ local function ApplySpecPlanStatus(row, target, recipe, demand)
     if limiting ~= nil then
         row.growable = wantsGrow
         row.specDeficit = limiting
+        if limiting.needsRefine == true then
+            if StockPiler2.Watch and StockPiler2.Watch.IsSeedBufferEnabled
+                and StockPiler2.Watch.IsSeedBufferEnabled() == true
+            then
+                row.statusKey = "need_seeds"
+                row.statusText = L"Seed buffer"
+            elseif CanAutoGrowSkill() and wantsGrow == true then
+                row.statusKey = "restocking"
+                row.statusText = L"Refine plants"
+            else
+                SetMaterialsShortStatus(row, wantsGrow, lines[2] or lines[1], L"Buy plants")
+            end
+            row.statusDetail = lines[2] or lines[1]
+            return
+        end
         local buyLabel = L"Buy plants"
         if limiting.buySeedOrMat == true
             and limiting.seedUid
@@ -553,7 +610,21 @@ end
 function Planner.BuildWatchRows(ctx)
     local rows = {}
     local RS = StockPiler2.RecipeSpec
+    local Perf = StockPiler2.Perf
     local targets = BuildWatchedTargets(ctx)
+    local demand = nil
+    if RS and RS.BuildBalancedSpecDemand then
+        if Perf and Perf.Begin then
+            Perf.Begin("Build.Demand")
+        end
+        demand = RS.BuildBalancedSpecDemand()
+        if Perf and Perf.End then
+            Perf.End("Build.Demand")
+        end
+    end
+    if Perf and Perf.Begin then
+        Perf.Begin("Build.Status")
+    end
     for i = 1, #targets do
         local target = targets[i]
         local recipe = RS and RS.RecipeSpecForPotion and RS.RecipeSpecForPotion(target.potionKey)
@@ -577,7 +648,7 @@ function Planner.BuildWatchRows(ctx)
             autoGrow = target.autoGrow == true,
             hasRecipe = type(recipe) == "table",
         }
-        ApplySpecPlanStatus(row, target, recipe, nil)
+        ApplySpecPlanStatus(row, target, recipe, demand)
         local craftable = 0
         local craftsPossible = 0
         if recipe and RS.CountPotionsCraftable then
@@ -602,7 +673,15 @@ function Planner.BuildWatchRows(ctx)
     else
         for i = 1, #rows do
             rows[i].craftableShared = false
+            rows[i].contestedSpecKeys = nil
         end
+    end
+    if Perf and Perf.End then
+        Perf.End("Build.Status")
+    end
+    local Grow = StockPiler2.Grow
+    if Perf and Perf.Begin then
+        Perf.Begin("Build.Tips")
     end
     for i = 1, #rows do
         local row = rows[i]
@@ -623,6 +702,36 @@ function Planner.BuildWatchRows(ctx)
             }
         end
         ApplyNeedApothecaryStatus(row)
+
+        -- Tip-ready full slot entries (stocked + short) so Status hover skips rebuild.
+        local craftsNeeded = tonumber(row.craftsNeeded) or 0
+        local recipe = row.recipe
+        if type(recipe) == "table" and craftsNeeded > 0 then
+            local tipSlots = row.statusTipSlots
+            if type(tipSlots) ~= "table" then
+                tipSlots = Planner.BuildRecipeSlotTooltipEntries(recipe, craftsNeeded, demand)
+            end
+            if Grow and Grow.GrowingNotesForSpec then
+                for s = 1, #tipSlots do
+                    local entry = tipSlots[s]
+                    if type(entry) == "table"
+                        and entry.kind == "plant"
+                        and (entry.stocked ~= true)
+                        and ((tonumber(entry.deficit) or 0) > 0)
+                    then
+                        if entry.growingNotes == nil then
+                            entry.growingNotes = Grow.GrowingNotesForSpec(entry.spec) or L""
+                        end
+                    end
+                end
+            end
+            row.statusTipSlots = tipSlots
+        else
+            row.statusTipSlots = nil
+        end
+    end
+    if Perf and Perf.End then
+        Perf.End("Build.Tips")
     end
     NotifyWatchRedBlocks(rows)
     return rows
@@ -715,6 +824,8 @@ function Planner.GetOrBuild(opts)
         if type(stale) == "table" then
             return stale
         end
+        -- Pending with no snapshot: do not sync-build on hot paths (footer/cultivation).
+        return nil
     end
     local key = Planner.CacheKeyFromGens()
     if PS and PS.GetCacheKey and PS.GetCacheKey() == key then
@@ -745,8 +856,21 @@ function Planner.Build(opts)
     if StockPiler2.Scheduler and StockPiler2.Scheduler.SuppressInventorySideEffects then
         StockPiler2.Scheduler.SuppressInventorySideEffects(3)
     end
-    if StockPiler2.RecipeSpec then
+    if StockPiler2.RecipeSpec and StockPiler2.RecipeSpec.BeginPlanCraftsMemo then
+        StockPiler2.RecipeSpec.BeginPlanCraftsMemo()
+    end
+    -- One-pass have-cache for this snapGen (replaces blind wipe + per-spec bag walks).
+    if Perf and Perf.Begin then
+        Perf.Begin("Build.WarmHave")
+    end
+    if StockPiler2.RecipeSpec and StockPiler2.RecipeSpec.WarmSpecHaveCacheForWatches then
+        StockPiler2.RecipeSpec.WarmSpecHaveCacheForWatches()
+    elseif StockPiler2.RecipeSpec then
         StockPiler2.RecipeSpec._specHaveCache = {}
+        StockPiler2.RecipeSpec._specHaveSnapGen = nil
+    end
+    if Perf and Perf.End then
+        Perf.End("Build.WarmHave")
     end
     if StockPiler2.SeedMap and StockPiler2.SeedMap.ClearPlanCaches then
         StockPiler2.SeedMap.ClearPlanCaches()
@@ -998,11 +1122,18 @@ local function SpecJobLabel(spec)
     return L"material"
 end
 
---- Vendor buy list for every enabled watch below target.
---- Never refine byproducts. Plants/seeds are omitted when Cultivation is trained
---- (AutoGrow owns that pipeline); without Cultivation they enter the buy pool.
+--- Vendor buy list for enabled watches below target.
+--- Prefers mats for max bottleGap (Target-Stock-Craftable) focus watches; falls
+--- back to all short watches when focus yields no buyable deficits (e.g. focus
+--- only needs growables). Never refine byproducts. Plants/seeds omitted when
+--- Cultivation is trained (AutoGrow owns that pipeline).
 function Planner.CollectVendorBuyJobs()
     local jobs = {}
+    Planner._vendorBuyJobsMeta = {
+        source = "none",
+        maxBottleGap = nil,
+        focusWatchCount = 0,
+    }
     local Inv = StockPiler2.Inventory
     if Inv and Inv._ready ~= true then
         return jobs
@@ -1020,154 +1151,247 @@ function Planner.CollectVendorBuyJobs()
     local Caps = StockPiler2.TradeSkillCaps
     local allowPlantBuys = not (Caps and Caps.CanAutoGrow and Caps.CanAutoGrow() == true)
 
-    local buyPool = {}
-    local function addBuyNeed(spec, role, craftsNeeded, slots, slot)
-        if type(spec) ~= "table" then
-            return
+    local function ResolveWatchRecipe(watchKey, resolved)
+        local recipe = nil
+        if resolved and resolved.recipeSpecKey and RS.RecipeSpecForPotionRecipe then
+            recipe = RS.RecipeSpecForPotionRecipe(resolved.recipeSpecKey)
         end
-        local kind = ClassifyBuyKind(spec)
-        if kind == "convert" or kind == nil then
-            return
+        if type(recipe) ~= "table" and RS.RecipeSpecForPotion then
+            recipe = RS.RecipeSpecForPotion(watchKey)
         end
-        if kind == "plant" and not allowPlantBuys then
-            return
-        end
-        if kind ~= "buy" and kind ~= "plant" then
-            return
-        end
-        local specKey = ""
-        if MS and MS.Key then
-            specKey = tostring(MS.Key(spec) or "")
-        end
-        if specKey == "" then
-            specKey = ToNarrow(SpecJobLabel(spec))
-        end
-        local perCraft = 1
-        if RS.EffectiveSpecPerCraft then
-            perCraft = tonumber(RS.EffectiveSpecPerCraft(slot, slots)) or 1
-        end
-        if perCraft < 1 then
-            perCraft = 1
-        end
-        local row = buyPool[specKey]
-        if row == nil then
-            row = {
-                spec = spec,
-                role = role or spec.role,
-                specKey = specKey,
-                absolute = 0,
-                label = SpecJobLabel(spec),
-                kind = kind,
-            }
-            buyPool[specKey] = row
-        end
-        row.absolute = (tonumber(row.absolute) or 0) + (craftsNeeded * perCraft)
+        return recipe
     end
 
-    local byUid = {}
-    local uidOrder = {}
-    for watchKey, watch in pairs(watches) do
-        if type(watch) == "table" and watch.enabled == true then
-            local resolved = RS.ResolveWatchPotion and RS.ResolveWatchPotion(watchKey)
-            local potion = resolved and resolved.potion
-            local recipe = nil
-            if resolved and resolved.recipeSpecKey and RS.RecipeSpecForPotionRecipe then
-                recipe = RS.RecipeSpecForPotionRecipe(resolved.recipeSpecKey)
+    local function JobsFromBuyPool(buyPool)
+        local out = {}
+        for specKey, row in pairs(buyPool) do
+            local have = 0
+            if RS.CountItemsMatchingSpec then
+                have = tonumber(RS.CountItemsMatchingSpec(row.spec)) or 0
             end
-            if type(recipe) ~= "table" and RS.RecipeSpecForPotion then
-                recipe = RS.RecipeSpecForPotion(watchKey)
+            local deficit = math.max(0, (tonumber(row.absolute) or 0) - have)
+            if deficit > 0 then
+                out[#out + 1] = {
+                    kind = row.kind or "buy",
+                    spec = row.spec,
+                    role = row.role,
+                    have = have,
+                    need = row.absolute,
+                    deficit = deficit,
+                    specKey = specKey,
+                    label = row.label,
+                    name = row.label,
+                    bottleGap = tonumber(row.bottleGap),
+                }
             end
-            if type(potion) == "table" and type(recipe) == "table" then
-                local target = tonumber(watch.targetStock) or 0
-                local havePot = RS.PotionHaveCombined and RS.PotionHaveCombined(potion) or 0
-                local potDeficit = math.max(0, target - havePot)
-                local uid = tonumber(resolved and resolved.outputUid) or tonumber(potion.outputUid) or 0
-                if potDeficit > 0
-                    and target > 0
-                    and RS.WatchStillNeedsGrow
-                    and RS.WatchStillNeedsGrow(potion, recipe, target, watchKey)
-                then
-                    local groupKey = uid
-                    if groupKey <= 0 then
-                        groupKey = watchKey
-                    end
-                    local group = byUid[groupKey]
-                    if group == nil then
-                        group = {
-                            uid = uid,
-                            have = havePot,
-                            maxTarget = target,
-                            primaryRecipe = recipe,
-                        }
-                        byUid[groupKey] = group
-                        uidOrder[#uidOrder + 1] = groupKey
-                    else
-                        if target > group.maxTarget then
-                            group.maxTarget = target
+        end
+        return out
+    end
+
+    local function SortBuyJobs(list)
+        table.sort(list, function(a, b)
+            local ar = (a and a.role) or ""
+            local br = (b and b.role) or ""
+            if ar == "container" and br ~= "container" then
+                return true
+            end
+            if br == "container" and ar ~= "container" then
+                return false
+            end
+            local ad = tonumber(a and a.deficit) or 0
+            local bd = tonumber(b and b.deficit) or 0
+            if ad ~= bd then
+                return ad > bd
+            end
+            local al = ToNarrow(a and (a.label or a.name))
+            local bl = ToNarrow(b and (b.label or b.name))
+            return al < bl
+        end)
+    end
+
+    local function BuildBuyPoolFromWatchEntries(entries)
+        local buyPool = {}
+        local function addBuyNeed(spec, role, craftsNeeded, slots, slot, bottleGap)
+            if type(spec) ~= "table" then
+                return
+            end
+            local kind = ClassifyBuyKind(spec)
+            if kind == "convert" or kind == nil then
+                return
+            end
+            if kind == "plant" and not allowPlantBuys then
+                return
+            end
+            if kind ~= "buy" and kind ~= "plant" then
+                return
+            end
+            local specKey = ""
+            if MS and MS.Key then
+                specKey = tostring(MS.Key(spec) or "")
+            end
+            if specKey == "" then
+                specKey = ToNarrow(SpecJobLabel(spec))
+            end
+            local perCraft = 1
+            if RS.EffectiveSpecPerCraft then
+                perCraft = tonumber(RS.EffectiveSpecPerCraft(slot, slots)) or 1
+            end
+            if perCraft < 1 then
+                perCraft = 1
+            end
+            local row = buyPool[specKey]
+            if row == nil then
+                row = {
+                    spec = spec,
+                    role = role or spec.role,
+                    specKey = specKey,
+                    absolute = 0,
+                    label = SpecJobLabel(spec),
+                    kind = kind,
+                    bottleGap = nil,
+                }
+                buyPool[specKey] = row
+            end
+            row.absolute = (tonumber(row.absolute) or 0) + (craftsNeeded * perCraft)
+            local gap = tonumber(bottleGap)
+            if gap ~= nil and (row.bottleGap == nil or gap > row.bottleGap) then
+                row.bottleGap = gap
+            end
+        end
+
+        for i = 1, #entries do
+            local entry = entries[i]
+            local recipe = entry and entry.recipe
+            local deficit = tonumber(entry and entry.deficit) or 0
+            local bottleGap = tonumber(entry and entry.bottleGap)
+            if deficit > 0 and type(recipe) == "table" then
+                local craftsNeeded = RS.CraftsNeededForDeficit
+                    and RS.CraftsNeededForDeficit(deficit, recipe)
+                    or math.ceil(deficit / 2)
+                local slots = recipe.slots or {}
+                for j = 1, #slots do
+                    local slot = slots[j]
+                    local spec = type(slot) == "table" and (slot.spec or (RS.ResolveSlotSpec and RS.ResolveSlotSpec(slot))) or nil
+                    addBuyNeed(
+                        spec,
+                        slot and (slot.role or (spec and spec.role)),
+                        craftsNeeded,
+                        slots,
+                        slot,
+                        bottleGap
+                    )
+                end
+            end
+        end
+        return buyPool
+    end
+
+    local function FocusWatchEntries(focus)
+        local entries = {}
+        if type(focus) ~= "table" or type(focus.watches) ~= "table" then
+            return entries
+        end
+        for i = 1, #focus.watches do
+            local fw = focus.watches[i]
+            if type(fw) == "table" and type(fw.recipe) == "table" then
+                local stock = tonumber(fw.stock) or 0
+                local target = tonumber(fw.target) or 0
+                entries[#entries + 1] = {
+                    recipe = fw.recipe,
+                    deficit = math.max(0, target - stock),
+                    bottleGap = tonumber(fw.bottleGap),
+                }
+            end
+        end
+        return entries
+    end
+
+    local function AllShortWatchEntries()
+        local byUid = {}
+        local uidOrder = {}
+        for watchKey, watch in pairs(watches) do
+            if type(watch) == "table" and watch.enabled == true then
+                local resolved = RS.ResolveWatchPotion and RS.ResolveWatchPotion(watchKey)
+                local potion = resolved and resolved.potion
+                local recipe = ResolveWatchRecipe(watchKey, resolved)
+                if type(potion) == "table" and type(recipe) == "table" then
+                    local target = tonumber(watch.targetStock) or 0
+                    local havePot = RS.PotionHaveCombined and RS.PotionHaveCombined(potion) or 0
+                    local potDeficit = math.max(0, target - havePot)
+                    local uid = tonumber(resolved and resolved.outputUid) or tonumber(potion.outputUid) or 0
+                    if potDeficit > 0
+                        and target > 0
+                        and RS.WatchStillNeedsGrow
+                        and RS.WatchStillNeedsGrow(potion, recipe, target, watchKey)
+                    then
+                        local craftable = RS.CountPotionsCraftable and RS.CountPotionsCraftable(recipe) or 0
+                        local bottleGap = math.max(0, target - havePot - craftable)
+                        local groupKey = uid
+                        if groupKey <= 0 then
+                            groupKey = watchKey
                         end
-                        if havePot < group.have then
-                            group.have = havePot
+                        local group = byUid[groupKey]
+                        if group == nil then
+                            group = {
+                                uid = uid,
+                                have = havePot,
+                                maxTarget = target,
+                                primaryRecipe = recipe,
+                                bottleGap = bottleGap,
+                            }
+                            byUid[groupKey] = group
+                            uidOrder[#uidOrder + 1] = groupKey
+                        else
+                            if target > group.maxTarget then
+                                group.maxTarget = target
+                            end
+                            if havePot < group.have then
+                                group.have = havePot
+                            end
+                            if bottleGap > (tonumber(group.bottleGap) or 0) then
+                                group.bottleGap = bottleGap
+                                group.primaryRecipe = recipe
+                            end
                         end
                     end
                 end
             end
         end
-    end
-
-    for i = 1, #uidOrder do
-        local group = byUid[uidOrder[i]]
-        local recipe = group.primaryRecipe
-        local deficit = math.max(0, group.maxTarget - group.have)
-        if deficit > 0 and type(recipe) == "table" then
-            local craftsNeeded = RS.CraftsNeededForDeficit
-                and RS.CraftsNeededForDeficit(deficit, recipe)
-                or math.ceil(deficit / 2)
-            local slots = recipe.slots or {}
-            for j = 1, #slots do
-                local slot = slots[j]
-                local spec = type(slot) == "table" and slot.spec or nil
-                addBuyNeed(spec, slot and (slot.role or (spec and spec.role)), craftsNeeded, slots, slot)
-            end
-        end
-    end
-
-    for specKey, row in pairs(buyPool) do
-        local have = 0
-        if RS.CountItemsMatchingSpec then
-            have = tonumber(RS.CountItemsMatchingSpec(row.spec)) or 0
-        end
-        local deficit = math.max(0, (tonumber(row.absolute) or 0) - have)
-        if deficit > 0 then
-            jobs[#jobs + 1] = {
-                kind = row.kind or "buy",
-                spec = row.spec,
-                role = row.role,
-                have = have,
-                need = row.absolute,
-                deficit = deficit,
-                specKey = specKey,
-                label = row.label,
-                name = row.label,
+        local entries = {}
+        for i = 1, #uidOrder do
+            local group = byUid[uidOrder[i]]
+            entries[#entries + 1] = {
+                recipe = group.primaryRecipe,
+                deficit = math.max(0, group.maxTarget - group.have),
+                bottleGap = tonumber(group.bottleGap),
             }
         end
+        return entries
     end
 
-    table.sort(jobs, function(a, b)
-        local ar = (a and a.role) or ""
-        local br = (b and b.role) or ""
-        if ar == "container" and br ~= "container" then
-            return true
+    local focus = RS.CollectAutoBuyFocus and RS.CollectAutoBuyFocus() or nil
+    local maxGap = type(focus) == "table" and tonumber(focus.maxBottleGap) or nil
+    local focusCount = type(focus) == "table" and type(focus.watches) == "table" and #focus.watches or 0
+    Planner._vendorBuyJobsMeta.maxBottleGap = maxGap
+    Planner._vendorBuyJobsMeta.focusWatchCount = focusCount
+
+    local source = "fallback"
+    local buyPool = nil
+    if focusCount > 0 then
+        buyPool = BuildBuyPoolFromWatchEntries(FocusWatchEntries(focus))
+        jobs = JobsFromBuyPool(buyPool)
+        if #jobs > 0 then
+            source = "focus"
         end
-        if br == "container" and ar ~= "container" then
-            return false
-        end
-        local al = ToNarrow(a and (a.label or a.name))
-        local bl = ToNarrow(b and (b.label or b.name))
-        if al ~= bl then
-            return al < bl
-        end
-        return (tonumber(a and a.deficit) or 0) > (tonumber(b and b.deficit) or 0)
-    end)
+    end
+    if source ~= "focus" then
+        buyPool = BuildBuyPoolFromWatchEntries(AllShortWatchEntries())
+        jobs = JobsFromBuyPool(buyPool)
+        source = (#jobs > 0) and "fallback" or "none"
+    end
+    Planner._vendorBuyJobsMeta.source = source
+
+    SortBuyJobs(jobs)
     return jobs
 end
 

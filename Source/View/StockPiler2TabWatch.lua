@@ -241,15 +241,48 @@ local function BuildVisibleList(opts)
             Inv.RefreshAllIfNeeded()
         end
     end
-    local plan = { rows = {} }
+    local prevList = StockPiler2TabWatch.listData
+    local prevOrder = StockPiler2TabWatch.displayOrder
+    local plan = nil
     if opts.forcePlan == true and StockPiler2.Planner and StockPiler2.Planner.Build then
-        plan = StockPiler2.Planner.Build({ force = true }) or plan
+        plan = StockPiler2.Planner.Build({ force = true })
     elseif StockPiler2.Planner and StockPiler2.Planner.GetOrBuild then
-        plan = StockPiler2.Planner.GetOrBuild() or plan
+        plan = StockPiler2.Planner.GetOrBuild()
     elseif StockPiler2.PlanSnapshot and StockPiler2.PlanSnapshot.Get then
-        plan = StockPiler2.PlanSnapshot.Get() or plan
+        plan = StockPiler2.PlanSnapshot.Get()
     end
-    StockPiler2TabWatch.listData = plan.rows or {}
+    local rows = type(plan) == "table" and plan.rows or nil
+    -- Never blank the open Watch list when plan is pending/nil after Invalidate.
+    if type(rows) ~= "table" or #rows == 0 then
+        local keepPrev = type(prevList) == "table" and #prevList > 0
+        if keepPrev then
+            local keep = type(plan) ~= "table"
+            if not keep then
+                local watches = StockPiler2.Watch and StockPiler2.Watch.GetWatches
+                    and StockPiler2.Watch.GetWatches()
+                if type(watches) == "table" then
+                    for _, w in pairs(watches) do
+                        if type(w) == "table" and w.enabled == true then
+                            keep = true
+                            break
+                        end
+                    end
+                end
+            end
+            if keep then
+                StockPiler2TabWatch.listData = prevList
+                StockPiler2TabWatch.displayOrder = prevOrder or {}
+                if #StockPiler2TabWatch.displayOrder == 0 then
+                    for i = 1, #prevList do
+                        StockPiler2TabWatch.displayOrder[i] = i
+                    end
+                end
+                return
+            end
+        end
+        rows = {}
+    end
+    StockPiler2TabWatch.listData = rows
     StockPiler2TabWatch.displayOrder = {}
     for i = 1, #StockPiler2TabWatch.listData do
         StockPiler2TabWatch.displayOrder[i] = i
@@ -278,12 +311,29 @@ function StockPiler2TabWatch.Initialize()
     ButtonSetText("SP2TabWatchColTarget", L"Target")
     ButtonSetText("SP2TabWatchColPriority", L"AutoGrow")
     ButtonSetText("SP2TabWatchColBrew", L"Brew")
+    StockPiler2TabWatch.RefreshSkillGates()
+end
+
+--- Re-apply Cultivation/Apothecary skill gates on checkboxes/chips.
+--- Call after LOADING_END / SESSION_LOADED — Initialize often runs before tradeSkills exist.
+function StockPiler2TabWatch.RefreshSkillGates()
+    if not DoesWindowExist("SP2TabWatch") then
+        return
+    end
+    local canGrow = CanAutoGrowUi()
+    local prev = StockPiler2TabWatch._lastCanAutoGrow
+    StockPiler2TabWatch._lastCanAutoGrow = canGrow
     UpdateEnableCheckbox()
     UpdateAdditivesCheckbox()
     UpdateAutoBuyCheckbox()
     UpdateSeedBufferEnableCheckbox()
     UpdateSeedBufferLabel()
     UpdateAutoBuyChips()
+    if prev == false and canGrow == true then
+        if StockPiler2.Ui and StockPiler2.Ui.MarkWatchUiDirty then
+            StockPiler2.Ui.MarkWatchUiDirty()
+        end
+    end
 end
 
 function StockPiler2TabWatch.Refresh(opts)
@@ -291,12 +341,7 @@ function StockPiler2TabWatch.Refresh(opts)
     if not DoesWindowExist("SP2TabWatch") then
         return
     end
-    UpdateEnableCheckbox()
-    UpdateAdditivesCheckbox()
-    UpdateAutoBuyCheckbox()
-    UpdateSeedBufferEnableCheckbox()
-    UpdateSeedBufferLabel()
-    UpdateAutoBuyChips()
+    StockPiler2TabWatch.RefreshSkillGates()
     BuildVisibleList(opts)
     if DoesWindowExist("SP2TabWatchList") then
         ListBoxSetDisplayOrder("SP2TabWatchList", {})
@@ -652,7 +697,7 @@ function StockPiler2TabWatch.OnMouseOverEnabled()
             text = text
                 .. L" This character gathers via "
                 .. gather
-                .. L" — plant mats must be bought or grown on a Cultivator."
+                .. L" - plant mats must be bought or grown on a Cultivator."
         end
         Tooltips.CreateTextOnlyTooltip(SystemData.ActiveWindow.name, text)
         Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_RIGHT)
@@ -845,17 +890,7 @@ local function CollectSeedBufferTooltipData()
     }
 end
 
-function StockPiler2TabWatch.OnMouseOverSeedBuffer()
-    local data = CollectSeedBufferTooltipData()
-    if not StockPiler2RecipeTooltip or not StockPiler2RecipeTooltip.ShowColoredRows then
-        Tooltips.CreateTextOnlyTooltip(
-            SystemData.ActiveWindow.name,
-            L"Minimum seeds to keep in bags. L-click +1, R-click -1. Hold Shift for +/-10."
-        )
-        Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_TOP)
-        return
-    end
-
+local function BuildSeedBufferTooltipRows(data)
     local MS = StockPiler2.MaterialSpec
     local colorOk = RgbDef(COLOR_OK)
     local colorWarn = RgbDef(COLOR_WARN)
@@ -894,7 +929,6 @@ function StockPiler2TabWatch.OnMouseOverSeedBuffer()
         { text = L"Watched seeds", kind = "meta" },
     }
 
-    -- Multi-line blocks (~3–4 rows each + seps); DefaultTooltip ~17 rows.
     local maxWatched = 4
     local maxIntents = 3
 
@@ -980,6 +1014,39 @@ function StockPiler2TabWatch.OnMouseOverSeedBuffer()
         text = L"Minimum seeds to keep in bags. L-click +1, R-click -1. Hold Shift for +/-10.",
         kind = "meta",
     }
+    return rows
+end
+
+function StockPiler2TabWatch.OnMouseOverSeedBuffer()
+    if not StockPiler2RecipeTooltip or not StockPiler2RecipeTooltip.ShowColoredRows then
+        Tooltips.CreateTextOnlyTooltip(
+            SystemData.ActiveWindow.name,
+            L"Minimum seeds to keep in bags. L-click +1, R-click -1. Hold Shift for +/-10."
+        )
+        Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_TOP)
+        return
+    end
+
+    local genKey = "0"
+    if StockPiler2.Planner and StockPiler2.Planner.CacheKeyFromGens then
+        genKey = tostring(StockPiler2.Planner.CacheKeyFromGens() or "0")
+    end
+    local cache = StockPiler2TabWatch._seedBufferTipCache
+    if type(cache) ~= "table" or cache.genKey ~= genKey then
+        cache = { genKey = genKey, rows = nil }
+        StockPiler2TabWatch._seedBufferTipCache = cache
+    end
+    local rows = cache.rows
+    if type(rows) ~= "table" then
+        if StockPiler2.Perf and StockPiler2.Perf.Begin then
+            StockPiler2.Perf.Begin("SeedBufferTooltip.Build")
+        end
+        rows = BuildSeedBufferTooltipRows(CollectSeedBufferTooltipData())
+        cache.rows = rows
+        if StockPiler2.Perf and StockPiler2.Perf.End then
+            StockPiler2.Perf.End("SeedBufferTooltip.Build")
+        end
+    end
     StockPiler2RecipeTooltip.ShowColoredRows(SystemData.ActiveWindow.name, rows, Tooltips.ANCHOR_WINDOW_TOP)
 end
 
@@ -1132,6 +1199,12 @@ local function TitleCaseStatusNote(notes)
     if lower == "stocked" then
         return L"Stocked"
     end
+    if lower == "shared" then
+        return L"Shared"
+    end
+    if lower == "pooled" then
+        return L"Pooled"
+    end
     if lower == "buy seeds" then
         return L"Buy seeds"
     end
@@ -1226,17 +1299,7 @@ local function TrimStatusTooltipRows(rows, limit)
     return rows
 end
 
-function StockPiler2TabWatch.OnMouseOverStatus()
-    local data = RowDataFromActiveChild()
-    if not data then
-        return
-    end
-    if not StockPiler2RecipeTooltip or not StockPiler2RecipeTooltip.ShowColoredRows then
-        Tooltips.CreateTextOnlyTooltip(SystemData.ActiveWindow.name, data.statusText or L"Status")
-        Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_TOP)
-        return
-    end
-
+local function BuildStatusTooltipRows(data)
     local rows = {
         {
             text = data.statusText or L"Status",
@@ -1251,18 +1314,28 @@ function StockPiler2TabWatch.OnMouseOverStatus()
         end
     end
 
-    local slots = data.statusSlots
+    local slots = data.statusTipSlots
+    if type(slots) ~= "table" or #slots == 0 then
+        slots = data.statusSlots
+    end
     local recipe = data.recipe or data.specRecipe
     local craftsNeeded = tonumber(data.craftsNeeded) or 0
     local deficit = tonumber(data.potionDeficit) or 0
     local yield = tonumber(data.recipeYield) or 0
+    local usedTipSlots = type(data.statusTipSlots) == "table" and #data.statusTipSlots > 0
     local fullSlots = nil
-    if type(recipe) == "table"
+    if not usedTipSlots
+        and type(recipe) == "table"
         and StockPiler2.Planner
         and StockPiler2.Planner.BuildRecipeSlotTooltipEntries
         and (craftsNeeded > 0 or (type(slots) == "table" and #slots > 0))
     then
-        fullSlots = StockPiler2.Planner.BuildRecipeSlotTooltipEntries(recipe, craftsNeeded, nil)
+        local demand = nil
+        local RS = StockPiler2.RecipeSpec
+        if RS and RS.BuildBalancedSpecDemand then
+            demand = RS.BuildBalancedSpecDemand()
+        end
+        fullSlots = StockPiler2.Planner.BuildRecipeSlotTooltipEntries(recipe, craftsNeeded, demand)
     end
     if type(fullSlots) == "table" and #fullSlots > 0 then
         slots = fullSlots
@@ -1308,7 +1381,7 @@ function StockPiler2TabWatch.OnMouseOverStatus()
                     if gather ~= nil and gather ~= L"Cultivation" then
                         text = L"This character gathers via "
                             .. gather
-                            .. L" — plant mats must be bought or grown on a Cultivator."
+                            .. L" - plant mats must be bought or grown on a Cultivator."
                     end
                     rows[#rows + 1] = {
                         text = text,
@@ -1406,33 +1479,39 @@ function StockPiler2TabWatch.OnMouseOverStatus()
                 local statusNote = nil
                 local noteKind = stocked and "stocked" or "body"
                 if entry.kind == "plant" and not stocked then
-                    local notes = L""
-                    if Grow and Grow.GrowingNotesForSpec then
-                        notes = Grow.GrowingNotesForSpec(entry.spec) or L""
+                    local notes = entry.growingNotes
+                    if notes == nil or notes == L"" then
+                        notes = L""
+                        if Grow and Grow.GrowingNotesForSpec then
+                            notes = Grow.GrowingNotesForSpec(entry.spec) or L""
+                        end
                     end
                     if notes == L"" then
                         if not CanAutoGrowUi() then
                             notes = L"Needs Cultivation"
                             haveColor = colorBlock
                         elseif data.autoGrow == true then
-                            -- "Needs planting" is misleading when the seed-line itself is exhausted.
-                            -- In that case the only way forward is to buy more seeds/plants.
-                            local seedUid = 0
-                            local SM = StockPiler2.SeedMap
-                            if SM and SM.ResolveSeedForSpec then
-                                local seed = SM.ResolveSeedForSpec(entry.spec)
-                                if type(seed) == "table" then
-                                    seedUid = tonumber(seed.uniqueID)
-                                        or tonumber(seed.itemData and seed.itemData.uniqueID)
-                                        or tonumber(seed.seedUid)
-                                        or 0
+                            -- Prefer plan-time seed credit when present; else resolve once.
+                            local seedUid = tonumber(entry.seedUid) or 0
+                            local credit = tonumber(entry.seedCredit)
+                            if credit == nil then
+                                credit = 0
+                                if seedUid <= 0 then
+                                    local SM = StockPiler2.SeedMap
+                                    if SM and SM.ResolveSeedForSpec then
+                                        local seed = SM.ResolveSeedForSpec(entry.spec)
+                                        if type(seed) == "table" then
+                                            seedUid = tonumber(seed.uniqueID)
+                                                or tonumber(seed.itemData and seed.itemData.uniqueID)
+                                                or tonumber(seed.seedUid)
+                                                or 0
+                                        end
+                                    end
                                 end
-                            end
-
-                            local credit = 0
-                            if seedUid > 0 and StockPiler2.Refine and StockPiler2.Refine.GetSeedBudgetForSpec then
-                                local budget = StockPiler2.Refine.GetSeedBudgetForSpec(entry.spec, seedUid)
-                                credit = tonumber(budget and budget.credit) or 0
+                                if seedUid > 0 and StockPiler2.Refine and StockPiler2.Refine.GetSeedBudgetForSpec then
+                                    local budget = StockPiler2.Refine.GetSeedBudgetForSpec(entry.spec, seedUid)
+                                    credit = tonumber(budget and budget.credit) or 0
+                                end
                             end
 
                             if seedUid > 0 and credit <= 0 then
@@ -1451,8 +1530,28 @@ function StockPiler2TabWatch.OnMouseOverStatus()
                     statusNote = TitleCaseStatusNote(notes)
                     noteKind = GrowingNoteKind(notes)
                 elseif stocked then
-                    statusNote = L"Stocked"
-                    noteKind = "stocked"
+                    local contestedKeys = data.contestedSpecKeys
+                    local specKey = entry.specKey
+                    local claimContested = (data.craftableShared == true
+                            or data.statusKey == "ready_to_craft_shared")
+                        and type(contestedKeys) == "table"
+                        and type(specKey) == "string"
+                        and specKey ~= ""
+                        and contestedKeys[specKey] == true
+                    -- Shared = brew-now claims fight other short watches.
+                    -- Pooled = grow-to-target demand across watches still exceeds bags.
+                    if claimContested then
+                        statusNote = L"Shared"
+                        noteKind = "warning"
+                        haveColor = colorWarn
+                    elseif entry.sharedPool == true then
+                        statusNote = L"Pooled"
+                        noteKind = "warning"
+                        haveColor = colorWarn
+                    else
+                        statusNote = L"Stocked"
+                        noteKind = "stocked"
+                    end
                 end
                 local haveText = L"Have "
                     .. towstring(tostring(entry.have or 0))
@@ -1476,9 +1575,46 @@ function StockPiler2TabWatch.OnMouseOverStatus()
         appendMeta(data.statusDetail)
     end
 
-    -- Engine DefaultTooltip max is Tooltips.NUM_ROWS (17); trim then clamp.
+    return rows
+end
+
+function StockPiler2TabWatch.OnMouseOverStatus()
+    local data = RowDataFromActiveChild()
+    if not data then
+        return
+    end
+    if not StockPiler2RecipeTooltip or not StockPiler2RecipeTooltip.ShowColoredRows then
+        Tooltips.CreateTextOnlyTooltip(SystemData.ActiveWindow.name, data.statusText or L"Status")
+        Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_TOP)
+        return
+    end
+
     local engineMax = (Tooltips and tonumber(Tooltips.NUM_ROWS)) or 17
-    TrimStatusTooltipRows(rows, engineMax)
+    local genKey = "0"
+    if StockPiler2.Planner and StockPiler2.Planner.CacheKeyFromGens then
+        genKey = tostring(StockPiler2.Planner.CacheKeyFromGens() or "0")
+    end
+    local watchKey = tostring(data.potionKey or data.id or "")
+    local cache = StockPiler2TabWatch._statusTipCache
+    if type(cache) ~= "table" or cache.genKey ~= genKey then
+        cache = { genKey = genKey, byWatch = {} }
+        StockPiler2TabWatch._statusTipCache = cache
+    end
+    local rows = watchKey ~= "" and cache.byWatch[watchKey] or nil
+    if type(rows) ~= "table" then
+        if StockPiler2.Perf and StockPiler2.Perf.Begin then
+            StockPiler2.Perf.Begin("StatusTooltip.Build")
+        end
+        rows = BuildStatusTooltipRows(data)
+        TrimStatusTooltipRows(rows, engineMax)
+        if watchKey ~= "" then
+            cache.byWatch[watchKey] = rows
+        end
+        if StockPiler2.Perf and StockPiler2.Perf.End then
+            StockPiler2.Perf.End("StatusTooltip.Build")
+        end
+    end
+
     StockPiler2RecipeTooltip.ShowColoredRows(
         SystemData.ActiveWindow.name,
         rows,
@@ -1508,39 +1644,63 @@ local function ShowStockRowTooltip(data)
     local target = tonumber(data.target) or 0
     local have = tonumber(data.potionHave) or 0
     local craftable = tonumber(data.craftable) or 0
+    local contested = data.craftableShared == true or data.statusKey == "ready_to_craft_shared"
+    local colorOk = RgbDef(COLOR_OK)
+    local colorWarn = RgbDef(COLOR_WARN)
+    local colorBlock = RgbDef(COLOR_BLOCK)
     local title = L"No target"
     local meta = L"Set a Target to track bag stock against it."
-    local bodyKind = "body"
+    local titleColor = nil
+    local stockKind = "body"
     if target > 0 then
         if have >= target then
             title = L"Fully stocked"
-            meta = L"Green: bag stock is at or above Target."
+            meta = L"Green Stock: bag count is at or above Target."
+            titleColor = colorOk
+            stockKind = "stocked"
         elseif (have + craftable) >= target then
+            -- Yellow Stock = bags short, but Craftable reaches Target (brew to finish).
+            -- Contested vs safe is Craftable yellow/green — not a different Stock color.
             title = L"Need brewing"
-            if data.craftableShared == true or data.statusKey == "ready_to_craft_shared" then
-                meta = L"Yellow: covered, but shared mats are contested - AutoGrow continues until Craftable is green. Row Load/Brew can brew early; footer Brew waits for green."
-            else
-                meta = L"Green Ready: Stock + Craftable covers Target uncontested - use Brew."
+            meta = L"Yellow Stock: bags are short of Target, but Craftable reaches it - brew to finish."
+            titleColor = colorWarn
+            stockKind = "warning"
+            if contested then
+                meta = meta
+                    .. L" Craftable is yellow: brewing now uses mats other short watches also need."
             end
-            bodyKind = "warning"
         else
             title = L"Need materials"
-            meta = L"Red: Stock + Craftable is still short of Target - grow or buy mats."
-            bodyKind = "warning"
+            meta = L"Red Stock: bags + Craftable still short of Target - grow or buy mats."
+            titleColor = colorBlock
+            stockKind = "warning"
+        end
+    end
+    local craftKind = "body"
+    local craftColor = colorBlock
+    if craftable > 0 then
+        if contested then
+            craftKind = "warning"
+            craftColor = colorWarn
+        else
+            craftKind = "stocked"
+            craftColor = colorOk
         end
     end
     local rows = {
-        { text = title, kind = "title" },
+        { text = title, kind = "title", color = titleColor },
         {
             text = L"Stock "
                 .. towstring(tostring(have))
                 .. L" / Target "
                 .. towstring(tostring(target)),
-            kind = "body",
+            kind = stockKind,
+            color = titleColor,
         },
         {
             text = L"Craftable " .. towstring(tostring(craftable)),
-            kind = bodyKind,
+            kind = craftKind,
+            color = craftColor,
         },
         { text = meta, kind = "meta" },
     }
@@ -1556,6 +1716,7 @@ local function ShowStockRowTooltip(data)
             rows[#rows + 1] = {
                 text = L"Short by " .. towstring(tostring(short)) .. L" after Craftable.",
                 kind = "warning",
+                color = colorBlock,
             }
         end
     end
@@ -1583,7 +1744,7 @@ local function ShowCraftableHeaderTooltip()
     if not StockPiler2RecipeTooltip or not StockPiler2RecipeTooltip.ShowColoredRows then
         Tooltips.CreateTextOnlyTooltip(
             SystemData.ActiveWindow.name,
-            L"Craftable - best-case bottles if every brew is this potion. Yellow = shared mats contested."
+            L"Craftable - best-case bottles if every brew is this potion. Green = safe for other watches. Yellow = contested claims."
         )
         Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_TOP)
         return
@@ -1591,11 +1752,11 @@ local function ShowCraftableHeaderTooltip()
     StockPiler2RecipeTooltip.ShowColoredRows(SystemData.ActiveWindow.name, {
         { text = L"Craftable", kind = "title" },
         {
-            text = L"Best-case count if every brew output is this exact potion.",
+            text = L"Best-case bottle count if every brew output is this exact potion.",
             kind = "body",
         },
         {
-            text = L"Green = mats covered. Yellow = shared mats contested. Red = zero craftable.",
+            text = L"Green = that count is uncontested (safe for other short watches). Yellow = brewing uses mats other short watches also claim. Red = zero craftable.",
             kind = "meta",
         },
         {
@@ -1610,6 +1771,9 @@ local function ShowCraftableRowTooltip(data)
         return
     end
     local contested = data.craftableShared == true
+    local colorOk = RgbDef(COLOR_OK)
+    local colorWarn = RgbDef(COLOR_WARN)
+    local colorBlock = RgbDef(COLOR_BLOCK)
     local rows = {
         { text = L"Craftable", kind = "title" },
     }
@@ -1622,6 +1786,17 @@ local function ShowCraftableRowTooltip(data)
         expected, rate, best, crafts = RS.ExpectedCraftableBottles(recipe, uid)
         if best ~= nil then
             craftable = best
+        end
+    end
+    local countKind = "body"
+    local countColor = colorBlock
+    if craftable > 0 then
+        if contested then
+            countKind = "warning"
+            countColor = colorWarn
+        else
+            countKind = "stocked"
+            countColor = colorOk
         end
     end
     if craftable > 0 or (crafts and crafts > 0) then
@@ -1638,11 +1813,12 @@ local function ShowCraftableRowTooltip(data)
                 .. FormatTooltipNumber(yield)
                 .. L" yield)"
         end
-        rows[#rows + 1] = { text = line, kind = "body" }
+        rows[#rows + 1] = { text = line, kind = countKind, color = countColor }
     else
         rows[#rows + 1] = {
             text = L"No crafts possible with current bag materials.",
-            kind = "body",
+            kind = "warning",
+            color = colorBlock,
         }
     end
 
@@ -1690,10 +1866,17 @@ local function ShowCraftableRowTooltip(data)
         }
     end
 
-    if contested then
+    if craftable <= 0 then
         rows[#rows + 1] = {
-            text = L"Yellow: other short watches share materials and bag stock cannot cover all deficit craftable claims.",
+            text = L"Red Craftable: no bottles can be made from current bag materials.",
             kind = "warning",
+            color = colorBlock,
+        }
+    elseif contested then
+        rows[#rows + 1] = {
+            text = L"Yellow Craftable: you can brew this count, but it uses mats other short watches also claim.",
+            kind = "warning",
+            color = colorWarn,
         }
         rows[#rows + 1] = {
             text = L"AutoGrow keeps filling shared plants until Craftable turns green. Row Load/Brew can brew early; footer Brew waits for uncontested Ready.",
@@ -1701,8 +1884,9 @@ local function ShowCraftableRowTooltip(data)
         }
     else
         rows[#rows + 1] = {
-            text = L"Green: bag stock covers this short watch and any other short sharers - Brew can load.",
+            text = L"Green Craftable: that bottle count is uncontested - brewing it does not take mats other short watches need for their craftable claims.",
             kind = "meta",
+            color = colorOk,
         }
     end
 

@@ -472,6 +472,13 @@ function StockPiler2.BrewLearn.CaptureApothecaryMaterials()
 end
 
 function StockPiler2.BrewLearn.SnapshotPotionCounts()
+    local snapGen = 0
+    if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
+        snapGen = tonumber(StockPiler2.Inventory.GetSnapGen()) or 0
+    end
+    if type(BL._potionCountCache) == "table" and BL._potionCountSnapGen == snapGen then
+        return BL._potionCountCache
+    end
     local Perf = StockPiler2.Perf
     if Perf and Perf.Begin then
         Perf.Begin("BrewLearn.SnapshotPotionCounts")
@@ -487,10 +494,81 @@ function StockPiler2.BrewLearn.SnapshotPotionCounts()
             end
         end
     end)
+    BL._potionCountCache = counts
+    BL._potionCountSnapGen = snapGen
     if Perf and Perf.End then
         Perf.End("BrewLearn.SnapshotPotionCounts")
     end
     return counts
+end
+
+--- L0 bag adjust while a craft is pending: accumulate potion deltas so Complete
+--- can skip a full bag walk after brew (common path).
+function StockPiler2.BrewLearn.NotePendingPotionDelta(uid, delta, item)
+    local pending = StockPiler2.BrewLearn._pendingCraft
+    if type(pending) ~= "table" then
+        return
+    end
+    uid = tonumber(uid) or 0
+    delta = tonumber(delta) or 0
+    if uid <= 0 or delta == 0 then
+        return
+    end
+    local isPotion = false
+    if type(item) == "table" then
+        isPotion = IsPotionType(item)
+    else
+        local Inv = StockPiler2.Inventory
+        local sample = Inv and Inv._sampleByUid and Inv._sampleByUid[uid]
+        if type(sample) == "table" then
+            isPotion = IsPotionType(sample)
+        end
+    end
+    if not isPotion then
+        return
+    end
+    local map = pending.potionDelta
+    if type(map) ~= "table" then
+        map = {}
+        pending.potionDelta = map
+    end
+    map[uid] = (tonumber(map[uid]) or 0) + delta
+    if delta > 0 then
+        StockPiler2.BrewLearn.MarkInventoryCraftPollDue()
+    end
+end
+
+local function AfterCountsFromPendingDelta(pending)
+    local deltaMap = pending and pending.potionDelta
+    if type(deltaMap) ~= "table" then
+        return nil
+    end
+    local hasPositive = false
+    for _, d in pairs(deltaMap) do
+        if (tonumber(d) or 0) > 0 then
+            hasPositive = true
+            break
+        end
+    end
+    if not hasPositive then
+        return nil
+    end
+    local before = pending.potionCountsBefore or {}
+    local after = {}
+    for uid, count in pairs(before) do
+        after[uid] = count
+    end
+    for uid, d in pairs(deltaMap) do
+        local u = tonumber(uid) or 0
+        local dd = tonumber(d) or 0
+        if u > 0 and dd ~= 0 then
+            after[u] = (tonumber(after[u]) or 0) + dd
+            if after[u] <= 0 then
+                after[u] = nil
+            end
+        end
+    end
+    return after
 end
 
 local function AggregateMaterials(slots)
@@ -611,11 +689,21 @@ function StockPiler2.BrewLearn.BeginPendingCraft()
             break
         end
     end
+    local recipeKey = BL.BuildRecipeKey(materials)
+    -- FirePerform + Perform hook + PERFORMING can arm the same craft thrice.
+    local existing = StockPiler2.BrewLearn._pendingCraft
+    if type(existing) == "table"
+        and existing.recipeKey == recipeKey
+        and type(existing.potionCountsBefore) == "table"
+    then
+        return
+    end
     StockPiler2.BrewLearn._pendingCraft = {
         materials = materials,
         mainUid = mainUid,
-        recipeKey = BL.BuildRecipeKey(materials),
+        recipeKey = recipeKey,
         potionCountsBefore = BL.SnapshotPotionCounts(),
+        potionDelta = {},
     }
     if StockPiler2.Trace then
         local parts = {}
@@ -873,7 +961,10 @@ function StockPiler2.BrewLearn.CompletePendingCraftLearn(opts)
     if type(pending) ~= "table" then
         return false
     end
-    local after = BL.SnapshotPotionCounts()
+    local after = AfterCountsFromPendingDelta(pending)
+    if after == nil then
+        after = BL.SnapshotPotionCounts()
+    end
     local before = pending.potionCountsBefore or {}
     local outputs = {}
     for uid, count in pairs(after) do
@@ -989,10 +1080,33 @@ function StockPiler2.BrewLearn.CompletePendingCraftLearn(opts)
 end
 
 --- Fallback when PLAYER_CRAFTING_UPDATED does not reach addons (instant brew + bag update).
+--- Slot storms only arm a poll; DrainInventoryCraftPoll runs once per UPDATE_PROCESSED.
+function StockPiler2.BrewLearn.MarkInventoryCraftPollDue()
+    if type(StockPiler2.BrewLearn._pendingCraft) == "table" then
+        StockPiler2.BrewLearn._invCraftPollDue = true
+    end
+end
+
+function StockPiler2.BrewLearn.DrainInventoryCraftPoll()
+    if StockPiler2.BrewLearn._invCraftPollDue ~= true then
+        return false
+    end
+    StockPiler2.BrewLearn._invCraftPollDue = false
+    return BL.MaybeCompletePendingCraftFromInventory() == true
+end
+
 function StockPiler2.BrewLearn.MaybeCompletePendingCraftFromInventory()
     local pending = StockPiler2.BrewLearn._pendingCraft
     if type(pending) ~= "table" then
         return false
+    end
+    local deltaMap = pending.potionDelta
+    if type(deltaMap) == "table" then
+        for _, d in pairs(deltaMap) do
+            if (tonumber(d) or 0) > 0 then
+                return BL.CompletePendingCraftLearn() == true
+            end
+        end
     end
     BL._snapshotDone = false
     local after = BL.SnapshotPotionCounts()

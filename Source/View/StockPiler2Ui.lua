@@ -57,36 +57,6 @@ local function WatchContentKey()
     return tostring(snapGen) .. ":" .. tostring(planGen) .. ":" .. tostring(autoGrowOn)
 end
 
---- True during harvest, AutoBuy visit, or AutoGrow fill wave — skip heavy Watch list rebuild.
-local function IsWatchUiFillBurst()
-    local Orch = StockPiler2.Orchestrator
-    if Orch and Orch.IsHarvestActive and Orch.IsHarvestActive() == true then
-        return true
-    end
-    -- AutoBuy visit: bag snaps during purchases otherwise stack Flatten + RefreshWatch.
-    local Buy = StockPiler2.Buy
-    if type(Buy) == "table" and Buy._visitStoreOpen == true then
-        return true
-    end
-    local Grow = StockPiler2.Grow
-    local Sch = StockPiler2.Scheduler
-    local fast = Sch and Sch._autoGrowFast == true
-    if not fast then
-        return false
-    end
-    if Grow and Grow.HasEmptyPlot and Grow.HasEmptyPlot() == true then
-        return true
-    end
-    if type(Grow) == "table" and type(Grow._pendingPlant) == "table" then
-        for _, n in pairs(Grow._pendingPlant) do
-            if (tonumber(n) or 0) > 0 then
-                return true
-            end
-        end
-    end
-    return false
-end
-
 function StockPiler2.Ui.MarkWatchUiDirty()
     StockPiler2.Ui._watchUiDirty = true
 end
@@ -115,10 +85,8 @@ function StockPiler2.Ui.FlushWatchUiIfDirty()
     then
         return
     end
-    -- Keep dirty; catch up once harvest/fill settles (footer stays light via cultivation bridge).
-    if IsWatchUiFillBurst() then
-        return
-    end
+    -- Window open: always allow catch-up paint (never leave a blank/stale-stuck list
+    -- behind fill-burst gates). Interval still rate-limits heavy RefreshWatch.
     local contentKey = WatchContentKey()
     if StockPiler2.Ui._watchUiLastKey == contentKey then
         StockPiler2.Ui._watchUiDirty = false
@@ -167,5 +135,17 @@ function StockPiler2.Ui.RegisterEventRefresh()
     B.Subscribe(E.GARDEN_SNAPSHOT, markDirty)
     if E.KNOWLEDGE_UPDATED then
         B.Subscribe(E.KNOWLEDGE_UPDATED, markDirty)
+    end
+    if E.SESSION_LOADED then
+        B.Subscribe(E.SESSION_LOADED, function()
+            if StockPiler2TabWatch and StockPiler2TabWatch.RefreshSkillGates then
+                StockPiler2TabWatch.RefreshSkillGates()
+            end
+            -- Scheduler owns the full open-window list refresh; keep lastKey clear here
+            -- so a later dirty flush cannot no-op on a pre-login content key.
+            StockPiler2.Ui._watchUiLastKey = nil
+            StockPiler2.Ui._watchUiFlushedAt = 0
+            StockPiler2.Ui.MarkWatchUiDirty()
+        end)
     end
 end

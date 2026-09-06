@@ -12,6 +12,9 @@ local SECTION_MS = 50
 local MAX_NAMES = 16
 local TRAIL_IDLE_CLEAR_SEC = 0.1
 local SUMMARY_MAX_ENTRIES = 12
+-- Empty-trail spikes are usually engine/other UI; do not Emit every frame (uilog feedback loop).
+local EMPTY_TRAIL_EMIT_INTERVAL_SEC = 2.0
+local LOW_THRESHOLD_WARN_MS = 100
 
 local counts = {}
 local order = {}
@@ -20,6 +23,10 @@ local starts = {}
 local lastSpike = nil
 local trailIdleSec = 0
 local spikeStats = {}
+local emptyTrailEmitAt = 0
+local emptyTrailSuppressed = 0
+local emptyTrailSuppressedMaxMs = 0
+local lowThresholdWarned = false
 
 local baseline = {
     collecting = false,
@@ -155,19 +162,12 @@ end
 
 function Perf.ShouldHoldTrail()
     local Sch = StockPiler2.Scheduler
-    if Sch then
-        if Sch._bagDue == true or Sch._planDue == true then
-            return true
-        end
-    end
-    local Grow = StockPiler2.Grow
-    if Grow and Grow.IsHarvestOpActive and Grow.IsHarvestOpActive() == true then
+    if Sch and Sch._bagDue == true then
         return true
     end
-    local Orch = StockPiler2.Orchestrator
-    if Orch and Orch.IsBrewSessionActive and Orch.IsBrewSessionActive() == true then
-        return true
-    end
+    -- Do not hold for _planDue — keeps stale RefreshWatch Marks on later hitches.
+    -- Do not hold for IsHarvestOpActive — multi-plot harvest glued PrepareHarvest xN.
+    -- Do not hold for brew session — glued Brew.Tick xN / SnapshotPotionCounts xN / Build xN.
     return false
 end
 
@@ -184,7 +184,37 @@ function Perf.OnFrame(timeElapsed)
         local line = string.format("spike %.1fms trail=%s", ms, trail)
         lastSpike = line
         RecordSpikeSummary(ms, trail)
-        Emit(line)
+        if trailEmpty then
+            local now = NowSec()
+            local lastEmit = tonumber(emptyTrailEmitAt) or 0
+            if lastEmit <= 0 or (now - lastEmit) >= EMPTY_TRAIL_EMIT_INTERVAL_SEC then
+                if emptyTrailSuppressed > 0 then
+                    Emit(string.format(
+                        "spike empty-trail digest suppressed=%d max=%.1fms (engine/other UI likely)",
+                        emptyTrailSuppressed,
+                        emptyTrailSuppressedMaxMs
+                    ))
+                    emptyTrailSuppressed = 0
+                    emptyTrailSuppressedMaxMs = 0
+                end
+                Emit(line)
+                emptyTrailEmitAt = now
+                if threshold < LOW_THRESHOLD_WARN_MS and lowThresholdWarned ~= true then
+                    lowThresholdWarned = true
+                    Emit(string.format(
+                        "note: threshold=%dms is low — empty-trail spikes are rate-limited; use /sp2 perf summary",
+                        threshold
+                    ))
+                end
+            else
+                emptyTrailSuppressed = emptyTrailSuppressed + 1
+                if ms > emptyTrailSuppressedMaxMs then
+                    emptyTrailSuppressedMaxMs = ms
+                end
+            end
+        else
+            Emit(line)
+        end
     end
     if orderN > 0 then
         if Perf.ShouldHoldTrail() then
@@ -228,11 +258,18 @@ function Perf.SetEnabled(on)
     if Perf.Enabled ~= true then
         ClearTrail()
     end
+    emptyTrailEmitAt = 0
+    emptyTrailSuppressed = 0
+    emptyTrailSuppressedMaxMs = 0
+    lowThresholdWarned = false
     Emit("perf " .. (Perf.Enabled and "ON" or "OFF"))
 end
 
 function Perf.ResetSummary()
     spikeStats = {}
+    emptyTrailEmitAt = 0
+    emptyTrailSuppressed = 0
+    emptyTrailSuppressedMaxMs = 0
 end
 
 function Perf.PrintSummary()
@@ -266,6 +303,13 @@ function Perf.PrintSummary()
     local n = #ranked
     if n > SUMMARY_MAX_ENTRIES then
         n = SUMMARY_MAX_ENTRIES
+    end
+    if emptyTrailSuppressed > 0 then
+        Emit(string.format(
+            "summary empty-trail pending suppressed=%d max=%.1fms (not yet digested to uilog)",
+            emptyTrailSuppressed,
+            emptyTrailSuppressedMaxMs
+        ))
     end
     Emit(string.format("summary top %d trails (threshold=%dms):", n, Perf.GetFrameThreshold()))
     if StockPiler2.Ui and StockPiler2.Ui.Print then

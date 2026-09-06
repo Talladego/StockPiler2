@@ -160,15 +160,13 @@ function Orch.Tick()
     if StockPiler2.Perf and StockPiler2.Perf.Begin then
         StockPiler2.Perf.Begin("Orchestrator.Tick")
     end
+    if StockPiler2.RecipeSpec and StockPiler2.RecipeSpec.BeginOrchTick then
+        StockPiler2.RecipeSpec.BeginOrchTick()
+    end
     local autoGrowOn = StockPiler2.Watch and StockPiler2.Watch.IsAutoGrowEnabled
         and StockPiler2.Watch.IsAutoGrowEnabled() == true
     if not autoGrowOn then
-        local RP = StockPiler2.RefinePipeline
-        if RP and RP.HasOutstanding and RP.HasOutstanding()
-            and StockPiler2.Refine and StockPiler2.Refine.ReconcileAll
-        then
-            StockPiler2.Refine.ReconcileAll()
-        end
+        -- Reconcile is owned by Refine.OnUpdateProcessed (frame-gated).
         -- AutoBuy is independent of AutoGrow (vendor open + shortages).
         if TryBuyTick(Orch.NewOpId()) then
             if StockPiler2.Perf and StockPiler2.Perf.End then
@@ -217,12 +215,6 @@ function Orch.Tick()
         end
         if Orch.Phase ~= "idle" and not Orch.IsHarvestActive() and not Orch.IsBrewSessionActive() then
             SetPhase("idle", "fill-blocked")
-        end
-        local RP = StockPiler2.RefinePipeline
-        if RP and RP.HasOutstanding and RP.HasOutstanding()
-            and StockPiler2.Refine and StockPiler2.Refine.ReconcileAll
-        then
-            StockPiler2.Refine.ReconcileAll()
         end
         if StockPiler2.Perf and StockPiler2.Perf.End then
             StockPiler2.Perf.End("Orchestrator.Tick")
@@ -304,11 +296,21 @@ function Orch.Tick()
         end
     elseif canPlant and not hasSeeds and StockPiler2.Grow and StockPiler2.Grow.LogSkipPlant then
         StockPiler2.Grow.LogSkipPlant("no-job")
-        if StockPiler2.Grow.HasPendingBufferRefine and StockPiler2.Grow.HasPendingBufferRefine()
-            and StockPiler2.Refine and StockPiler2.Refine.MarkRefineDue
-        then
-            StockPiler2.Refine.MarkRefineDue("seed-buffer")
+        local bufferPending = StockPiler2.Grow.HasPendingBufferRefine
+            and StockPiler2.Grow.HasPendingBufferRefine() == true
+        if bufferPending then
+            -- Edge only: re-arm once per empty+buffer stretch so wait ticks throttle CollectIntents.
+            if Orch._seedBufferRefineArmed ~= true
+                and StockPiler2.Refine and StockPiler2.Refine.MarkRefineDue
+            then
+                Orch._seedBufferRefineArmed = true
+                StockPiler2.Refine.MarkRefineDue("seed-buffer")
+            end
+        else
+            Orch._seedBufferRefineArmed = false
         end
+    else
+        Orch._seedBufferRefineArmed = false
     end
     local Refine = StockPiler2.Refine
     if Refine and Refine.ShouldAllowRefineNow and Refine.ShouldAllowRefineNow() == true
@@ -374,14 +376,6 @@ function Orch.Tick()
                 StockPiler2.Perf.End("Orchestrator.Tick")
             end
             return
-        end
-    end
-    if not refineDue and not canPlant and not needAdditives then
-        local RP = StockPiler2.RefinePipeline
-        if RP and RP.HasOutstanding and RP.HasOutstanding()
-            and StockPiler2.Refine and StockPiler2.Refine.ReconcileAll
-        then
-            StockPiler2.Refine.ReconcileAll()
         end
     end
     -- After grow/refine: one AutoBuy purchase if store open (SP1 tick order).

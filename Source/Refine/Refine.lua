@@ -14,6 +14,13 @@ Refine._refineWaitTicks = 0
 Refine._refineDirty = false
 Refine._refineDirtyReason = nil
 Refine._reconcileSnapGen = -1
+Refine._reconcileAllSnapGen = -2
+Refine._reconcileAllDoneForSnap = false
+Refine._reconcileAllLastResult = false
+Refine._reconcileFrameId = 0
+Refine._reconcileDoneForFrame = false
+Refine._reconcileFrameResult = false
+Refine._lastTryTickOnlyThrottle = false
 Refine._outstandingAt = Refine._outstandingAt or {}
 Refine._expireFlushTried = Refine._expireFlushTried or {}
 Refine._bagIndexGen = -1
@@ -41,6 +48,30 @@ local function LogRefine(msg)
     if StockPiler2.Debug and StockPiler2.Debug.LogOp then
         StockPiler2.Debug.LogOp("refine", msg)
     end
+end
+
+--- Drop pending throttle when outstanding was wiped without a successful
+--- MaybeCompletePendingRefine (stuck expire / force reconcile).
+local function ClearPendingForSeed(seedUid, reason)
+    seedUid = tonumber(seedUid) or 0
+    if seedUid <= 0 then
+        return false
+    end
+    local SM = StockPiler2.SeedMap
+    local plantUid = SM and SM.GetPlantUidForSeed and (tonumber(SM.GetPlantUidForSeed(seedUid)) or 0) or 0
+    if plantUid <= 0 then
+        return false
+    end
+    local pending = tonumber(Refine._pendingByPlant[plantUid]) or 0
+    if pending <= 0 then
+        return false
+    end
+    Refine._pendingByPlant[plantUid] = nil
+    LogRefine(string.format(
+        "clear pending plantUid=%d seedUid=%d was=%d reason=%s",
+        plantUid, seedUid, pending, tostring(reason or "expire")
+    ))
+    return true
 end
 
 local function CraftingBackpackType()
@@ -107,8 +138,12 @@ end
 
 function Refine.MarkRefineDue(reason)
     Refine._refineDirty = true
+    reason = tostring(reason or "")
     if reason == "harvest" then
         Refine._refineDirtyReason = "harvest"
+    elseif Refine._refineDirtyReason ~= "harvest" then
+        -- Do not downgrade an armed harvest dirty to seed-buffer / throttle.
+        Refine._refineDirtyReason = (reason ~= "" and reason) or "generic"
     end
 end
 
@@ -118,10 +153,16 @@ function Refine.ClearPostHarvestState()
 end
 
 function Refine.RefineCheckDue()
+    local wait = tonumber(Refine._refineWaitTicks) or 0
     if Refine._refineDirty == true then
-        return true
+        -- Harvest refill is urgent; seed-buffer dirty must honor wait throttle
+        -- (Orch used to MarkRefineDue every no-job tick and bypass wait forever).
+        if Refine._refineDirtyReason == "harvest" then
+            return true
+        end
+        return wait <= 0
     end
-    return (tonumber(Refine._refineWaitTicks) or 0) <= 0
+    return wait <= 0
 end
 
 function Refine.DecayRefineWaitTicks()
@@ -394,13 +435,20 @@ function Refine.GetSeedBudgetForSpec(spec, seedUid)
     -- Planting moves bag→plot without changing credit; failed harvest or uproot
     -- drops ground with no bag refund → SHORT. Abort/logout refund keeps credit flat.
     local buffer = StockPiler2.Watch and StockPiler2.Watch.GetSeedBufferMin() or 5
-    local live = Refine.LiveSeedCountForSpec(spec)
-    if live <= 0 and seedUid > 0 then
-        live = Refine.LiveSeedCount(seedUid)
-    end
+    -- Prefer L0 CountByUid when seedUid known — ForSpec walks sample stackCounts
+    -- that can stay stale after L0 deltas (mass-refine headroom stuck at buffer-1).
+    local liveUid = 0
     if seedUid > 0 then
-        Refine._lastLiveBySeed[seedUid] = live
+        liveUid = Refine.LiveSeedCount(seedUid)
     end
+    local liveSpec = Refine.LiveSeedCountForSpec(spec)
+    local live = liveUid
+    if liveSpec > live then
+        live = liveSpec
+    end
+    -- Do not write _lastLiveBySeed here — ForSpec under-count was stomping reconcile
+    -- baselines (delivered live 1->N). Baseline only via TrackLiveSeed / ReconcileAll /
+    -- GetSeedBudget(uid).
     local ground = 0
     if seedUid > 0 and StockPiler2.Grow and StockPiler2.Grow.CountInGroundSeeds then
         ground = tonumber(StockPiler2.Grow.CountInGroundSeeds(seedUid)) or 0
@@ -478,19 +526,47 @@ function Refine.ReconcileAll()
     if not RP or not Inv then
         return false
     end
-    local hasOutstanding = RP.HasOutstanding and RP.HasOutstanding() == true
+    -- No in-flight refine ledger: skip LiveSeedCount walk (was ReconcileAll xN trails
+    -- while outstanding was empty or only one seed needed checking).
+    if not (RP.HasOutstanding and RP.HasOutstanding() == true) then
+        return false
+    end
+    -- At most one full walk per UPDATE_PROCESSED frame (TryTick + OnInv + Expire used to stack).
+    local frameId = tonumber(Refine._reconcileFrameId) or 0
+    if frameId > 0
+        and Refine._reconcileDoneForFrame == true
+        and frameId == (tonumber(Refine._reconcileWalkedFrameId) or -1)
+    then
+        return Refine._reconcileFrameResult == true
+    end
+    -- One reconcile walk per inventory snapGen within that frame.
+    local snapGen = Inv.GetSnapGen and Inv.GetSnapGen() or 0
+    if snapGen == (tonumber(Refine._reconcileAllSnapGen) or -2)
+        and Refine._reconcileAllDoneForSnap == true
+    then
+        return Refine._reconcileAllLastResult == true
+    end
     local deliveredAny = false
     local marked = false
-    if hasOutstanding and StockPiler2.Perf and StockPiler2.Perf.Begin then
+    if StockPiler2.Perf and StockPiler2.Perf.Begin then
         StockPiler2.Perf.Begin("ReconcileAll")
         marked = true
     end
-    for seedUid, lastLive in pairs(Refine._lastLiveBySeed) do
+    -- Only seeds with outstanding counts — do not walk every historically tracked uid.
+    local snap = RP.Snapshot and RP.Snapshot() or nil
+    if type(snap) ~= "table" then
+        if marked and StockPiler2.Perf and StockPiler2.Perf.End then
+            StockPiler2.Perf.End("ReconcileAll")
+        end
+        return false
+    end
+    for seedUid, outstanding in pairs(snap) do
         seedUid = tonumber(seedUid) or 0
-        if seedUid > 0 then
+        outstanding = tonumber(outstanding) or 0
+        if seedUid > 0 and outstanding > 0 then
             local live = Refine.LiveSeedCount(seedUid)
-            lastLive = tonumber(lastLive) or 0
-            if live > lastLive and RP.GetOutstanding and RP.GetOutstanding(seedUid) > 0 then
+            local lastLive = tonumber(Refine._lastLiveBySeed[seedUid]) or 0
+            if live > lastLive then
                 local delivered = live - lastLive
                 RP.Reconcile(seedUid, delivered)
                 deliveredAny = true
@@ -506,6 +582,12 @@ function Refine.ReconcileAll()
             Refine._lastLiveBySeed[seedUid] = live
         end
     end
+    Refine._reconcileAllSnapGen = snapGen
+    Refine._reconcileAllDoneForSnap = true
+    Refine._reconcileAllLastResult = deliveredAny
+    Refine._reconcileWalkedFrameId = frameId
+    Refine._reconcileDoneForFrame = true
+    Refine._reconcileFrameResult = deliveredAny
     if marked and StockPiler2.Perf and StockPiler2.Perf.End then
         StockPiler2.Perf.End("ReconcileAll")
     end
@@ -531,20 +613,25 @@ function Refine.ExpireStuckOutstanding()
             elseif (now - at) >= ttl then
                 if Refine._expireFlushTried[seedUid] ~= true then
                     Refine._expireFlushTried[seedUid] = true
-                    local Inv = StockPiler2.Inventory
-                    if Inv and Inv.Flush then
-                        Inv.Flush({ force = true })
+                    -- Coalesced bag work — avoid DataUtils.GetItems mid-tick.
+                    if StockPiler2.Inventory and StockPiler2.Inventory.MarkDirty then
+                        -- Soft dirty: light Flatten if L0 missed delivery — never force FetchForce.
+                        StockPiler2.Inventory.MarkDirty({ reason = "refine-expire" })
+                    elseif StockPiler2.Scheduler and StockPiler2.Scheduler.EnqueueBagFlush then
+                        StockPiler2.Scheduler.EnqueueBagFlush(false)
                     end
                     Refine.ReconcileAll()
                     if (RP.GetOutstanding(seedUid) or 0) <= 0 then
                         Refine._outstandingAt[seedUid] = nil
                         Refine._expireFlushTried[seedUid] = nil
+                        ClearPendingForSeed(seedUid, "expire-delivered")
                     end
                 else
                     LogRefine(string.format("expire stuck outstanding seedUid=%d n=%d", seedUid, n))
                     if RP.Reconcile then
                         RP.Reconcile(seedUid, n)
                     end
+                    ClearPendingForSeed(seedUid, "expire-stuck")
                     Refine._outstandingAt[seedUid] = nil
                     Refine._expireFlushTried[seedUid] = nil
                 end
@@ -620,7 +707,8 @@ function Refine.CollectWatchedLines()
     return Refine.CollectDemandLines()
 end
 
-local function AppendRefineIntent(intents, SM, line, reason, uses, budget)
+local function AppendRefineIntent(intents, SM, line, reason, uses, budget, opts)
+    opts = type(opts) == "table" and opts or {}
     local spec = line.spec
     local seedUid = tonumber(line.seedUid) or 0
     local plantUid = tonumber(line.plantUid) or 0
@@ -650,7 +738,30 @@ local function AppendRefineIntent(intents, SM, line, reason, uses, budget)
         slot = slot,
         item = item,
         bagType = bagType,
+        emergencyPlant = opts.emergencyPlant == true,
     }
+end
+
+--- Seed uid an empty plot would plant (cached job even when bag exhausted).
+local function EmergencyPlantSeedUid()
+    local Grow = StockPiler2.Grow
+    if not (Grow and Grow.HasEmptyPlot and Grow.HasEmptyPlot() == true) then
+        return 0
+    end
+    local cached = Grow._cachedPlantJob
+    if type(cached) == "table" then
+        local uid = tonumber(cached.seedUid) or 0
+        if uid > 0 then
+            return uid
+        end
+    end
+    if Grow.PeekSeedsForNextPlant then
+        local ok, job = Grow.PeekSeedsForNextPlant()
+        if ok == true and type(job) == "table" then
+            return tonumber(job.seedUid) or 0
+        end
+    end
+    return 0
 end
 
 function Refine.CollectIntents()
@@ -670,7 +781,8 @@ function Refine.CollectIntents()
     local intents = {}
     local SM = StockPiler2.SeedMap
     local RS = StockPiler2.RecipeSpec
-    local seenBuffer = {}
+    local seenBufferKey = {}
+    local appendedBuffer = {}
 
     if bufferOn and RS and RS.CollectAutoGrowSeedLines then
         if StockPiler2.Perf and StockPiler2.Perf.Begin then
@@ -686,13 +798,17 @@ function Refine.CollectIntents()
             local seedUid = tonumber(line.seedUid) or 0
             local plantUid = tonumber(line.plantUid) or 0
             local key = tostring(line.specKey or seedUid)
-            if type(spec) == "table" and seenBuffer[key] ~= true then
-                seenBuffer[key] = true
+            if type(spec) == "table" and seenBufferKey[key] ~= true then
+                seenBufferKey[key] = true
                 local budget = Refine.GetSeedBudgetForSpec(spec, seedUid)
                 local refinable = Refine.CountRefinablePlants(plantUid, spec)
                 if budget.headroom > 0 and refinable > 0 then
                     local uses = math.min(budget.headroom, refinable, 5)
                     AppendRefineIntent(intents, SM, line, "seed-buffer", uses, budget)
+                    appendedBuffer[key] = true
+                    if seedUid > 0 then
+                        appendedBuffer["uid:" .. tostring(seedUid)] = true
+                    end
                 end
             end
         end
@@ -708,18 +824,44 @@ function Refine.CollectIntents()
     if StockPiler2.Perf and StockPiler2.Perf.Begin then
         StockPiler2.Perf.Begin("CollectIntents")
     end
+    local emergencyUid = 0
+    if bufferOn then
+        emergencyUid = EmergencyPlantSeedUid()
+    end
     for i = 1, #demandLines do
         local line = demandLines[i]
         local spec = line.spec
         local seedUid = tonumber(line.seedUid) or 0
         local plantUid = tonumber(line.plantUid) or 0
-        if type(spec) == "table" then
+        local key = tostring(line.specKey or seedUid)
+        if type(spec) == "table"
+            and appendedBuffer[key] ~= true
+            and (seedUid <= 0 or appendedBuffer["uid:" .. tostring(seedUid)] ~= true)
+        then
             local budget = Refine.GetSeedBudgetForSpec(spec, seedUid)
             local refinable = Refine.CountRefinablePlants(plantUid, spec)
-            if budget.live <= 0 and budget.outstanding <= 0
-                and (tonumber(line.deficit) or 0) > 0 and refinable > 0
-            then
-                AppendRefineIntent(intents, SM, line, "plant-need", 1, budget)
+            local liveOk = (tonumber(budget.live) or 0) <= 0
+                and (tonumber(budget.outstanding) or 0) <= 0
+            local deficitOk = (tonumber(line.deficit) or 0) > 0 and refinable > 0
+            if liveOk and deficitOk then
+                local allow = false
+                local emergency = false
+                if not bufferOn then
+                    allow = true
+                else
+                    local headroom = tonumber(budget.headroom) or 0
+                    if headroom > 0 then
+                        allow = true
+                    elseif emergencyUid > 0 and seedUid == emergencyUid then
+                        allow = true
+                        emergency = true
+                    end
+                end
+                if allow then
+                    AppendRefineIntent(intents, SM, line, "plant-need", 1, budget, {
+                        emergencyPlant = emergency,
+                    })
+                end
             end
         end
     end
@@ -785,6 +927,21 @@ function Refine.IssueOne(intent, opId)
     local stack = tonumber(item.stackCount) or tonumber(item.StackCount) or 1
     local maxUses = (reason == "seed-buffer") and 5 or 1
     uses = math.min(uses, stack, MAX_PENDING_PER_PLANT - pending, maxUses)
+    -- Fresh uid budget: never issue more than remaining seed-buffer headroom
+    -- (plant-need used to ignore ground credit and overshoot buffer).
+    local bufferOn = StockPiler2.Watch and StockPiler2.Watch.IsSeedBufferEnabled
+        and StockPiler2.Watch.IsSeedBufferEnabled() == true
+    if seedUid > 0 and (reason == "seed-buffer" or (reason == "plant-need" and bufferOn)) then
+        local budget = Refine.GetSeedBudget(seedUid)
+        local headroom = tonumber(budget and budget.headroom) or 0
+        if reason == "plant-need" and intent.emergencyPlant == true then
+            uses = math.min(uses, 1)
+        elseif headroom < 1 then
+            return false
+        else
+            uses = math.min(uses, headroom)
+        end
+    end
     if uses < 1 then
         return false
     end
@@ -826,6 +983,7 @@ function Refine.IssueOne(intent, opId)
     Refine._issuedSeedThisTick = seedUid
     -- Force reconcile on next snap advance (Issue bumps via bag flush / L0).
     Refine._reconcileSnapGen = -1
+    Refine._reconcileAllDoneForSnap = false
     LogRefine(string.format(
         "%s plantUid=%d seedUid=%d uses=%d headroom=%d name=%s opId=%s",
         reason,
@@ -862,38 +1020,76 @@ function Refine.TryTick(opId)
     if Refine.RefineCheckDue() ~= true then
         return false
     end
+    -- Throttle-only last attempt with warm intent cache: skip Collect* rebuild.
+    if Refine._lastTryTickOnlyThrottle == true
+        and type(Refine._intentCache) == "table"
+        and Refine._intentCacheKey ~= nil
+    then
+        local cacheKey = IntentCacheKey()
+        local bufferOn = StockPiler2.Watch and StockPiler2.Watch.IsSeedBufferEnabled
+            and StockPiler2.Watch.IsSeedBufferEnabled() == true
+        cacheKey = cacheKey .. ":" .. (bufferOn and "1" or "0")
+        if Refine._intentCacheKey == cacheKey then
+            return false
+        end
+    end
     if StockPiler2.Perf and StockPiler2.Perf.Begin then
         StockPiler2.Perf.Begin("Refine.TryTick")
     end
     Refine._issuedSeedThisTick = nil
-    Refine.ReconcileAll()
+    -- Reconcile owned by OnUpdateProcessed (frame-gated); do not walk again here.
     local intents = Refine.CollectIntents()
+    local onlyThrottle = #intents > 0
     for i = 1, #intents do
         local intent = intents[i]
         local ok, why = Refine.CanIssue(intent)
         if ok == true then
+            onlyThrottle = false
             if Refine.IssueOne(intent, opId) == true then
+                Refine._lastTryTickOnlyThrottle = false
                 if StockPiler2.Perf and StockPiler2.Perf.End then
                     StockPiler2.Perf.End("Refine.TryTick")
                 end
                 return true
             end
-        elseif why == "no-slot" then
-            LogRefine(string.format(
-                "skip %s seedUid=%d plantUid=%d no refinable plant in bags",
-                tostring(intent.reason or "?"),
-                tonumber(intent.seedUid) or 0,
-                tonumber(intent.plantUid) or 0
-            ))
+        elseif why == "pending-throttle" or why == "outstanding-throttle" then
+            -- Do not clear pending or IssueOne here — that turned the throttle into
+            -- uses=4 burst refine (Goldweed mass-refine). Expire TTL clears pending.
+        else
+            onlyThrottle = false
+            if why == "no-slot" then
+                LogRefine(string.format(
+                    "skip %s seedUid=%d plantUid=%d no refinable plant in bags",
+                    tostring(intent.reason or "?"),
+                    tonumber(intent.seedUid) or 0,
+                    tonumber(intent.plantUid) or 0
+                ))
+            end
         end
     end
+    Refine._lastTryTickOnlyThrottle = onlyThrottle == true and #intents > 0
     if Refine._refineDirty == true or Refine._refineDirtyReason == "harvest" then
         Refine.ClearPostHarvestState()
+    end
+    local Grow = StockPiler2.Grow
+    -- Intents exist but only throttle gates: unlock AutoGrow; do not fill-block.
+    if onlyThrottle == true then
+        Refine.MarkRefineDue("throttle-clear")
+        Refine._refineWaitTicks = 2
+        if Grow and Grow.ClearFillBlocked then
+            Grow.ClearFillBlocked()
+        end
+        if StockPiler2.Scheduler and StockPiler2.Scheduler.WakeAutoGrow then
+            StockPiler2.Scheduler.WakeAutoGrow()
+        end
+        if StockPiler2.Perf and StockPiler2.Perf.End then
+            StockPiler2.Perf.End("Refine.TryTick")
+        end
+        return false
     end
     Refine._refineWaitTicks = 5
     -- Do not fill-block when empty plots still have a plantable job — that starved replant
     -- after harvest when the seed buffer was already full (no refine intents).
-    local Grow = StockPiler2.Grow
     if Grow and Grow.HasEmptyPlot and Grow.HasEmptyPlot() then
         local plantJob = nil
         if Grow.GetPlantJob then
@@ -904,6 +1100,12 @@ function Refine.TryTick(opId)
                 Grow.ClearFillBlocked()
             end
             -- Seeds ready: wait ticks only; never fill-block.
+        elseif Grow and Grow.HasPendingBufferRefine and Grow.HasPendingBufferRefine() then
+            -- Refinable plants remain: keep AutoGrow awake for refine, not idle.
+            if Grow.ClearFillBlocked then
+                Grow.ClearFillBlocked()
+            end
+            Refine.MarkRefineDue("buffer-refine")
         elseif Grow.SetFillBlocked then
             Grow.SetFillBlocked(true, 5)
         end
@@ -915,7 +1117,8 @@ function Refine.TryTick(opId)
 end
 
 function Refine.OnInventoryUpdated()
-    Refine.InvalidateIntentCache()
+    -- Reconcile first; do not bust intent cache on every bag snap (Collect* was
+    -- rebuilding mid-delivery storms). Invalidate only when a refine completes.
     Refine.ReconcileAll()
     local SM = StockPiler2.SeedMap
     if SM and SM.MaybeCompletePendingRefine then
@@ -933,8 +1136,11 @@ function Refine.OnInventoryUpdated()
             end
             if seedUid > 0 then
                 Refine.TrackLiveSeed(seedUid)
-                Refine.ReconcileAll()
+                -- Do not clear snap/frame gates for a second walk; TrackLiveSeed
+                -- updates baseline. Next frame / next snap reconciles deliveries.
             end
+            Refine.InvalidateIntentCache()
+            Refine._lastTryTickOnlyThrottle = false
             if StockPiler2.Grow and StockPiler2.Grow.InvalidatePlantQueue then
                 StockPiler2.Grow.InvalidatePlantQueue({ jobOnly = true })
             end
@@ -943,6 +1149,10 @@ function Refine.OnInventoryUpdated()
 end
 
 function Refine.OnUpdateProcessed()
+    -- New UPDATE_PROCESSED frame: allow one ReconcileAll walk this frame.
+    Refine._reconcileFrameId = (tonumber(Refine._reconcileFrameId) or 0) + 1
+    Refine._reconcileDoneForFrame = false
+
     -- Reconcile only when inventory snap advanced (or after Issue forced _reconcileSnapGen=-1).
     -- Polling every frame while HasOutstanding caused x1800 trail storms.
     local needWork = false
@@ -1029,21 +1239,37 @@ function Refine.DumpDiagnostics(emit)
             tonumber(line.deficit) or 0
         ))
     end
+    local pendingAny = false
+    for plantUid, pending in pairs(Refine._pendingByPlant) do
+        pending = tonumber(pending) or 0
+        if pending > 0 then
+            pendingAny = true
+            emit(string.format(
+                "  pendingByPlant plantUid=%d pending=%d",
+                tonumber(plantUid) or 0,
+                pending
+            ))
+        end
+    end
+    if pendingAny ~= true then
+        emit("  pendingByPlant: (none)")
+    end
     local intents = Refine.CollectIntents()
     if #intents == 0 then
         emit("  intents: (none)")
     else
         for i = 1, #intents do
             local intent = intents[i]
-            local can = Refine.CanIssue(intent)
+            local can, why = Refine.CanIssue(intent)
             emit(string.format(
-                "  intent %s seedUid=%d plantUid=%d uses=%d slot=%d can=%s",
+                "  intent %s seedUid=%d plantUid=%d uses=%d slot=%d can=%s why=%s",
                 tostring(intent.reason),
                 tonumber(intent.seedUid) or 0,
                 tonumber(intent.plantUid) or 0,
                 tonumber(intent.uses) or 0,
                 tonumber(intent.slot) or 0,
-                tostring(can == true)
+                tostring(can == true),
+                tostring(why or "")
             ))
         end
     end

@@ -150,7 +150,10 @@ function LB.OnInventoryUpdated()
     if StockPiler2.SeedMap and StockPiler2.SeedMap.MarkHarvestLootDirty then
         StockPiler2.SeedMap.MarkHarvestLootDirty()
     end
-    if StockPiler2.BrewLearn and StockPiler2.BrewLearn.MaybeCompletePendingCraftFromInventory then
+    -- Coalesce craft-learn inventory polls to once per UPDATE_PROCESSED.
+    if StockPiler2.BrewLearn and StockPiler2.BrewLearn.MarkInventoryCraftPollDue then
+        StockPiler2.BrewLearn.MarkInventoryCraftPollDue()
+    elseif StockPiler2.BrewLearn and StockPiler2.BrewLearn.MaybeCompletePendingCraftFromInventory then
         local learned = StockPiler2.BrewLearn.MaybeCompletePendingCraftFromInventory() == true
         if learned then
             RefreshUiIfLearned()
@@ -282,20 +285,29 @@ function LB.OnCultivationUpdated()
 end
 
 function LB.OnUpdateProcessed()
+    if StockPiler2.BrewLearn and StockPiler2.BrewLearn.DrainInventoryCraftPoll then
+        local learned = StockPiler2.BrewLearn.DrainInventoryCraftPoll() == true
+        if learned then
+            RefreshUiIfLearned()
+            -- Same UPDATE_PROCESSED as Macro.Appearance — skip Orch plant/refine this frame.
+            if StockPiler2.Scheduler and StockPiler2.Scheduler.SkipOrchThisFrame then
+                StockPiler2.Scheduler.SkipOrchThisFrame()
+            end
+        end
+    end
     if StockPiler2.SeedMap
         and StockPiler2.SeedMap.TryCompletePendingHarvest
         and type(StockPiler2.SeedMap._pendingHarvest) == "table"
     then
-        local pending = StockPiler2.SeedMap._pendingHarvest
-        -- Pending harvest exists for the whole grow; only instrument when loot
-        -- is dirty (otherwise every UPDATE_PROCESSED polluted Perf trails x1000+).
-        -- End before Refine so Refine.OnUpdateProcessed is not attributed here.
-        local marked = pending.lootDirty == true
-        if marked and StockPiler2.Perf and StockPiler2.Perf.Begin then
+        -- Only instrument when a complete attempt will run (past settle/throttle).
+        -- Dirty-frame no-ops under trail hold used to stack LearnBridge.OnUpdate x100+.
+        local willAttempt = StockPiler2.SeedMap.ShouldAttemptHarvestComplete
+            and StockPiler2.SeedMap.ShouldAttemptHarvestComplete(false) == true
+        if willAttempt and StockPiler2.Perf and StockPiler2.Perf.Begin then
             StockPiler2.Perf.Begin("LearnBridge.OnUpdate")
         end
         local learned = StockPiler2.SeedMap.TryCompletePendingHarvest(false) == true
-        if marked and StockPiler2.Perf and StockPiler2.Perf.End then
+        if willAttempt and StockPiler2.Perf and StockPiler2.Perf.End then
             StockPiler2.Perf.End("LearnBridge.OnUpdate")
         end
         if learned then

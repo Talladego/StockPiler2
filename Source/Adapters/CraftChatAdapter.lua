@@ -285,17 +285,19 @@ function CC.OnChatTextArrived()
                 StockPiler2.SeedMap.LearnFromCraftChatHarvest(parsed.count, parsed.name)
             end
         end
-        -- Chat harvest may arrive without a clean UpdatedIndex edge — still wake AutoGrow.
+        -- Soft wake only: LearnBridge plot-empty owns force invalidate. Avoids dual
+        -- WakeAfterHarvest + Planner.Build on the same harvest hitch.
         if StockPiler2.Watch and StockPiler2.Watch.IsAutoGrowEnabled
             and StockPiler2.Watch.IsAutoGrowEnabled() == true
         then
-            if StockPiler2.Grow and StockPiler2.Grow.WakeAfterHarvest then
-                StockPiler2.Grow.WakeAfterHarvest(0)
+            if StockPiler2.Grow and StockPiler2.Grow.WakeAfterHarvestChat then
+                StockPiler2.Grow.WakeAfterHarvestChat()
+            elseif StockPiler2.Grow and StockPiler2.Grow.WakeAfterHarvest then
+                StockPiler2.Grow.WakeAfterHarvest(0, { soft = true })
             elseif StockPiler2.Grow and StockPiler2.Grow.InvalidatePlantQueue then
                 if StockPiler2.Grow.ClearFillBlocked then
                     StockPiler2.Grow.ClearFillBlocked()
                 end
-                StockPiler2.Grow.InvalidatePlantQueue({ force = true })
                 if StockPiler2.Scheduler and StockPiler2.Scheduler.WakeAutoGrow then
                     StockPiler2.Scheduler.WakeAutoGrow()
                 end

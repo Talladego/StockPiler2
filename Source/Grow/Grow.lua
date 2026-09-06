@@ -30,6 +30,7 @@ Grow._commitForceCleared = false
 Grow._harvestOpLockUntil = 0
 Grow._lastPreparedHarvestPlot = 0
 Grow._harvestActionBound = false
+Grow._footerHarvestClickable = nil
 Grow._skillSkipByUid = Grow._skillSkipByUid or {}
 Grow._skillSkipSnapGen = -1
 Grow.PENDING_TTL_SEC = 10
@@ -49,6 +50,72 @@ local function RestoreHarvestChrome(windowName)
     if ButtonSetText then
         ButtonSetText(windowName, L"Harvest")
     end
+    -- Mid-click rebinds can leave the pressed/highlight state stuck after gameaction thrash.
+    if ButtonSetPressedFlag then
+        ButtonSetPressedFlag(windowName, false)
+    end
+end
+
+--- Footer Harvest: bind when ready, clear when not (transition only).
+--- Keep HandleInput on — toggling it off blocks OnMouseOver / tooltips.
+--- Skip redundant WindowSetGameActionData (strips DefaultResizeable chrome).
+local function ClearHarvestBindOnly()
+    if Grow._harvestActionBound ~= true then
+        return false
+    end
+    if WindowSetGameActionData == nil then
+        Grow._harvestActionBound = false
+        return false
+    end
+    local none = 0
+    if GameData and GameData.PlayerActions and GameData.PlayerActions.NONE ~= nil then
+        none = GameData.PlayerActions.NONE
+    end
+    local function clearWin(windowName)
+        if not DoesWindowExist(windowName) then
+            return false
+        end
+        local ok
+        if StockPiler2.TryCall then
+            ok = StockPiler2.TryCall("WindowSetGameActionData.clear", WindowSetGameActionData, windowName, none, 0, L"")
+        else
+            ok = pcall(WindowSetGameActionData, windowName, none, 0, L"")
+        end
+        RestoreHarvestChrome(windowName)
+        return ok == true
+    end
+    local cleared = clearWin(HARVEST_WIN)
+    clearWin(HARVEST_ACTION_WIN)
+    Grow._harvestActionBound = false
+    return cleared
+end
+
+local function SetHarvestClickGate(enabled)
+    if not DoesWindowExist(HARVEST_WIN) then
+        return
+    end
+    enabled = enabled == true
+    -- Recover from older builds that left HandleInput off (tooltip dead).
+    if WindowSetHandleInput then
+        WindowSetHandleInput(HARVEST_WIN, true)
+    end
+    if Grow._footerHarvestClickable == enabled then
+        return
+    end
+    if ButtonSetDisabledFlag then
+        ButtonSetDisabledFlag(HARVEST_WIN, not enabled)
+    end
+    if enabled then
+        Grow.EnsureHarvestActionBound()
+    else
+        -- Disabled gameactionbutton still fires if bound — clear so no false craft.
+        ClearHarvestBindOnly()
+    end
+    Grow._footerHarvestClickable = enabled
+end
+
+function Grow.SetFooterHarvestClickable(enabled)
+    SetHarvestClickGate(enabled)
 end
 
 -- Prefer underfilled recipe roles when craftsShort ties (lower = higher priority).
@@ -571,6 +638,205 @@ local function PickSurplusCandidate(lines, SM, Inv)
     return best
 end
 
+--- Seed bag count for a resolved seed + spec (shared by focus/global pick).
+local function SeedHaveForResolved(spec, seed, seedUid, SM, Inv)
+    local seedHave = tonumber(seed.count) or 0
+    if SM and SM.CountSeedsInBagsForSpec then
+        local variantCount = SM.CountSeedsInBagsForSpec(spec)
+        if variantCount > seedHave then
+            seedHave = variantCount
+        end
+    elseif Inv and Inv.CountByUid and Inv._ready == true and seedUid > 0 then
+        local bagCount = Inv.CountByUid(seedUid)
+        if bagCount > seedHave then
+            seedHave = bagCount
+        end
+    elseif Inv and Inv.UniqueIdCount and seedUid > 0 then
+        local bagCount = Inv.UniqueIdCount(seedUid)
+        if bagCount > seedHave then
+            seedHave = bagCount
+        end
+    end
+    return seedHave
+end
+
+--- Bottleneck score for a demand spec among focus watches: max bottleGap where
+--- this spec is a limiting growable slot; also count of focus watches listing it.
+local function FocusBottleneckForSpec(specKey, focus, demand)
+    local RS = StockPiler2.RecipeSpec
+    local MS = StockPiler2.MaterialSpec
+    if type(focus) ~= "table" or type(focus.watches) ~= "table" or not RS or not MS or not MS.Key then
+        return 0, 0
+    end
+    local bestGap = 0
+    local shareCount = 0
+    local demandHave = nil
+    if type(demand) == "table" and type(demand[specKey]) == "table" then
+        demandHave = tonumber(demand[specKey].have)
+    end
+    for i = 1, #focus.watches do
+        local fw = focus.watches[i]
+        local recipe = fw and fw.recipe
+        local slots = recipe and recipe.slots
+        if type(slots) == "table" then
+            local craftsPossible = 0
+            if RS.CountCraftsPossible then
+                craftsPossible = math.max(0, math.floor((tonumber(RS.CountCraftsPossible(recipe)) or 0) + 0.5))
+            end
+            for j = 1, #slots do
+                local slot = slots[j]
+                local spec = slot and (RS.ResolveSlotSpec and RS.ResolveSlotSpec(slot) or slot.spec)
+                if type(spec) == "table" and MS.Key(spec) == specKey then
+                    shareCount = shareCount + 1
+                    local perCraft = RS.EffectiveSpecPerCraft and RS.EffectiveSpecPerCraft(slot, slots) or 1
+                    if perCraft < 1 then
+                        perCraft = 1
+                    end
+                    local have = demandHave
+                    if have == nil and RS.CountItemsMatchingSpec then
+                        have = RS.CountItemsMatchingSpec(spec)
+                    end
+                    have = tonumber(have) or 0
+                    local craftsHave = math.floor(have / perCraft)
+                    -- Limiting slot: caps CountCraftsPossible (or short vs need).
+                    local limiting = craftsHave <= craftsPossible
+                    if limiting then
+                        local gap = tonumber(fw.bottleGap) or 0
+                        if gap > bestGap then
+                            bestGap = gap
+                        end
+                    end
+                    break
+                end
+            end
+        end
+    end
+    return bestGap, shareCount
+end
+
+--- Build a plantable potion_stock job from a demand row, or nil.
+local function JobFromDemandRow(row, SM, Inv)
+    if type(row) ~= "table" then
+        return nil
+    end
+    local deficit = tonumber(row.deficit) or 0
+    local craftsShort = tonumber(row.craftsShort)
+    if craftsShort == nil then
+        craftsShort = deficit
+    end
+    local spec = row.spec
+    if deficit <= 0 or craftsShort <= 0 or type(spec) ~= "table" or not SM.IsGrowableSpec(spec) then
+        return nil
+    end
+    local seed = SM.ResolveSeedForSpec(spec)
+    if type(seed) ~= "table" then
+        return nil
+    end
+    local seedUid = tonumber(seed.uniqueID) or 0
+    if seedUid <= 0 and type(seed.itemData) == "table" then
+        seedUid = tonumber(seed.itemData.uniqueID) or 0
+    end
+    if seedUid <= 0 then
+        return nil
+    end
+    if IsSkillSkippedUid(seedUid) then
+        return nil
+    end
+    if not CanUseSeedUid(seedUid, Inv) then
+        MarkSkillSkippedUid(seedUid)
+        LogOnce("skill-" .. tostring(seedUid), "plant skip skill seedUid=" .. tostring(seedUid))
+        return nil
+    end
+    local seedHave = SeedHaveForResolved(spec, seed, seedUid, SM, Inv)
+    local committed = tonumber(Grow._seedCommitted[seedUid]) or 0
+    local avail = seedHave - committed
+    local plantable = ComputePlantable(avail, deficit)
+    if plantable <= 0 then
+        return nil
+    end
+    local role = SpecRole(spec)
+    return {
+        spec = spec,
+        specKey = row.specKey,
+        seed = seed,
+        seedUid = seedUid,
+        plantUid = tonumber(seed.plantUid) or 0,
+        seedHave = seedHave,
+        plantable = plantable,
+        deficit = deficit,
+        craftsShort = craftsShort,
+        role = role,
+        plantReason = "potion_stock",
+        plotCount = CountPlotsForSeedUid(seedUid),
+        roleRank = RolePickRank(role),
+    }
+end
+
+local function PreferJob(candidate, best, bestScore, bestShare, bestCrafts, bestPlotCount, bestRoleRank, useFocusScore)
+    if candidate == nil then
+        return best, bestScore, bestShare, bestCrafts, bestPlotCount, bestRoleRank, false
+    end
+    local better = false
+    if useFocusScore then
+        local score = tonumber(candidate.bottleneckScore) or 0
+        local share = tonumber(candidate.focusShare) or 999
+        if best == nil then
+            better = true
+        elseif score > bestScore then
+            better = true
+        elseif score == bestScore then
+            if share < bestShare then
+                better = true
+            elseif share == bestShare then
+                local craftsShort = tonumber(candidate.craftsShort) or 0
+                if craftsShort > bestCrafts then
+                    better = true
+                elseif craftsShort == bestCrafts then
+                    if candidate.plotCount < bestPlotCount then
+                        better = true
+                    elseif candidate.plotCount == bestPlotCount and candidate.roleRank < bestRoleRank then
+                        better = true
+                    elseif candidate.plotCount == bestPlotCount and candidate.roleRank == bestRoleRank
+                        and candidate.seedUid ~= (tonumber(Grow._lastPlantedSeedUid) or 0)
+                        and best ~= nil
+                        and (tonumber(best.seedUid) or 0) == (tonumber(Grow._lastPlantedSeedUid) or 0)
+                    then
+                        better = true
+                    end
+                end
+            end
+        end
+        if better then
+            return candidate, score, share, tonumber(candidate.craftsShort) or 0,
+                candidate.plotCount, candidate.roleRank, true
+        end
+        return best, bestScore, bestShare, bestCrafts, bestPlotCount, bestRoleRank, false
+    end
+
+    local craftsShort = tonumber(candidate.craftsShort) or 0
+    if best == nil then
+        better = true
+    elseif craftsShort > bestCrafts then
+        better = true
+    elseif craftsShort == bestCrafts then
+        if candidate.plotCount < bestPlotCount then
+            better = true
+        elseif candidate.plotCount == bestPlotCount and candidate.roleRank < bestRoleRank then
+            better = true
+        elseif candidate.plotCount == bestPlotCount and candidate.roleRank == bestRoleRank
+            and candidate.seedUid ~= (tonumber(Grow._lastPlantedSeedUid) or 0)
+            and best ~= nil
+            and (tonumber(best.seedUid) or 0) == (tonumber(Grow._lastPlantedSeedUid) or 0)
+        then
+            better = true
+        end
+    end
+    if better then
+        return candidate, bestScore, bestShare, craftsShort, candidate.plotCount, candidate.roleRank, true
+    end
+    return best, bestScore, bestShare, bestCrafts, bestPlotCount, bestRoleRank, false
+end
+
 function Grow.PickPlantCandidate()
     local RS = StockPiler2.RecipeSpec
     local SM = StockPiler2.SeedMap
@@ -582,93 +848,53 @@ function Grow.PickPlantCandidate()
         return nil
     end
     local demand = RS.BuildBalancedSpecDemand()
-    local best = nil
-    local bestCrafts = -1
-    local bestPlotCount = 999
-    local bestRoleRank = 99
-    for _, row in pairs(demand) do
-        if type(row) == "table" then
-            local deficit = tonumber(row.deficit) or 0
-            local craftsShort = tonumber(row.craftsShort)
-            if craftsShort == nil then
-                craftsShort = deficit
-            end
-            local spec = row.spec
-            if deficit > 0 and craftsShort > 0 and type(spec) == "table" and SM.IsGrowableSpec(spec) then
-                local seed = SM.ResolveSeedForSpec(spec)
-                if type(seed) == "table" then
-                    local seedUid = tonumber(seed.uniqueID) or 0
-                    if seedUid <= 0 and type(seed.itemData) == "table" then
-                        seedUid = tonumber(seed.itemData.uniqueID) or 0
+    local focus = nil
+    local focusKeys = nil
+    local hasFocus = false
+    if RS.CollectAutoGrowFocus then
+        focus = RS.CollectAutoGrowFocus()
+        if type(focus) == "table" and type(focus.watches) == "table" and #focus.watches > 0 then
+            hasFocus = true
+            focusKeys = RS.FocusSpecKeys and RS.FocusSpecKeys(focus) or {}
+        end
+    end
+
+    local function pickLoop(restrictKeys, useFocusScore)
+        local best = nil
+        local bestScore = -1
+        local bestShare = 999
+        local bestCrafts = -1
+        local bestPlotCount = 999
+        local bestRoleRank = 99
+        for specKey, row in pairs(demand) do
+            if restrictKeys == nil or restrictKeys[specKey] == true or restrictKeys[row.specKey] == true then
+                local job = JobFromDemandRow(row, SM, Inv)
+                if job ~= nil then
+                    if useFocusScore then
+                        local score, share = FocusBottleneckForSpec(job.specKey or specKey, focus, demand)
+                        job.bottleneckScore = score
+                        job.focusShare = share
                     end
-                    if seedUid > 0 and IsSkillSkippedUid(seedUid) then
-                        -- blacklisted for this snapGen
-                    elseif seedUid > 0 and not CanUseSeedUid(seedUid, Inv) then
-                        MarkSkillSkippedUid(seedUid)
-                        LogOnce("skill-" .. tostring(seedUid), "plant skip skill seedUid=" .. tostring(seedUid))
-                    else
-                        local seedHave = tonumber(seed.count) or 0
-                        if SM and SM.CountSeedsInBagsForSpec then
-                            local variantCount = SM.CountSeedsInBagsForSpec(spec)
-                            if variantCount > seedHave then
-                                seedHave = variantCount
-                            end
-                        elseif Inv and Inv.CountByUid and Inv._ready == true and seedUid > 0 then
-                            local bagCount = Inv.CountByUid(seedUid)
-                            if bagCount > seedHave then
-                                seedHave = bagCount
-                            end
-                        elseif Inv and Inv.UniqueIdCount and seedUid > 0 then
-                            local bagCount = Inv.UniqueIdCount(seedUid)
-                            if bagCount > seedHave then
-                                seedHave = bagCount
-                            end
-                        end
-                        local committed = tonumber(Grow._seedCommitted[seedUid]) or 0
-                        local avail = seedHave - committed
-                        local plantable = ComputePlantable(avail, deficit)
-                        if plantable > 0 then
-                            local role = SpecRole(spec)
-                            local plotCount = CountPlotsForSeedUid(seedUid)
-                            local roleRank = RolePickRank(role)
-                            local better = false
-                            if craftsShort > bestCrafts then
-                                better = true
-                            elseif craftsShort == bestCrafts then
-                                if plotCount < bestPlotCount then
-                                    better = true
-                                elseif plotCount == bestPlotCount and roleRank < bestRoleRank then
-                                    better = true
-                                elseif plotCount == bestPlotCount and roleRank == bestRoleRank
-                                    and seedUid ~= (tonumber(Grow._lastPlantedSeedUid) or 0)
-                                    and best ~= nil
-                                    and (tonumber(best.seedUid) or 0) == (tonumber(Grow._lastPlantedSeedUid) or 0)
-                                then
-                                    better = true
-                                end
-                            end
-                            if better then
-                                bestCrafts = craftsShort
-                                bestPlotCount = plotCount
-                                bestRoleRank = roleRank
-                                best = {
-                                    spec = spec,
-                                    specKey = row.specKey,
-                                    seed = seed,
-                                    seedUid = seedUid,
-                                    plantUid = tonumber(seed.plantUid) or 0,
-                                    seedHave = seedHave,
-                                    plantable = plantable,
-                                    deficit = deficit,
-                                    craftsShort = craftsShort,
-                                    role = role,
-                                    plantReason = "potion_stock",
-                                }
-                            end
-                        end
-                    end
+                    best, bestScore, bestShare, bestCrafts, bestPlotCount, bestRoleRank =
+                        PreferJob(job, best, bestScore, bestShare, bestCrafts, bestPlotCount, bestRoleRank, useFocusScore)
                 end
             end
+        end
+        return best
+    end
+
+    local best = nil
+    if hasFocus then
+        best = pickLoop(focusKeys, true)
+        if best ~= nil then
+            best.pickMode = "focus"
+            best.focusBottleGap = tonumber(focus.maxBottleGap) or 0
+        end
+    end
+    if best == nil then
+        best = pickLoop(nil, false)
+        if best ~= nil then
+            best.pickMode = hasFocus and "fallback" or "global"
         end
     end
     if best ~= nil then
@@ -821,7 +1047,9 @@ function Grow.ExpireStalePending()
 end
 
 --- Soft in-wave call: keep plant-job cache; only force busts caches.
---- opts.force=true — demand/plan/job rebuild (harvest, demand change, wave end).
+--- opts.force=true — demand/job rebuild (harvest, demand change, wave end).
+--- opts.keepPlanCache=true — with force: do not InvalidatePlanCache or ClearCountCaches
+---   (harvest wake; Scheduler coalesced PlanRebuild owns the next full plan).
 --- opts.jobOnly=true — dirty plant job only (seeds arrived from refine).
 function Grow.InvalidatePlantQueue(opts)
     opts = type(opts) == "table" and opts or {}
@@ -843,10 +1071,15 @@ function Grow.InvalidatePlantQueue(opts)
         if opts.keepCommitForceCleared ~= true then
             Grow._commitForceCleared = false
         end
-        if StockPiler2.RecipeSpec and StockPiler2.RecipeSpec.ClearCountCaches then
+        -- keepPlanCache: leave RecipeSpec demand/seed-line caches warm for refine Collect*.
+        if opts.keepPlanCache ~= true
+            and StockPiler2.RecipeSpec and StockPiler2.RecipeSpec.ClearCountCaches
+        then
             StockPiler2.RecipeSpec.ClearCountCaches()
         end
-        if StockPiler2.Planner and StockPiler2.Planner.InvalidatePlanCache then
+        if opts.keepPlanCache ~= true
+            and StockPiler2.Planner and StockPiler2.Planner.InvalidatePlanCache
+        then
             StockPiler2.Planner.InvalidatePlanCache()
         end
         return
@@ -1173,6 +1406,11 @@ local function BindCultivationHarvestAction(windowName)
 end
 
 function Grow.EnsureHarvestActionBound()
+    -- Skip rebind when already set — WindowSetGameActionData on DefaultResizeable
+    -- replaces ResizeImages chrome (rapid harvest footer clicks).
+    if Grow._harvestActionBound == true and DoesWindowExist(HARVEST_WIN) then
+        return true
+    end
     -- Visible footer Harvest owns native gameactionbutton click (primary path).
     if BindCultivationHarvestAction(HARVEST_WIN) then
         Grow._harvestActionBound = true
@@ -1190,32 +1428,12 @@ function Grow.EnsureHarvestActionBound()
     return false
 end
 
---- Disabled gameactionbutton still fires if bound — clear so no "plot not finished" craft.
 function Grow.ClearHarvestActionBound()
-    if WindowSetGameActionData == nil then
-        Grow._harvestActionBound = false
-        return false
+    Grow._footerHarvestClickable = nil
+    local cleared = ClearHarvestBindOnly()
+    if DoesWindowExist(HARVEST_WIN) and WindowSetHandleInput then
+        WindowSetHandleInput(HARVEST_WIN, true)
     end
-    local none = 0
-    if GameData and GameData.PlayerActions and GameData.PlayerActions.NONE ~= nil then
-        none = GameData.PlayerActions.NONE
-    end
-    local function clearWin(windowName)
-        if not DoesWindowExist(windowName) then
-            return false
-        end
-        local ok
-        if StockPiler2.TryCall then
-            ok = StockPiler2.TryCall("WindowSetGameActionData.clear", WindowSetGameActionData, windowName, none, 0, L"")
-        else
-            ok = pcall(WindowSetGameActionData, windowName, none, 0, L"")
-        end
-        RestoreHarvestChrome(windowName)
-        return ok == true
-    end
-    local cleared = clearWin(HARVEST_WIN)
-    clearWin(HARVEST_ACTION_WIN)
-    Grow._harvestActionBound = false
     return cleared
 end
 
@@ -1392,12 +1610,42 @@ function Grow.PrepareHarvestPlot(manual)
     return true
 end
 
---- After a plot becomes empty (cultivation or CraftChat harvest): clear block, rebuild job, wake.
+--- Soft chat-only wake: quiet + clear block + WakeAutoGrow.
+--- Does not force-invalidate (LearnBridge plot-empty owns that). Avoids dual
+--- WakeAfterHarvest x2 stacking Planner/HasSeeds on the same harvest hitch.
+function Grow.WakeAfterHarvestChat()
+    local now = NowSec()
+    local plantDelay = tonumber(Grow.POST_HARVEST_PLANT_DELAY_SEC) or 1.2
+    local quietUntil = now + plantDelay
+    local prevQuiet = tonumber(Grow._plantQuietUntil) or 0
+    if quietUntil > prevQuiet then
+        Grow._plantQuietUntil = quietUntil
+    end
+    Grow.ClearFillBlocked()
+    if StockPiler2.Scheduler and StockPiler2.Scheduler.WakeAutoGrow then
+        StockPiler2.Scheduler.WakeAutoGrow()
+    end
+    -- If cultivation empty-edge never arrives, still force once (debounced).
+    local forceDebounce = tonumber(Grow.HARVEST_FORCE_DEBOUNCE_SEC) or 1.5
+    local lastForce = tonumber(Grow._lastHarvestForceAt) or 0
+    if lastForce <= 0 or now <= 0 or (now - lastForce) >= forceDebounce then
+        -- Defer force to next frame via plot-less wake only when no recent force.
+        -- Prefer LearnBridge; this is a fallback after debounce window with no plot wake.
+        Grow._chatHarvestNeedsForce = true
+    end
+end
+
+--- After a plot becomes empty (cultivation): clear block, rebuild job, wake.
 --- Marks refine due only when no plantable seed job exists (need buffer refill).
---- CraftChat often fires WakeAfterHarvest(0) repeatedly; debounce those during a fill wave.
 --- Per-plot wakes (P1–P4) share one force-invalidate + plant quiet window so replant
 --- does not stack on the engine harvest hitch.
-function Grow.WakeAfterHarvest(plotNum)
+--- opts.soft=true — quiet/wake only (same as WakeAfterHarvestChat).
+function Grow.WakeAfterHarvest(plotNum, opts)
+    opts = type(opts) == "table" and opts or {}
+    if opts.soft == true then
+        Grow.WakeAfterHarvestChat()
+        return Grow.HasSeedsForNextPlant and Grow.HasSeedsForNextPlant() == true
+    end
     local Perf = StockPiler2.Perf
     if Perf and Perf.Begin then
         Perf.Begin("Grow.WakeAfterHarvest")
@@ -1416,19 +1664,7 @@ function Grow.WakeAfterHarvest(plotNum)
     if quietUntil > prevQuiet then
         Grow._plantQuietUntil = quietUntil
     end
-    if plotNum <= 0 then
-        local debounce = tonumber(Grow.CHAT_HARVEST_WAKE_DEBOUNCE_SEC) or 1.5
-        local last = tonumber(Grow._lastChatHarvestWakeAt) or 0
-        if last > 0 and now > 0 and (now - last) < debounce then
-            Grow.ClearFillBlocked()
-            if StockPiler2.Scheduler and StockPiler2.Scheduler.WakeAutoGrow then
-                StockPiler2.Scheduler.WakeAutoGrow()
-            end
-            local plantable = Grow.HasSeedsForNextPlant and Grow.HasSeedsForNextPlant() == true
-            return done(plantable)
-        end
-        Grow._lastChatHarvestWakeAt = now
-    end
+    Grow._chatHarvestNeedsForce = false
     Grow.ClearFillBlocked()
     local forceDebounce = tonumber(Grow.HARVEST_FORCE_DEBOUNCE_SEC) or 1.5
     local lastForce = tonumber(Grow._lastHarvestForceAt) or 0
@@ -1436,7 +1672,11 @@ function Grow.WakeAfterHarvest(plotNum)
     local plantable = false
     if doForce then
         Grow._lastHarvestForceAt = now
-        Grow.InvalidatePlantQueue({ force = true })
+        -- Keep PlanSnapshot: footer CanBrewNow / GetOrBuild must not sync-build mid-hitch.
+        Grow.InvalidatePlantQueue({ force = true, keepPlanCache = true })
+        if StockPiler2.Scheduler and StockPiler2.Scheduler.EnqueuePlanRebuild then
+            StockPiler2.Scheduler.EnqueuePlanRebuild()
+        end
         if Grow.HasSeedsForNextPlant then
             plantable = Grow.HasSeedsForNextPlant() == true
         end
@@ -1446,10 +1686,10 @@ function Grow.WakeAfterHarvest(plotNum)
             StockPiler2.Refine.ClearPostHarvestState()
         end
     else
-        if Grow.HasSeedsForNextPlant then
-            plantable = Grow.HasSeedsForNextPlant() == true
-        end
+        -- Debounced second wake on same hitch: skip HasSeeds (often BuildBalancedSpecDemand).
+        plantable = Grow._lastHarvestWakePlantable == true
     end
+    Grow._lastHarvestWakePlantable = plantable
     if StockPiler2.Scheduler and StockPiler2.Scheduler.WakeAutoGrow then
         StockPiler2.Scheduler.WakeAutoGrow()
     end
@@ -1471,6 +1711,18 @@ function Grow.LogSkipPlant(reason)
 end
 
 function Grow.TryPlantNextEmptyPlot(opId)
+    if Grow._chatHarvestNeedsForce == true then
+        local now = NowSec()
+        local lastForce = tonumber(Grow._lastHarvestForceAt) or 0
+        local forceDebounce = tonumber(Grow.HARVEST_FORCE_DEBOUNCE_SEC) or 1.5
+        if lastForce > 0 and now > 0 and (now - lastForce) < forceDebounce then
+            -- LearnBridge already forced this wave.
+            Grow._chatHarvestNeedsForce = false
+        else
+            Grow._chatHarvestNeedsForce = false
+            Grow.WakeAfterHarvest(0)
+        end
+    end
     if StockPiler2.Orchestrator and StockPiler2.Orchestrator.IsBrewSessionActive
         and StockPiler2.Orchestrator.IsBrewSessionActive() == true
     then
@@ -1917,6 +2169,29 @@ function Grow.DumpDiagnostics(emit)
         emit("  (RecipeSpec missing)")
         return
     end
+    local focus = RS.CollectAutoGrowFocus and RS.CollectAutoGrowFocus() or nil
+    emit("--- focus ---")
+    if type(focus) == "table" and type(focus.watches) == "table" and #focus.watches > 0 then
+        emit(string.format(
+            "  maxBottleGap=%s watches=%d",
+            tostring(focus.maxBottleGap),
+            #focus.watches
+        ))
+        for i = 1, #focus.watches do
+            local fw = focus.watches[i]
+            emit(string.format(
+                "  [%d] %s bottleGap=%d stock=%d craftable=%d target=%d",
+                i,
+                ToNarrow(fw.name),
+                tonumber(fw.bottleGap) or 0,
+                tonumber(fw.stock) or 0,
+                tonumber(fw.craftable) or 0,
+                tonumber(fw.target) or 0
+            ))
+        end
+    else
+        emit("  (none)")
+    end
     local demand = RS.BuildBalancedSpecDemand()
     local MS = StockPiler2.MaterialSpec
     local rowN = 0
@@ -1936,18 +2211,7 @@ function Grow.DumpDiagnostics(emit)
                 if seedUid <= 0 and type(seed.itemData) == "table" then
                     seedUid = tonumber(seed.itemData.uniqueID) or 0
                 end
-                seedHave = tonumber(seed.count) or 0
-                if SM.CountSeedsInBagsForSpec then
-                    local variantCount = SM.CountSeedsInBagsForSpec(row.spec)
-                    if variantCount > seedHave then
-                        seedHave = variantCount
-                    end
-                elseif Inv and Inv.UniqueIdCount and seedUid > 0 then
-                    local bagCount = Inv.UniqueIdCount(seedUid)
-                    if bagCount > seedHave then
-                        seedHave = bagCount
-                    end
-                end
+                seedHave = SeedHaveForResolved(row.spec, seed, seedUid, SM, Inv)
                 plantable = ComputePlantable(seedHave, deficit)
                 seedNote = "resolved"
             else
@@ -1981,13 +2245,17 @@ function Grow.DumpDiagnostics(emit)
     local job = Grow.PickPlantCandidate()
     if type(job) == "table" then
         emit(string.format(
-            "--- pick --- seedUid=%d seeds=%d plantable=%d deficit=%d craftsShort=%d role=%s",
+            "--- pick --- mode=%s seedUid=%d seeds=%d plantable=%d deficit=%d craftsShort=%d role=%s bottleneck=%s share=%s focusGap=%s",
+            tostring(job.pickMode or job.plantReason or "?"),
             tonumber(job.seedUid) or 0,
             tonumber(job.seedHave) or 0,
             tonumber(job.plantable) or 0,
             tonumber(job.deficit) or 0,
             tonumber(job.craftsShort) or 0,
-            tostring(job.role or "?")
+            tostring(job.role or "?"),
+            tostring(job.bottleneckScore),
+            tostring(job.focusShare),
+            tostring(job.focusBottleGap)
         ))
     else
         emit("--- pick --- (none)")
@@ -2049,7 +2317,10 @@ local function StageLabel(stageNum)
 end
 
 --- Short cultivation notes for a material spec (Watch status / tooltip).
---- Matches any seed UID for the plant (dual-seed Mains), not only ResolveSeedForSpec's pick.
+--- Exact seed UIDs only (ResolveSeed + GetSeedUidsForPlant).
+--- Do NOT PairLooksLikePlantAndSeed against plot seeds — that falsely tags
+--- Extender plots onto Multiplier (and similar) when names/products are unrelated.
+--- Do NOT FindSeedInBagsForPlantSpec — SeedMatchesGrowSpec can pollute seedSet.
 function Grow.GrowingNotesForSpec(spec)
     if type(spec) ~= "table" then
         return L""
@@ -2096,28 +2367,16 @@ function Grow.GrowingNotesForSpec(spec)
             end
         end
     end
-    if SM.FindSeedInBagsForPlantSpec then
-        local inBags = SM.FindSeedInBagsForPlantSpec(spec)
-        if type(inBags) == "table" then
-            addSeed(inBags.uniqueID)
-            if type(inBags.itemData) == "table" then
-                addSeed(inBags.itemData.uniqueID)
-            end
-        end
-    end
+    -- Do not call FindSeedInBagsForPlantSpec here: SeedMatchesGrowSpec can accept a
+    -- wrong bag spore when grows/GetPlantUidForSeed is polluted, which then lists
+    -- Extender plots under Multiplier (and similar) in the Watch tooltip.
 
     local function seedMatches(plotSeed)
         plotSeed = tonumber(plotSeed) or 0
         if plotSeed <= 0 then
             return false
         end
-        if seedSet[plotSeed] == true then
-            return true
-        end
-        if plantUid > 0 and SM.PairLooksLikePlantAndSeed then
-            return SM.PairLooksLikePlantAndSeed(plantUid, plotSeed) == true
-        end
-        return false
+        return seedSet[plotSeed] == true
     end
 
     local hasAnySeed = false
@@ -2142,7 +2401,7 @@ function Grow.GrowingNotesForSpec(spec)
             local pendingSeed = tonumber(Grow._pendingSeedUid[plotNum]) or 0
             if stage ~= Grow.StageEmpty() then
                 if seedMatches(plotSeed)
-                    or (plantUid > 0 and plotPlant == plantUid)
+                    or (plantUid > 0 and plotPlant > 0 and plotPlant == plantUid)
                 then
                     parts[#parts + 1] = "P" .. tostring(plotNum) .. " " .. ToNarrow(StageLabel(stage))
                 end

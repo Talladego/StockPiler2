@@ -2,7 +2,7 @@
 
 Greenfield rewrite of StockPiler using an **Orchestrator + Stores + Planner + Executors** architecture. Runs as a **separate addon** alongside v1 — does not modify the original StockPiler folder.
 
-**Version:** 0.4.23
+**Version:** 0.4.58
 
 Repository: [Talladego/StockPiler2](https://github.com/Talladego/StockPiler2)
 
@@ -35,7 +35,7 @@ On first load, StockPiler2 creates ActionBar macros **StockPiler2 Harvest** and 
 | `/sp2 audit` | Saved variables health |
 | `/sp2 harvest` | Prepare next ready plot (macro/CMD path) |
 
-Perf tip: spikes with `trail=(none)` / high `emptyTrail%` on baseline are usually **engine** stalls (native craft/UI), not missing Lua sites. Threshold from `/sp2 perf on [ms]` is saved in settings.
+Perf tip: spikes with `trail=(none)` / high `emptyTrail%` on baseline are usually **engine** stalls (native craft/UI, DXVK, other addons, zone load)—not missing Lua sites. Empty trail means SP2 did not `Begin` recently; leave those alone. Empty-trail spike **uilog lines are rate-limited** (summary still counts every hitch). Threshold from `/sp2 perf on [ms]` is saved in settings.
 
 ## UI
 
@@ -64,6 +64,7 @@ Perf tip: spikes with `trail=(none)` / high `emptyTrail%` on baseline are usuall
 ## AutoBuy
 
 - Buys Cultivating / Apothecary craft mats (and plant/seed buys when Cultivation is missing).
+- Prefers materials for watches with the largest bottle gap (Target−Stock−Craftable), same starve-first idea as AutoGrow; falls back to all short watches when focus has no buyable mats.
 - Respects gold reserve / budget stops; reopens correctly after vendor close.
 
 ## Architecture
@@ -108,6 +109,16 @@ Optional ideas for later — not commitments:
 
 A dedicated **Plants** tab was considered and rejected; surplus plant materials are handled by raising potion stock targets instead.
 
+## Rebuild blueprint (StockPiler3)
+
+[`docs/STOCKPILER3_BUILD_PROMPT.md`](docs/STOCKPILER3_BUILD_PROMPT.md) is the maintained **future blueprint** for a clean-room StockPiler3 rebuild (features, prescribed architecture, performance doctrine, acceptance scenarios). Keep it current whenever SP2 ships:
+
+- new user-facing features or UX behavior
+- important performance optimizations
+- important bug fixes that change contracts, invariants, or hard lessons
+
+Treat prompt updates as part of those ships—not a one-off doc.
+
 ## Versioning
 
 On each user-facing ship, bump together:
@@ -115,6 +126,7 @@ On each user-facing ship, bump together:
 1. `StockPiler2.mod` `version` + `date`
 2. `Source/Bootstrap.lua` `StockPiler2.Version`
 3. This README **Version:** line + a changelog bullet below
+4. [`docs/STOCKPILER3_BUILD_PROMPT.md`](docs/STOCKPILER3_BUILD_PROMPT.md) when the ship adds features or important perf/bug-fix contracts (see **Rebuild blueprint** above)
 
 | Bump | When |
 | :--- | :--- |
@@ -123,6 +135,76 @@ On each user-facing ship, bump together:
 | **Major** (`N+1.0.0`) | Breaking saved-var / architecture break (rare in 0.x) |
 
 ## Changelog
+
+**0.4.58:** Fix — AutoGrow keeps ticking in combat/RvR (combat only defers bag Flatten, not Orch/plan); Watch list keeps last good rows when plan is nil/pending; open-window Watch UI catch-up no longer skipped for fill-burst.
+
+**0.4.57:** Fix — plant-need refine respects seed-buffer credit (live+ground+outstanding); dedupe vs buffer intents; emergency single refine only when an empty plot’s cached plant seed matches and headroom is 0.
+
+**0.4.56:** Perf — idle Orch/Refine: edge-only seed-buffer MarkRefineDue + honor wait ticks; skip Orch while fill-blocked waiting; Macro.Appearance: bind-cache only on slot move, slot-list cache, side-only apply, no re-CanBrewNow in UpdateEnabledState during refresh; BrewLearn L0 potion deltas skip full bag snapshot after craft; skip Orch same frame after learn drain.
+
+**0.4.55:** Fix — AutoBuy continues across focus watches in one vendor visit (no reopen after first watch); clear visit-acquired on inventory snap so shared mats are not starved; budget remains per-visit allowance; reserve/budget/cap stops unchanged.
+
+**0.4.54:** Fix — brew no longer sticks after a main-kept craft: plan rebuild is deferred only while loading/busy (not idle `loaded`); `CanBrewNow`/`TryBrewClick` continue from session deficit+craftable+validate without a plan row; skip false after-brew idle-close when still craftable.
+
+**0.4.53:** Fix — refine extras gated to resin-only; `IsResinUid` no longer treats arbitrary byproduct keys as resin; reject resin grow-seed buckets; forget unrelated grow rows even with samples; `tooth` butcher hint. Offline SV cleanup of remaining polluted grows/refines.
+
+**0.4.52:** Fix — stop recording butcher/container/wrong-plant bag noise as Goldweed harvest products; Chitin/butcher apo mains AutoBuy-able (`chitin` hint + cultivation-linked SpecLinked). Offline SV cleanup of polluted grows/refines.
+
+**0.4.51:** Fix — butchering mats (Armor Scales, Zoic Gore, …) no longer false-growable via ProductMatches overlap with cult plants; AutoBuy can purchase them when budget/reserve allows.
+
+**0.4.50:** Perf — brew hitch coalesce: stop trail-hold for brew session; snapGen-cache + dedupe `SnapshotPotionCounts` / BeginPendingCraft; inventory craft poll once per frame; brew in Watch UI fill-burst; EnqueuePlanRebuild after learn/after-brew (no force BuildPlan on idle close); skip macro appearance drift sync while brew busy/loading.
+
+**0.4.49:** Fix — move `FindSessionRow` above `CanBrewNow` (RoR local-order; was nil global on UPDATE_PROCESSED).
+
+**0.4.48:** Perf — nested `Build.WarmHave` / `Build.Demand` / `Build.Status` / `Build.Tips` under Planner.Build; plan-cache `IsHarvestByproduct`; one `RecipeSlotPlanEntry` pass per deficit row (tips reuse + GrowingNotes once); memo `CountCraftsPossible` per recipe within a Build.
+
+**0.4.47:** Perf — trust DataUtils for L0 bag sync (no hot-path FetchForce / per-slot FetchLight; one bag table per slot event); demote refine-expire from full Flatten; one-pass `WarmSpecHaveCache` for Planner.Build / demand (CountByUid for incomplete+boundUid; one ForEachItem for fuzzy specs; stop double `_specHaveCache` wipe).
+
+**0.4.46:** Perf — coalesce L0 inventory snapGen to once per UPDATE_PROCESSED; stop EnqueuePlanRebuild on every SNAPSHOT (SP1 snap-only vs needQueue); defer PlanRebuild during harvest/scenario; skip ClearCountCaches on harvest keepPlanCache; frame-gate ReconcileAll; share demand/seed-lines per orch tick; rate-limit defer bag-flush logs.
+
+**0.4.45:** Fair AutoBuy — buy mats for max bottle-gap watches first (Target-Stock-Craftable); fall back to all short watches when focus has no vendor buy deficits. Sort: container then deficit (drop alphabetical primacy).
+
+**0.4.44:** Fair AutoGrow plant pick — focus watches with max bottle gap (Target-Stock-Craftable); plant unique bottlenecks for those recipes first (fallback to pooled craftsShort if focus has nothing plantable). Fixes Rejuvenating-style starvation by shared Goldweed/Gobswort.
+
+**0.4.43:** Perf — harvest hitch: CraftChat soft-wake only (LearnBridge owns force); keep PlanSnapshot on harvest wake + enqueue coalesced rebuild; CanBrewNow no longer triggers MaybeNotify/GetOrBuild mid-cultivation; GetOrBuild never sync-builds while plan pending; ReconcileAll once per snapGen (drop Orch duplicates; defer intent-cache bust).
+
+**0.4.42:** Fix — Brew/Harvest hotbar grey sticks: hook ActionButton.UpdateEnabledState so engine DO_MACRO re-enable cannot overwrite SP2 readiness; force grey tint when macros ship colorful *_disabled textures.
+
+**0.4.41:** Fix — Brew hotbar macro clears PERFORM_CRAFTING bind when not ready (was always bound, so bar stayed lit while footer correctly disabled); footer resyncs macro if appearance key drifts.
+
+**0.4.40:** Perf — plan builds tip-ready statusTipSlots with demand; keep _specHaveCache warm; cache ExpectedCraftableBottles + ResolveSeedForSpec; Brew live tip fingerprints snapGen (not per-tick bag digests); cache Seed Buffer tip rows.
+
+**0.4.39:** Perf — cache Watch status tooltip rows per plan gen (first hover builds; re-hovers reuse until bags/garden/watch gens change).
+
+**0.4.38:** Fix — Stock/Craftable tooltip mojibake (ASCII `-` instead of Unicode em dash in L-strings).
+
+**0.4.37:** Clarify Watch traffic-light copy — Stock/Craftable tooltips match column colors; mat note (Pooled) = grow demand across watches, (Shared) = brew-claim contest; Craftable green = uncontested bottle count.
+
+**0.4.36:** Fix — restocking tooltip marks recipe-covered mats yellow when pooled grow demand across watches still exceeds bag stock (now labeled Pooled in 0.4.37).
+
+**0.4.35:** Fix — Watch restocking tooltip plot notes use exact seed UIDs only (no PairLooksLike / bag-seed pollution); Extender plots no longer show under Multiplier (e.g. Rejuvenating Draught).
+
+**0.4.34:** Fix — footer Harvest tooltip works again (stop gating HandleInput; bind/clear only on ready transitions; force HandleInput on to recover from 0.4.32).
+
+**0.4.33:** Fix — footer Brew enable matches click usefulness (grey while busy/op-lock; loaded session only lit for green Ready craft or another Ready pick); refresh footer when brew op-lock expires.
+
+**0.4.32:** Fix — footer Harvest chrome no longer strips on rapid click (bind once on Watch; gate via HandleInput/Disabled instead of clear/rebind; skip L-up footer refresh + macro sync when readiness unchanged).
+
+**0.4.31:** Fix — after relog with window already open on Watch, force bag flush + plan rebuild + active-tab refresh on SESSION_LOADED (stock/craftable/status no longer stale until tab flip).
+
+**0.4.30:** Perf — rate-limit `trail=(none)` spike uilog (digest + summary still count; avoids flood at low thresholds). Fix — AutoBuy no longer `visit-resume` every store update after reserved/budget (resume on close→open or ClearMoneyGateStop). Fix — Watch skill-gate checkboxes refresh on SESSION_LOADED / window show (no longer stuck grey after relog until tab flip).
+
+**0.4.29:** Fix — seed-buffer budget prefers Inventory L0 seed counts (stop ForSpec under-count + lastLive stomp); no pending-throttle clear/burst retry; IssueOne clamps uses to fresh uid headroom.
+
+**0.4.28:** Perf — defer Watch UI rebuild during refine / outstanding / buffer-refine; list repopulate goes through coalesced flush; trail hold no longer includes planDue.
+
+**0.4.27:** Perf — harvest trail honesty (LearnBridge Begin only on complete attempts; no IsHarvestOpActive trail hold); craft-bag-only harvest snapshot; nested Harvest.Snapshot / Harvest.Complete sections.
+
+**0.4.26:** Watch status tooltip — contested recipe slots show (Shared) instead of (Stocked) under Shared materials.
+
+**0.4.25:** Perf — ReconcileAll early-outs and only walks outstanding seeds; defer bag Flatten/plan rebuild while `isInScenario`. Fix — clear refine `_pendingByPlant` on stuck outstanding expire; do not fill-block when intents only fail throttle; Watch status uses Refine/Seed buffer (not Buy seeds) when refinable plants remain.
+
+**0.4.24:** Macro — PLAYER_HOT_BAR_UPDATED only forces appearance re-apply when harvest/brew slot fingerprint changes (stops Macro.Appearance trail storms from unrelated hotbar noise).
 
 **0.4.23:** Perf — Macro ignore hotbar echoes during appearance refresh; harvest mat snapshot prefers Inventory L0; LearnBridge perf excludes Refine; AutoBuy skips per-purchase Flatten/plan/jobs invalidate; Watch UI defers during AutoBuy visit.
 
