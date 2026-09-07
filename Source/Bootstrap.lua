@@ -3,7 +3,7 @@
 ----------------------------------------------------------------
 
 StockPiler2 = StockPiler2 or {}
-StockPiler2.Version = L"0.4.58"
+StockPiler2.Version = L"0.4.62"
 
 local function EmitLog(msg)
     if StockPiler2.Debug and StockPiler2.Debug.LogAlways then

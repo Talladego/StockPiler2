@@ -124,16 +124,20 @@ local function IntentCacheKey()
     local Inv = StockPiler2.Inventory
     local Watch = StockPiler2.Watch
     local RP = StockPiler2.RefinePipeline
+    local Garden = StockPiler2.Garden
     return table.concat({
         tostring(Inv and Inv.GetSnapGen and Inv.GetSnapGen() or 0),
         tostring(Watch and Watch.GetGen and Watch.GetGen() or 0),
         tostring(RP and RP.GetGen and RP.GetGen() or 0),
+        tostring(Garden and Garden.GetGen and Garden.GetGen() or 0),
     }, ":")
 end
 
 function Refine.InvalidateIntentCache()
     Refine._intentCacheKey = nil
     Refine._intentCache = nil
+    Refine._lastCollectEmpty = false
+    Refine._lastCollectKey = nil
 end
 
 function Refine.MarkRefineDue(reason)
@@ -1020,18 +1024,23 @@ function Refine.TryTick(opId)
     if Refine.RefineCheckDue() ~= true then
         return false
     end
-    -- Throttle-only last attempt with warm intent cache: skip Collect* rebuild.
+    local cacheKey = IntentCacheKey()
+    local bufferOn = StockPiler2.Watch and StockPiler2.Watch.IsSeedBufferEnabled
+        and StockPiler2.Watch.IsSeedBufferEnabled() == true
+    cacheKey = cacheKey .. ":" .. (bufferOn and "1" or "0")
+    -- Negative / throttle-only result: skip Collect* when gens unchanged.
+    if Refine._lastCollectEmpty == true
+        and Refine._lastCollectKey == cacheKey
+    then
+        Refine._refineWaitTicks = math.max(tonumber(Refine._refineWaitTicks) or 0, 10)
+        return false
+    end
     if Refine._lastTryTickOnlyThrottle == true
         and type(Refine._intentCache) == "table"
         and Refine._intentCacheKey ~= nil
+        and Refine._intentCacheKey == cacheKey
     then
-        local cacheKey = IntentCacheKey()
-        local bufferOn = StockPiler2.Watch and StockPiler2.Watch.IsSeedBufferEnabled
-            and StockPiler2.Watch.IsSeedBufferEnabled() == true
-        cacheKey = cacheKey .. ":" .. (bufferOn and "1" or "0")
-        if Refine._intentCacheKey == cacheKey then
-            return false
-        end
+        return false
     end
     if StockPiler2.Perf and StockPiler2.Perf.Begin then
         StockPiler2.Perf.Begin("Refine.TryTick")
@@ -1047,6 +1056,8 @@ function Refine.TryTick(opId)
             onlyThrottle = false
             if Refine.IssueOne(intent, opId) == true then
                 Refine._lastTryTickOnlyThrottle = false
+                Refine._lastCollectEmpty = false
+                Refine._lastCollectKey = nil
                 if StockPiler2.Perf and StockPiler2.Perf.End then
                     StockPiler2.Perf.End("Refine.TryTick")
                 end
@@ -1068,6 +1079,8 @@ function Refine.TryTick(opId)
         end
     end
     Refine._lastTryTickOnlyThrottle = onlyThrottle == true and #intents > 0
+    Refine._lastCollectKey = cacheKey
+    Refine._lastCollectEmpty = (#intents == 0) or (onlyThrottle == true)
     if Refine._refineDirty == true or Refine._refineDirtyReason == "harvest" then
         Refine.ClearPostHarvestState()
     end
@@ -1087,7 +1100,12 @@ function Refine.TryTick(opId)
         end
         return false
     end
-    Refine._refineWaitTicks = 5
+    -- Empty intents: longer wait so idle Collect* does not rebuild every 5 ticks.
+    if #intents == 0 then
+        Refine._refineWaitTicks = 10
+    else
+        Refine._refineWaitTicks = 5
+    end
     -- Do not fill-block when empty plots still have a plantable job — that starved replant
     -- after harvest when the seed buffer was already full (no refine intents).
     if Grow and Grow.HasEmptyPlot and Grow.HasEmptyPlot() then

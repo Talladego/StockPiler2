@@ -524,6 +524,22 @@ function Grow.HasAnyBufferShort()
     return EnsureBufferFlagsCached().short == true
 end
 
+--- Seed Buffer off, or every watched buffer line is at/above target with no pending buffer refine.
+function Grow.IsSeedBufferSatisfied()
+    if not (StockPiler2.Watch and StockPiler2.Watch.IsSeedBufferEnabled
+        and StockPiler2.Watch.IsSeedBufferEnabled() == true)
+    then
+        return true
+    end
+    if Grow.HasAnyBufferShort() == true then
+        return false
+    end
+    if Grow.HasPendingBufferRefine and Grow.HasPendingBufferRefine() == true then
+        return false
+    end
+    return true
+end
+
 local function PickBufferGrowCandidate(lines, SM, Inv)
     local Refine = StockPiler2.Refine
     local buffer = StockPiler2.Watch and StockPiler2.Watch.GetSeedBufferMin() or 5
@@ -988,6 +1004,7 @@ function Grow.OnCultivationUpdated(plotNum)
     if plotNum > 0 then
         HandleOne(plotNum, Grow.CachedPlot(plotNum))
         Grow.MarkAdditiveDue()
+        Grow.MaybeNotifyHarvestReady()
         if Grow._liveHarvestTip and Grow._liveHarvestTip.kind == "harvest" then
             Grow.SyncHarvestTipPlotsFromEngine()
             Grow.MaybeRefreshHarvestTooltip(true)
@@ -1004,6 +1021,7 @@ function Grow.OnCultivationUpdated(plotNum)
             Grow.ClearPendingAdditiveIfFilled(pn, Grow.CachedPlot(pn))
         end
         Grow.MarkAdditiveDue()
+        Grow.MaybeNotifyHarvestReady()
         if Grow._liveHarvestTip and Grow._liveHarvestTip.kind == "harvest" then
             Grow.SyncHarvestTipPlotsFromEngine()
             Grow.MaybeRefreshHarvestTooltip(true)
@@ -1014,6 +1032,7 @@ function Grow.OnCultivationUpdated(plotNum)
         HandleOne(pn, row)
     end
     Grow.MarkAdditiveDue()
+    Grow.MaybeNotifyHarvestReady()
     if Grow._liveHarvestTip and Grow._liveHarvestTip.kind == "harvest" then
         Grow.SyncHarvestTipPlotsFromEngine()
         Grow.MaybeRefreshHarvestTooltip(true)
@@ -1202,6 +1221,10 @@ function Grow.HasSeedsForNextPlant()
 end
 
 function Grow.GetPlantJob()
+    local Inv = StockPiler2.Inventory
+    local Garden = StockPiler2.Garden
+    local snapGen = Inv and Inv.GetSnapGen and Inv.GetSnapGen() or 0
+    local gardenGen = Garden and Garden.GetGen and Garden.GetGen() or 0
     if Grow._plantQueueDirty ~= true then
         if type(Grow._cachedPlantJob) == "table" then
             local adjusted = AdjustJobForCommitted(Grow._cachedPlantJob)
@@ -1218,7 +1241,12 @@ function Grow.GetPlantJob()
             end
         elseif Grow._jobProbed == true then
             -- Stay nil until explicitly dirtied (unblock / harvest / refine / demand).
-            return nil
+            -- If gens unchanged, do not rebuild PickPlantCandidate (idle no-job spikes).
+            if Grow._queueSnapGen == snapGen and Grow._queueGardenGen == gardenGen then
+                return nil
+            end
+            Grow._plantQueueDirty = true
+            Grow._jobProbed = false
         end
     end
     if StockPiler2.Scheduler and StockPiler2.Scheduler.BagWorkPending
@@ -1232,8 +1260,8 @@ function Grow.GetPlantJob()
     Grow._cachedPlantJob = job
     Grow._plantQueueDirty = false
     Grow._jobProbed = true
-    local Inv = StockPiler2.Inventory
-    Grow._queueSnapGen = Inv and Inv.GetSnapGen and Inv.GetSnapGen() or 0
+    Grow._queueSnapGen = snapGen
+    Grow._queueGardenGen = gardenGen
     return AdjustJobForCommitted(job)
 end
 
@@ -1280,12 +1308,7 @@ function Grow.GetReadyHarvestPlots()
     local CA = StockPiler2.CultivatorAdapter
     local n = CA and CA.NumPlots and CA.NumPlots() or 4
     for plotNum = 1, n do
-        local plot = nil
-        if CA and CA.ReadPlot then
-            plot = CA.ReadPlot(plotNum)
-        else
-            plot = Grow.CachedPlot(plotNum)
-        end
+        local plot = Grow.CachedPlot(plotNum)
         if type(plot) == "table" and Grow.IsPlotGrown(plot.stage) then
             ready[#ready + 1] = plotNum
         end
@@ -1301,12 +1324,7 @@ function Grow.AllPlantedPlotsHarvestReady()
     local planted = 0
     local ready = 0
     for plotNum = 1, n do
-        local plot = nil
-        if CA and CA.ReadPlot then
-            plot = CA.ReadPlot(plotNum)
-        else
-            plot = Grow.CachedPlot(plotNum)
-        end
+        local plot = Grow.CachedPlot(plotNum)
         if type(plot) == "table" then
             local stage = Grow.NormalizeStage(plot.stage)
             if stage ~= Grow.StageEmpty() then
@@ -1320,8 +1338,8 @@ function Grow.AllPlantedPlotsHarvestReady()
     return planted > 0 and ready == planted, ready, planted
 end
 
-function Grow.CountReadyHarvestPlots()
-    local n = #Grow.GetReadyHarvestPlots()
+--- Transition-only harvest-ready chat/sound (not on every footer CountReady).
+function Grow.MaybeNotifyHarvestReady()
     local allReady, readyN = Grow.AllPlantedPlotsHarvestReady()
     if allReady then
         local printed = NotifyChatOnce(
@@ -1335,19 +1353,92 @@ function Grow.CountReadyHarvestPlots()
     else
         ClearNotifyChatOnce("harvest-ready")
     end
-    return n
+end
+
+--- True when a plant op is still outstanding on any plot.
+function Grow.HasPendingPlant()
+    local pending = Grow._pendingPlant
+    if type(pending) ~= "table" then
+        return false
+    end
+    for _, n in pairs(pending) do
+        if (tonumber(n) or 0) > 0 then
+            return true
+        end
+    end
+    return false
+end
+
+--- True when any plot is planted and still mid-grow (not empty / grown / harvesting).
+function Grow.HasPlotGrowing()
+    local CA = StockPiler2.CultivatorAdapter
+    local n = CA and CA.NumPlots and CA.NumPlots() or 4
+    for plotNum = 1, n do
+        local plot = Grow.CachedPlot(plotNum)
+        if type(plot) == "table" then
+            local stage = Grow.NormalizeStage(plot.stage)
+            if stage ~= Grow.StageEmpty()
+                and not Grow.IsPlotGrown(stage)
+                and not Grow.IsPlotHarvesting(stage)
+            then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+--- AutoGrow cannot plant/refine further and is not waiting on garden time or harvest.
+--- Used for "your turn" chat when watches still need player actions (buy / skill gates).
+function Grow.IsActionIdle()
+    if Grow.IsEnabled() ~= true then
+        return false
+    end
+    if Grow.HasPendingPlant() then
+        return false
+    end
+    if Grow.HasPlotGrowing() then
+        return false
+    end
+    local readyPlots = Grow.GetReadyHarvestPlots()
+    if type(readyPlots) == "table" and #readyPlots > 0 then
+        return false
+    end
+    if Grow.IsSeedBufferSatisfied and Grow.IsSeedBufferSatisfied() ~= true then
+        return false
+    end
+    if Grow.HasEmptyPlot() then
+        local job = Grow.GetPlantJob()
+        if type(job) == "table" then
+            local plantable = tonumber(job.plantable) or 0
+            local seedHave = tonumber(job.seedHave) or 0
+            if plantable > 0 or seedHave > 0 then
+                return false
+            end
+        end
+    end
+    if Grow.HasPendingBufferRefine and Grow.HasPendingBufferRefine() == true then
+        return false
+    end
+    local Refine = StockPiler2.Refine
+    if Refine and Refine.CollectIntents then
+        local intents = Refine.CollectIntents()
+        if type(intents) == "table" and #intents > 0 then
+            return false
+        end
+    end
+    return true
+end
+
+function Grow.CountReadyHarvestPlots()
+    return #Grow.GetReadyHarvestPlots()
 end
 
 function Grow.HasHarvestInProgress()
     local CA = StockPiler2.CultivatorAdapter
     local n = CA and CA.NumPlots and CA.NumPlots() or 4
     for plotNum = 1, n do
-        local plot = nil
-        if CA and CA.ReadPlot then
-            plot = CA.ReadPlot(plotNum)
-        else
-            plot = Grow.CachedPlot(plotNum)
-        end
+        local plot = Grow.CachedPlot(plotNum)
         if type(plot) == "table" and Grow.IsPlotHarvesting(plot.stage) then
             return true
         end
@@ -1914,13 +2005,17 @@ function Grow.TryPlantNextEmptyPlot(opId)
     if StockPiler2.Refine and StockPiler2.Refine.ClearPostHarvestState then
         StockPiler2.Refine.ClearPostHarvestState()
     end
-    if StockPiler2.Garden and StockPiler2.Garden.OnCultivationUpdated then
+    if StockPiler2.Garden and StockPiler2.Garden.SyncPlot then
+        StockPiler2.Garden.SyncPlot(plotNum)
+    elseif StockPiler2.Garden and StockPiler2.Garden.OnCultivationUpdated then
         StockPiler2.Garden.OnCultivationUpdated()
     end
     -- Re-pick next plot for craftsShort / role fairness; keep seedCommitted.
     Grow._plantQueueDirty = true
     Grow._cachedPlantJob = nil
     Grow._jobProbed = false
+    Grow._queueSnapGen = nil
+    Grow._queueGardenGen = nil
     if StockPiler2.Scheduler and StockPiler2.Scheduler.WakeAutoGrow then
         StockPiler2.Scheduler.WakeAutoGrow()
     end

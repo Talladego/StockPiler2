@@ -1,5 +1,9 @@
 ----------------------------------------------------------------
 -- StockPiler2 Core/Perf — frametime hitch breadcrumbs (SP1-aligned)
+--
+-- GetGameTime() is frame-quantized: it does not advance within a single
+-- UPDATE_PROCESSED. Perf.Begin/End therefore cannot measure section durations
+-- inside a frame; attribution is the per-frame trail of Mark/Begin names only.
 ----------------------------------------------------------------
 
 StockPiler2.Perf = StockPiler2.Perf or {}
@@ -8,7 +12,6 @@ local Perf = StockPiler2.Perf
 Perf.Enabled = false
 Perf.FrameThresholdMs = 400
 
-local SECTION_MS = 50
 local MAX_NAMES = 16
 local TRAIL_IDLE_CLEAR_SEC = 0.1
 local SUMMARY_MAX_ENTRIES = 12
@@ -149,25 +152,14 @@ function Perf.End(name)
         return
     end
     name = tostring(name or "?")
-    local t0 = starts[name]
+    -- GetGameTime is frame-quantized: intra-frame dt is always ~0. Keep End for
+    -- balanced Begin/End pairs; do not emit dead "section" lines.
     starts[name] = nil
-    if t0 == nil then
-        return
-    end
-    local dtMs = (NowSec() - t0) * 1000
-    if dtMs >= SECTION_MS then
-        Emit(string.format("section %s %.0fms", name, dtMs))
-    end
 end
 
+--- Trail hold disabled: holding across the 2s bag-due window glued stale Marks
+--- onto later spikes (false RefreshWatch x2 / Flatten on SyncAll frames).
 function Perf.ShouldHoldTrail()
-    local Sch = StockPiler2.Scheduler
-    if Sch and Sch._bagDue == true then
-        return true
-    end
-    -- Do not hold for _planDue — keeps stale RefreshWatch Marks on later hitches.
-    -- Do not hold for IsHarvestOpActive — multi-plot harvest glued PrepareHarvest xN.
-    -- Do not hold for brew session — glued Brew.Tick xN / SnapshotPotionCounts xN / Build xN.
     return false
 end
 

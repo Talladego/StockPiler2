@@ -539,35 +539,75 @@ end
 
 function Buy.FindStoreMatch(job)
     local VA = StockPiler2.VendorAdapter
-    local list = VA and VA.StoreRows and VA.StoreRows() or nil
-    if type(list) ~= "table" or type(job) ~= "table" then
+    if type(job) ~= "table" then
         return nil
     end
-    local function consider(item)
-        if type(item) == "table"
-            and tonumber(item.slotNum)
-            and item.canbuy ~= false
-            and not HasAltCurrency(item)
-            and (tonumber(item.cost) or 0) > 0
-            and PlayerCanUseStoreItem(item)
-            and ItemMatchesJob(item, job)
-        then
-            return item, tonumber(item.cost) or 0
-        end
+    local matchKey = tostring(job.specKey or "")
+    if matchKey == "" then
+        matchKey = tostring(job.kind or "") .. ":" .. tostring(job.name or "")
+    end
+    local matchCache = Buy._visitMatchByKey
+    if type(matchCache) ~= "table" then
+        matchCache = {}
+        Buy._visitMatchByKey = matchCache
+    end
+    local cached = matchCache[matchKey]
+    if cached == false then
         return nil
     end
-    for _, item in ipairs(list) do
-        local matched, cost = consider(item)
-        if matched then
-            return matched, cost
+    if type(cached) == "table" then
+        return cached.item, cached.cost
+    end
+
+    local index = Buy._visitStoreIndex
+    if type(index) ~= "table" then
+        local list = VA and VA.StoreRows and VA.StoreRows() or nil
+        index = {}
+        if type(list) == "table" then
+            local function addRow(item)
+                if type(item) ~= "table" or not tonumber(item.slotNum) then
+                    return
+                end
+                if item.canbuy == false or HasAltCurrency(item) then
+                    return
+                end
+                local cost = tonumber(item.cost) or 0
+                if cost <= 0 then
+                    return
+                end
+                if not PlayerCanUseStoreItem(item) then
+                    return
+                end
+                index[#index + 1] = {
+                    item = item,
+                    cost = cost,
+                    growable = IsGrowablePlantItem(item),
+                    ts = InferStoreTradeSkill(item),
+                }
+            end
+            local n = 0
+            for _, item in ipairs(list) do
+                addRow(item)
+                n = n + 1
+            end
+            -- Only pairs-pass when ipairs found nothing (sparse/keyed store tables).
+            if n == 0 then
+                for _, item in pairs(list) do
+                    addRow(item)
+                end
+            end
+        end
+        Buy._visitStoreIndex = index
+    end
+
+    for i = 1, #index do
+        local row = index[i]
+        if type(row) == "table" and ItemMatchesJob(row.item, job) then
+            matchCache[matchKey] = { item = row.item, cost = row.cost }
+            return row.item, row.cost
         end
     end
-    for _, item in pairs(list) do
-        local matched, cost = consider(item)
-        if matched then
-            return matched, cost
-        end
-    end
+    matchCache[matchKey] = false
     return nil
 end
 
@@ -615,6 +655,73 @@ local function PlayerMoneyBrass()
     return 0
 end
 
+local function NoteVisitBoughtName(name, qty)
+    qty = tonumber(qty) or 0
+    name = ToNarrow(name)
+    if qty <= 0 or name == "" then
+        return
+    end
+    local map = Buy._visitBoughtByName
+    if type(map) ~= "table" then
+        map = {}
+        Buy._visitBoughtByName = map
+    end
+    map[name] = (tonumber(map[name]) or 0) + qty
+end
+
+local function FormatSpentGoldLabel(brass)
+    local gold = (tonumber(brass) or 0) / BRASS_PER_GOLD
+    if gold <= 0 then
+        return "0g"
+    end
+    if math.abs(gold - math.floor(gold + 1e-9)) < 1e-6 then
+        return string.format("%dg", math.floor(gold + 0.5))
+    end
+    return string.format("%.1fg", gold)
+end
+
+--- Narrow summary of visit purchases; truncates long lists.
+local function VisitBoughtListText()
+    local map = Buy._visitBoughtByName
+    if type(map) ~= "table" then
+        return "", 0
+    end
+    local entries = {}
+    for name, qty in pairs(map) do
+        qty = tonumber(qty) or 0
+        if qty > 0 and type(name) == "string" and name ~= "" then
+            entries[#entries + 1] = { name = name, qty = qty }
+        end
+    end
+    if #entries == 0 then
+        return "", 0
+    end
+    table.sort(entries, function(a, b)
+        if a.qty ~= b.qty then
+            return a.qty > b.qty
+        end
+        return a.name < b.name
+    end)
+    local maxShow = 4
+    local parts = {}
+    local shown = math.min(#entries, maxShow)
+    for i = 1, shown do
+        parts[#parts + 1] = string.format("%dx %s", entries[i].qty, entries[i].name)
+    end
+    if #entries > maxShow then
+        parts[#parts + 1] = string.format("+%d more", #entries - maxShow)
+    end
+    return table.concat(parts, ", "), #entries
+end
+
+local function ChatVisitNotify(msg)
+    if StockPiler2.Ui and StockPiler2.Ui.Print then
+        StockPiler2.Ui.Print(msg)
+    elseif StockPiler2.Debug and StockPiler2.Debug.Notify then
+        StockPiler2.Debug.Notify(msg)
+    end
+end
+
 local function ChatVisitStop(reason)
     if Buy._visitChatted == true then
         return
@@ -623,18 +730,43 @@ local function ChatVisitStop(reason)
     if reason ~= "nothing" then
         Buy._visitStopReason = reason
     end
+    local bought = tonumber(Buy._visitBought) or 0
+    local spent = tonumber(Buy._visitSpentBrass) or 0
     LogBuyOp(string.format(
         "stop reason=%s bought=%d spentBrass=%d",
         tostring(reason),
-        tonumber(Buy._visitBought) or 0,
-        tonumber(Buy._visitSpentBrass) or 0
+        bought,
+        spent
     ))
+    -- Quiet when the visit bought nothing and left normally.
+    if reason == "nothing" then
+        return
+    end
+    local listText = VisitBoughtListText()
+    local msg = nil
+    if bought > 0 and listText ~= "" then
+        msg = L"Bought: " .. towstring(listText)
+            .. L" (spent " .. towstring(FormatSpentGoldLabel(spent)) .. L")."
+    elseif reason == "reserved" or reason == "budget" or reason == "cap" then
+        msg = L"AutoBuy stopped."
+    else
+        return
+    end
+    if reason == "reserved" then
+        msg = msg .. L" Stopped: gold reserve."
+    elseif reason == "budget" then
+        msg = msg .. L" Stopped: budget."
+    elseif reason == "cap" then
+        msg = msg .. L" Stopped: purchase cap."
+    end
+    ChatVisitNotify(msg)
 end
 
 local function ResetVisit()
     Buy._visitSpentBrass = 0
     Buy._visitBought = 0
     Buy._visitPurchases = 0
+    Buy._visitBoughtByName = {}
     Buy._visitStopReason = nil
     Buy._visitChatted = false
     Buy._visitSawMatch = false
@@ -645,6 +777,8 @@ local function ResetVisit()
     Buy._visitSnapshotSkipLogged = false
     Buy._visitBuybackSkipLogged = false
     Buy._visitNoJobsIdleLogged = nil
+    Buy._visitStoreIndex = nil
+    Buy._visitMatchByKey = {}
     Buy._visitMoneyBrass = PlayerMoneyBrass()
     Buy.InvalidateJobsCache()
 end
@@ -745,6 +879,9 @@ function Buy.ClearMoneyGateStop(via)
     Buy._visitStopReason = nil
     Buy._visitChatted = false
     Buy._visitSpentBrass = 0
+    Buy._visitBought = 0
+    Buy._visitPurchases = 0
+    Buy._visitBoughtByName = {}
     Buy._visitAcquiredByKey = {}
     Buy._visitSkipLogged = {}
     Buy._visitMoneyBrass = PlayerMoneyBrass()
@@ -960,6 +1097,7 @@ function Buy.TryBuyNext()
                     Buy._visitPurchases = purchases + 1
                     Buy._visitMoneyBrass = math.max(0, money - costTotal)
                     NoteVisitAcquired(acquireKey, qty)
+                    NoteVisitBoughtName(item.name or job.name or job.label, qty)
                     AfterPurchaseRefresh()
                     LogBuyOp(string.format(
                         "purchase slot=%d qty=%d cost=%d name=%s remainingWas=%d spent=%d moneyLeft=%d",

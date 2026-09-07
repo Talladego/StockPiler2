@@ -48,7 +48,29 @@ function StockPiler2Window.OnInitialize()
     end
 end
 
+--- Coalesce craft/cultivation footer storms to once per UPDATE_PROCESSED.
+function StockPiler2Window.RequestFooterRefresh()
+    StockPiler2Window._footerRefreshPending = true
+end
+
+function StockPiler2Window.FlushPendingFooterRefresh()
+    if StockPiler2Window._footerRefreshPending ~= true then
+        return
+    end
+    StockPiler2Window._footerRefreshPending = false
+    if not DoesWindowExist("StockPiler2Window")
+        or WindowGetShowing("StockPiler2Window") ~= true
+    then
+        return
+    end
+    StockPiler2Window.RefreshFooterButtons()
+end
+
 function StockPiler2Window.RefreshFooterButtons()
+    local Perf = StockPiler2.Perf
+    if Perf and Perf.Begin then
+        Perf.Begin("Footer")
+    end
     local onWatch = StockPiler2Window.SelectedTab == StockPiler2Window.TABS_WATCH
     local onPotions = StockPiler2Window.SelectedTab == StockPiler2Window.TABS_POTIONS
     local canHarvest = false
@@ -114,6 +136,9 @@ function StockPiler2Window.RefreshFooterButtons()
         end
     end
     if not readinessChanged then
+        if Perf and Perf.End then
+            Perf.End("Footer")
+        end
         return
     end
     if StockPiler2.Macro and StockPiler2.Macro.RequestEnabledSync then
@@ -128,6 +153,9 @@ function StockPiler2Window.RefreshFooterButtons()
         else
             StockPiler2.Macro.SyncEnabledState()
         end
+    end
+    if Perf and Perf.End then
+        Perf.End("Footer")
     end
 end
 
@@ -187,13 +215,10 @@ function StockPiler2Window.FlushPendingListRepopulate()
     if WindowGetShowing("StockPiler2Window") ~= true then
         return
     end
-    -- Coalesce via Watch UI dirty/flush (interval + fill-burst gates).
+    -- Mark dirty only; Scheduler.OnUpdate flushes once per tick (no nested flush).
     StockPiler2Window._repopulatePending = false
     if StockPiler2.Ui and StockPiler2.Ui.MarkWatchUiDirty then
         StockPiler2.Ui.MarkWatchUiDirty()
-        if StockPiler2.Ui.FlushWatchUiIfDirty then
-            StockPiler2.Ui.FlushWatchUiIfDirty()
-        end
         return
     end
     StockPiler2Window.RefreshActiveTab()

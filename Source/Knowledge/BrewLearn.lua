@@ -412,6 +412,19 @@ function StockPiler2.BrewLearn.CaptureApothecaryMaterials()
     if type(ApothecaryWindow) ~= "table" or type(ApothecaryWindow.craftingData) ~= "table" then
         return nil
     end
+    local frame = tonumber(StockPiler2.FrameCounter) or 0
+    local state = ApothecaryWindow.currentState
+    if frame > 0
+        and BL._apoCaptureFrame == frame
+        and BL._apoCaptureState == state
+        and type(BL._apoCaptureSlots) == "table"
+    then
+        return BL._apoCaptureSlots
+    end
+    local Perf = StockPiler2.Perf
+    if Perf and Perf.Begin then
+        Perf.Begin("ApoCapture")
+    end
     local slots = {}
     for slotNum = 0, 4 do
         local cd = ApothecaryWindow.craftingData[slotNum]
@@ -465,9 +478,16 @@ function StockPiler2.BrewLearn.CaptureApothecaryMaterials()
             end
         end
     end
+    if Perf and Perf.End then
+        Perf.End("ApoCapture")
+    end
     if #slots == 0 then
+        BL._apoCaptureSlots = nil
         return nil
     end
+    BL._apoCaptureFrame = frame
+    BL._apoCaptureState = state
+    BL._apoCaptureSlots = slots
     return slots
 end
 
@@ -483,17 +503,33 @@ function StockPiler2.BrewLearn.SnapshotPotionCounts()
     if Perf and Perf.Begin then
         Perf.Begin("BrewLearn.SnapshotPotionCounts")
     end
-    BL._snapshotDone = false
-    SnapshotItems()
     local counts = {}
-    EachItem(function(item)
-        if IsPotionType(item) then
-            local uid = tonumber(item.uniqueID) or 0
-            if uid > 0 then
-                counts[uid] = (counts[uid] or 0) + StackSize(item)
+    local Inv = StockPiler2.Inventory
+    -- Prefer L0 uid counts (no bag walk) when inventory mirror is ready.
+    if Inv and Inv._ready == true and type(Inv._countByUid) == "table" then
+        local samples = Inv._sampleByUid
+        for uid, qty in pairs(Inv._countByUid) do
+            uid = tonumber(uid) or 0
+            qty = tonumber(qty) or 0
+            if uid > 0 and qty > 0 then
+                local sample = type(samples) == "table" and samples[uid] or nil
+                if type(sample) == "table" and IsPotionType(sample) then
+                    counts[uid] = qty
+                end
             end
         end
-    end)
+    else
+        BL._snapshotDone = false
+        SnapshotItems()
+        EachItem(function(item)
+            if IsPotionType(item) then
+                local uid = tonumber(item.uniqueID) or 0
+                if uid > 0 then
+                    counts[uid] = (counts[uid] or 0) + StackSize(item)
+                end
+            end
+        end)
+    end
     BL._potionCountCache = counts
     BL._potionCountSnapGen = snapGen
     if Perf and Perf.End then

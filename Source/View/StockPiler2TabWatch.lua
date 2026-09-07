@@ -247,7 +247,7 @@ local function BuildVisibleList(opts)
     if opts.forcePlan == true and StockPiler2.Planner and StockPiler2.Planner.Build then
         plan = StockPiler2.Planner.Build({ force = true })
     elseif StockPiler2.Planner and StockPiler2.Planner.GetOrBuild then
-        plan = StockPiler2.Planner.GetOrBuild()
+        plan = StockPiler2.Planner.GetOrBuild({ refresh = false })
     elseif StockPiler2.PlanSnapshot and StockPiler2.PlanSnapshot.Get then
         plan = StockPiler2.PlanSnapshot.Get()
     end
@@ -321,6 +321,24 @@ function StockPiler2TabWatch.RefreshSkillGates()
         return
     end
     local canGrow = CanAutoGrowUi()
+    local canBuy = CanAutoBuyUi()
+    local row = CharRow()
+    local autoGrow = canGrow and type(row) == "table" and row.autoGrowEnabled == true
+    local additives = canGrow and type(row) == "table" and row.autoGrowAdditives == true
+    local autoBuy = canBuy and type(row) == "table" and row.autoBuyEnabled == true
+    local seedBufOn = type(row) == "table" and row.growSeedBufferEnabled ~= false
+    local seedBuf = StockPiler2.Watch and StockPiler2.Watch.GetSeedBufferMin and StockPiler2.Watch.GetSeedBufferMin() or 5
+    local reserve = type(row) == "table" and tonumber(row.autoBuyReserveGold) or 10
+    local budget = type(row) == "table" and tonumber(row.autoBuyBudgetGold) or 50
+    local gatesKey = table.concat({
+        tostring(canGrow), tostring(canBuy), tostring(autoGrow), tostring(additives),
+        tostring(autoBuy), tostring(seedBufOn), tostring(seedBuf),
+        tostring(reserve), tostring(budget),
+    }, ":")
+    if StockPiler2TabWatch._skillGatesKey == gatesKey then
+        return
+    end
+    StockPiler2TabWatch._skillGatesKey = gatesKey
     local prev = StockPiler2TabWatch._lastCanAutoGrow
     StockPiler2TabWatch._lastCanAutoGrow = canGrow
     UpdateEnableCheckbox()
@@ -342,10 +360,28 @@ function StockPiler2TabWatch.Refresh(opts)
         return
     end
     StockPiler2TabWatch.RefreshSkillGates()
+    local prevOrder = StockPiler2TabWatch.displayOrder
     BuildVisibleList(opts)
-    if DoesWindowExist("SP2TabWatchList") then
-        ListBoxSetDisplayOrder("SP2TabWatchList", {})
-        ListBoxSetDisplayOrder("SP2TabWatchList", StockPiler2TabWatch.displayOrder)
+    if not DoesWindowExist("SP2TabWatchList") then
+        return
+    end
+    local order = StockPiler2TabWatch.displayOrder
+    local orderChanged = type(prevOrder) ~= "table" or type(order) ~= "table"
+        or #prevOrder ~= #order
+    if not orderChanged and type(prevOrder) == "table" and type(order) == "table" then
+        for i = 1, #order do
+            if prevOrder[i] ~= order[i] then
+                orderChanged = true
+                break
+            end
+        end
+    end
+    if orderChanged then
+        -- One ListBoxSetDisplayOrder triggers XML populationfunction (UpdateRows).
+        StockPiler2TabWatch._rowPaintKey = {}
+        StockPiler2TabWatch._rowIconNum = {}
+        ListBoxSetDisplayOrder("SP2TabWatchList", order or {})
+    else
         StockPiler2TabWatch.UpdateRows()
     end
 end
@@ -354,60 +390,99 @@ function StockPiler2TabWatch.UpdateRows()
     if SP2TabWatchList.PopulatorIndices == nil then
         return
     end
+    local Perf = StockPiler2.Perf
+    if Perf and Perf.Begin then
+        Perf.Begin("WatchRows")
+    end
+    StockPiler2TabWatch._rowPaintKey = StockPiler2TabWatch._rowPaintKey or {}
+    local canGrow = CanAutoGrowUi()
     for rowIndex, dataIndex in ipairs(SP2TabWatchList.PopulatorIndices) do
         local data = StockPiler2TabWatch.listData[dataIndex]
         if data then
             local rowName = "SP2TabWatchListRow" .. rowIndex
-            if DefaultColor and DefaultColor.SetListRowTint then
-                DefaultColor.SetListRowTint(rowName .. "Background", rowIndex, false)
+            local brewState = "idle"
+            if StockPiler2.Brew and StockPiler2.Brew.GetRowCraftUiState then
+                brewState = StockPiler2.Brew.GetRowCraftUiState(data) or "idle"
             end
-            SetIconTexture(rowName .. "Icon", data.iconNum)
-            LabelSetText(rowName .. "Name", data.name or L"")
-            LabelSetText(rowName .. "Status", data.statusText or L"")
-            LabelSetText(rowName .. "Stock", data.stockText or towstring(tostring(data.potionHave or 0)))
-            LabelSetText(rowName .. "Craftable", data.craftableText or L"-")
-            LabelSetText(rowName .. "Target", data.targetText or towstring(tostring(data.target or 0)))
-            TintStepper(rowName .. "TargetChipBg")
-            ApplyStatusColor(rowName .. "Status", data.statusKey)
-            local autoGrowWin = rowName .. "AutoGrow"
-            if DoesWindowExist(autoGrowWin) then
-                local can = CanAutoGrowUi()
-                syncingUi = true
-                ButtonSetCheckButtonFlag(autoGrowWin, true)
-                ButtonSetPressedFlag(autoGrowWin, can and data.autoGrow == true)
-                ButtonSetDisabledFlag(autoGrowWin, not can)
-                syncingUi = false
-            end
-            -- Target chip always white (same as header chips)
-            LabelSetTextColor(rowName .. "Target", 255, 255, 255)
-
-            local target = tonumber(data.target) or 0
-            local have = tonumber(data.potionHave) or 0
-            local craftable = tonumber(data.craftable) or 0
-            local stockColor = { 255, 255, 255 }
-            if target > 0 then
-                if have >= target then
-                    stockColor = COLOR_OK
-                elseif (have + craftable) >= target then
-                    stockColor = COLOR_WARN
-                else
-                    stockColor = COLOR_BLOCK
+            local paintKey = table.concat({
+                tostring(data.iconNum or 0),
+                tostring(data.name or ""),
+                tostring(data.statusText or ""),
+                tostring(data.stockText or data.potionHave or 0),
+                tostring(data.craftableText or ""),
+                tostring(data.targetText or data.target or 0),
+                tostring(data.statusKey or ""),
+                tostring(data.autoGrow == true),
+                tostring(data.craftableShared == true),
+                tostring(brewState),
+                tostring(canGrow),
+            }, "|")
+            if StockPiler2TabWatch._rowPaintKey[rowIndex] == paintKey then
+                -- unchanged
+            else
+                StockPiler2TabWatch._rowPaintKey[rowIndex] = paintKey
+                if DefaultColor and DefaultColor.SetListRowTint then
+                    DefaultColor.SetListRowTint(rowName .. "Background", rowIndex, false)
                 end
-            end
-            LabelSetTextColor(rowName .. "Stock", stockColor[1], stockColor[2], stockColor[3])
-
-            local craftColor = COLOR_BLOCK
-            if craftable > 0 then
-                if data.craftableShared == true then
-                    craftColor = COLOR_WARN
-                else
-                    craftColor = COLOR_OK
+                local iconWin = rowName .. "Icon"
+                local lastIcon = StockPiler2TabWatch._rowIconNum
+                if type(lastIcon) ~= "table" then
+                    lastIcon = {}
+                    StockPiler2TabWatch._rowIconNum = lastIcon
                 end
-            end
-            LabelSetTextColor(rowName .. "Craftable", craftColor[1], craftColor[2], craftColor[3])
+                if lastIcon[rowIndex] ~= data.iconNum then
+                    lastIcon[rowIndex] = data.iconNum
+                    SetIconTexture(iconWin, data.iconNum)
+                end
+                LabelSetText(rowName .. "Name", data.name or L"")
+                LabelSetText(rowName .. "Status", data.statusText or L"")
+                LabelSetText(rowName .. "Stock", data.stockText or towstring(tostring(data.potionHave or 0)))
+                LabelSetText(rowName .. "Craftable", data.craftableText or L"-")
+                LabelSetText(rowName .. "Target", data.targetText or towstring(tostring(data.target or 0)))
+                TintStepper(rowName .. "TargetChipBg")
+                ApplyStatusColor(rowName .. "Status", data.statusKey)
+                local autoGrowWin = rowName .. "AutoGrow"
+                if DoesWindowExist(autoGrowWin) then
+                    syncingUi = true
+                    ButtonSetCheckButtonFlag(autoGrowWin, true)
+                    ButtonSetPressedFlag(autoGrowWin, canGrow and data.autoGrow == true)
+                    ButtonSetDisabledFlag(autoGrowWin, not canGrow)
+                    syncingUi = false
+                end
+                -- Target chip always white (same as header chips)
+                LabelSetTextColor(rowName .. "Target", 255, 255, 255)
 
-            ApplyRowBrewButton(rowName .. "Load", data)
+                local target = tonumber(data.target) or 0
+                local have = tonumber(data.potionHave) or 0
+                local craftable = tonumber(data.craftable) or 0
+                local stockColor = { 255, 255, 255 }
+                if target > 0 then
+                    if have >= target then
+                        stockColor = COLOR_OK
+                    elseif (have + craftable) >= target then
+                        stockColor = COLOR_WARN
+                    else
+                        stockColor = COLOR_BLOCK
+                    end
+                end
+                LabelSetTextColor(rowName .. "Stock", stockColor[1], stockColor[2], stockColor[3])
+
+                local craftColor = COLOR_BLOCK
+                if craftable > 0 then
+                    if data.craftableShared == true then
+                        craftColor = COLOR_WARN
+                    else
+                        craftColor = COLOR_OK
+                    end
+                end
+                LabelSetTextColor(rowName .. "Craftable", craftColor[1], craftColor[2], craftColor[3])
+
+                ApplyRowBrewButton(rowName .. "Load", data)
+            end
         end
+    end
+    if Perf and Perf.End then
+        Perf.End("WatchRows")
     end
 end
 

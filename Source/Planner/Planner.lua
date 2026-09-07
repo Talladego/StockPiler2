@@ -70,7 +70,30 @@ local RED_STATUS_KEYS = {
     need_materials = true,
 }
 
+-- True-green Watch statuses (not shared/yellow).
+local TRUE_GREEN_STATUS_KEYS = {
+    potion_stocked = true,
+    ready_to_craft = true,
+}
+
+-- Player must act; AutoGrow cannot clear these by planting.
+local PLAYER_ACTION_STATUS_KEYS = {
+    buy_ingredients = true,
+    need_materials = true,
+    enable_autogrow = true,
+    need_apothecary = true,
+}
+
 Planner._watchBlockOnceKeys = Planner._watchBlockOnceKeys or {}
+Planner._growIdleBlockOnceKey = Planner._growIdleBlockOnceKey or nil
+
+local function PlayNotifySound(soundId)
+    if StockPiler2.Debug and StockPiler2.Debug.PlayUiSound then
+        StockPiler2.Debug.PlayUiSound(soundId)
+    elseif type(PlaySound) == "function" and soundId ~= nil then
+        pcall(PlaySound, soundId)
+    end
+end
 
 local function NotifyWatchRedBlocks(rows)
     local D = StockPiler2.Debug
@@ -105,6 +128,117 @@ local function NotifyWatchRedBlocks(rows)
         end
     end
     Planner._watchBlockOnceKeys = now
+end
+
+--- Once when every enabled plan row is true green; clear when any leaves.
+--- Also wait for Seed Buffer — same gate as brew-ready / AutoGrow idle.
+local function NotifyAllWatchesReady(rows)
+    local D = StockPiler2.Debug
+    if not D then
+        return
+    end
+    local Grow = StockPiler2.Grow
+    if Grow and Grow.IsSeedBufferSatisfied and Grow.IsSeedBufferSatisfied() ~= true then
+        if D.ClearNotifyOnce then
+            D.ClearNotifyOnce("watches-all-ready")
+        end
+        return
+    end
+    local any = false
+    local allGreen = true
+    for i = 1, #rows do
+        local row = rows[i]
+        if type(row) == "table" then
+            any = true
+            local statusKey = tostring(row.statusKey or "")
+            if TRUE_GREEN_STATUS_KEYS[statusKey] ~= true then
+                allGreen = false
+                break
+            end
+        end
+    end
+    if any and allGreen then
+        local printed = false
+        if D.NotifyOnce then
+            printed = D.NotifyOnce("watches-all-ready", L"All watches ready to craft.") == true
+        elseif D.Notify then
+            D.Notify(L"All watches ready to craft.")
+            printed = true
+        end
+        if printed then
+            local soundId = GameData and GameData.Sound and GameData.Sound.HELP_TIPS_HIGHTLIGHT_WINDOW
+            PlayNotifySound(soundId)
+        end
+    elseif D.ClearNotifyOnce then
+        D.ClearNotifyOnce("watches-all-ready")
+    end
+end
+
+--- Once when AutoGrow is action-idle but watches still need player actions.
+local function NotifyAutoGrowIdleBlocked(rows)
+    local D = StockPiler2.Debug
+    if not D then
+        return
+    end
+    local prevKey = Planner._growIdleBlockOnceKey
+    local function clearPrev()
+        if prevKey ~= nil and prevKey ~= "" and D.ClearNotifyOnce then
+            D.ClearNotifyOnce(prevKey)
+        end
+        Planner._growIdleBlockOnceKey = nil
+    end
+    local Grow = StockPiler2.Grow
+    if not (Grow and Grow.IsActionIdle and Grow.IsActionIdle() == true) then
+        clearPrev()
+        return
+    end
+    local keySet = {}
+    local texts = {}
+    local seenText = {}
+    for i = 1, #rows do
+        local row = rows[i]
+        if type(row) == "table" then
+            local statusKey = tostring(row.statusKey or "")
+            if PLAYER_ACTION_STATUS_KEYS[statusKey] == true then
+                keySet[statusKey] = true
+                local narrow = ToNarrow(row.statusText)
+                if narrow == "" then
+                    narrow = statusKey
+                end
+                if seenText[narrow] ~= true then
+                    seenText[narrow] = true
+                    texts[#texts + 1] = narrow
+                end
+            end
+        end
+    end
+    local fpParts = {}
+    for statusKey in pairs(keySet) do
+        fpParts[#fpParts + 1] = statusKey
+    end
+    if #fpParts == 0 or #texts == 0 then
+        clearPrev()
+        return
+    end
+    table.sort(fpParts)
+    local onceKey = "grow-idle-blocked:" .. table.concat(fpParts, ",")
+    if prevKey ~= nil and prevKey ~= onceKey and D.ClearNotifyOnce then
+        D.ClearNotifyOnce(prevKey)
+    end
+    Planner._growIdleBlockOnceKey = onceKey
+    local summary = table.concat(texts, "; ")
+    local msg = L"AutoGrow idle: " .. towstring(summary) .. L"."
+    local printed = false
+    if D.NotifyOnce then
+        printed = D.NotifyOnce(onceKey, msg) == true
+    elseif D.Notify then
+        D.Notify(msg)
+        printed = true
+    end
+    if printed then
+        local soundId = GameData and GameData.Sound and GameData.Sound.HELP_TIPS_NEW
+        PlayNotifySound(soundId)
+    end
 end
 
 local function CompareGrowPriority(a, b)
@@ -734,6 +868,8 @@ function Planner.BuildWatchRows(ctx)
         Perf.End("Build.Tips")
     end
     NotifyWatchRedBlocks(rows)
+    NotifyAllWatchesReady(rows)
+    NotifyAutoGrowIdleBlocked(rows)
     return rows
 end
 
@@ -833,6 +969,17 @@ function Planner.GetOrBuild(opts)
         if type(cached) == "table" then
             return cached
         end
+    end
+    -- Hot paths (footer CanBrewNow, Watch list): never sync-build; enqueue and return stale.
+    if opts.refresh == false then
+        if Sch and Sch.EnqueuePlanRebuild then
+            Sch.EnqueuePlanRebuild()
+        end
+        local stale = PS and PS.Get and PS.Get()
+        if type(stale) == "table" then
+            return stale
+        end
+        return nil
     end
     return Planner.Build(opts)
 end

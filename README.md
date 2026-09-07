@@ -2,7 +2,7 @@
 
 Greenfield rewrite of StockPiler using an **Orchestrator + Stores + Planner + Executors** architecture. Runs as a **separate addon** alongside v1 — does not modify the original StockPiler folder.
 
-**Version:** 0.4.58
+**Version:** 0.4.62
 
 Repository: [Talladego/StockPiler2](https://github.com/Talladego/StockPiler2)
 
@@ -135,6 +135,14 @@ On each user-facing ship, bump together:
 | **Major** (`N+1.0.0`) | Breaking saved-var / architecture break (rare in 0.x) |
 
 ## Changelog
+
+**0.4.62:** Fix — Brew ready chat/sound and footer Brew tooltip follow `CanBrewNow` (no “Click to load” / chime while button is grey from op-lock or crafting-in-progress).
+
+**0.4.61:** Fix — Brew ready / all-watches-ready / AutoGrow-idle chat wait until Seed Buffer is satisfied; hold brew load while buffer is still short or refining (avoids false ready after buffer eats brew mats).
+
+**0.4.60:** Ops chat — AutoBuy visit summary (what was bought + reserve/budget/cap stop); NotifyOnce when all watches are true green (ready to craft / stocked); NotifyOnce when AutoGrow is action-idle but watches still need player actions (buy flasks / skill gates).
+
+**0.4.59:** Perf — craft/cultivation footer once per frame; CanBrewNow frame memo; harvest readiness from Garden store; Watch list single paint + row paint-key skip; idle Refine negative-intent cache; GetOrBuild(refresh=false) never sync-builds; Garden.SyncAll coalesced once/frame; SnapshotPotionCounts from L0 counts; Buy per-visit store index; drop bag-due trail hold / dead section timing; Marks for ApplySlots/Footer/WatchRows/BrewUi/ApoCapture.
 
 **0.4.58:** Fix — AutoGrow keeps ticking in combat/RvR (combat only defers bag Flatten, not Orch/plan); Watch list keeps last good rows when plan is nil/pending; open-window Watch UI catch-up no longer skipped for fill-burst.
 

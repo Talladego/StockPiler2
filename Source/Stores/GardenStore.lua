@@ -8,6 +8,9 @@ local Garden = StockPiler2.Garden
 Garden._gen = 0
 Garden._planGen = 0
 Garden._plots = {}
+Garden._syncAllDue = false
+Garden._syncAllFrame = 0
+Garden._lastFiredGen = 0
 
 function Garden.GetGen()
     return tonumber(Garden._gen) or 0
@@ -74,7 +77,36 @@ function Garden.GetPlotsCopy()
     return out
 end
 
+local function FireGardenChanged(gardenGen, plotNum)
+    gardenGen = tonumber(gardenGen) or 0
+    if gardenGen <= 0 then
+        return
+    end
+    -- One SNAPSHOT + one DIRTY per gen (Ui listens to SNAPSHOT; Scheduler to DIRTY).
+    if (tonumber(Garden._lastFiredGen) or 0) == gardenGen then
+        return
+    end
+    Garden._lastFiredGen = gardenGen
+    local B = StockPiler2.EventBus
+    local E = StockPiler2.Events
+    if not (B and E) then
+        return
+    end
+    if E.GARDEN_SNAPSHOT then
+        B.Fire(E.GARDEN_SNAPSHOT, { gardenGen = gardenGen })
+    end
+    if E.GARDEN_DIRTY then
+        B.Fire(E.GARDEN_DIRTY, { gardenGen = gardenGen, plotNum = plotNum })
+    end
+end
+
 function Garden.SyncAll()
+    local frame = tonumber(StockPiler2.FrameCounter) or 0
+    if frame > 0 and Garden._syncAllFrame == frame then
+        return
+    end
+    Garden._syncAllFrame = frame
+    Garden._syncAllDue = false
     local Perf = StockPiler2.Perf
     if Perf and Perf.Begin then
         Perf.Begin("Garden.SyncAll")
@@ -104,15 +136,39 @@ function Garden.SyncAll()
         if planChanged then
             Garden._planGen = (tonumber(Garden._planGen) or 0) + 1
         end
-        local B = StockPiler2.EventBus
-        local E = StockPiler2.Events
-        if B and E and E.GARDEN_SNAPSHOT then
-            B.Fire(E.GARDEN_SNAPSHOT, { gardenGen = Garden._gen })
-        end
+        FireGardenChanged(Garden._gen, 0)
     end
     if Perf and Perf.End then
         Perf.End("Garden.SyncAll")
     end
+end
+
+--- Single-plot write (plant path); avoids UpdatedIndex==0 SyncAll re-entry.
+function Garden.SyncPlot(plotNum)
+    plotNum = tonumber(plotNum) or 0
+    if plotNum <= 0 or not StockPiler2.CultivatorAdapter then
+        return
+    end
+    local genBefore = tonumber(Garden._gen) or 0
+    local planGenBefore = tonumber(Garden._planGen) or 0
+    local row = StockPiler2.CultivatorAdapter.ReadPlot(plotNum)
+    local anyChange, planChange = ApplyPlotRow(plotNum, row)
+    if anyChange then
+        Garden._gen = genBefore + 1
+    end
+    if planChange then
+        Garden._planGen = planGenBefore + 1
+    end
+    if (tonumber(Garden._gen) or 0) > genBefore then
+        FireGardenChanged(Garden._gen, plotNum)
+    end
+end
+
+function Garden.FlushPendingSyncAll()
+    if Garden._syncAllDue ~= true then
+        return
+    end
+    Garden.SyncAll()
 end
 
 function Garden.OnCultivationUpdated()
@@ -131,14 +187,11 @@ function Garden.OnCultivationUpdated()
         if planChange then
             Garden._planGen = planGenBefore + 1
         end
-    else
-        Garden.SyncAll()
-    end
-    if (tonumber(Garden._gen) or 0) > genBefore then
-        local B = StockPiler2.EventBus
-        local E = StockPiler2.Events
-        if B and E and E.GARDEN_DIRTY then
-            B.Fire(E.GARDEN_DIRTY, { gardenGen = Garden._gen, plotNum = plotNum })
+        if (tonumber(Garden._gen) or 0) > genBefore then
+            FireGardenChanged(Garden._gen, plotNum)
         end
+    else
+        -- UpdatedIndex==0 storms: coalesce to once per UPDATE_PROCESSED.
+        Garden._syncAllDue = true
     end
 end

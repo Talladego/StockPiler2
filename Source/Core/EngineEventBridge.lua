@@ -8,6 +8,9 @@ local Bridge = StockPiler2.EngineEventBridge
 Bridge._registered = false
 Bridge._handlers = {}
 
+--- Monotonic frame counter (bumped at start of UPDATE_PROCESSED).
+StockPiler2.FrameCounter = tonumber(StockPiler2.FrameCounter) or 0
+
 local function E()
     return SystemData and SystemData.Events
 end
@@ -19,7 +22,20 @@ local function BusFire(name, payload)
     end
 end
 
+local function RequestFooterIfOpen()
+    if StockPiler2Window and StockPiler2Window.RequestFooterRefresh
+        and DoesWindowExist("StockPiler2Window")
+        and WindowGetShowing("StockPiler2Window") == true
+    then
+        StockPiler2Window.RequestFooterRefresh()
+    end
+end
+
 function Bridge.OnInventoryUpdated(updatedSlots)
+    local Perf = StockPiler2.Perf
+    if Perf and Perf.Begin then
+        Perf.Begin("Inv.ApplySlots")
+    end
     if StockPiler2.LearnBridge and StockPiler2.LearnBridge.OnInventoryUpdated then
         StockPiler2.LearnBridge.OnInventoryUpdated()
     end
@@ -28,9 +44,16 @@ function Bridge.OnInventoryUpdated(updatedSlots)
     else
         StockPiler2.Inventory.MarkDirty({ reason = "engine-inventory", full = true })
     end
+    if Perf and Perf.End then
+        Perf.End("Inv.ApplySlots")
+    end
 end
 
 function Bridge.OnCraftingSlotUpdated(updatedSlots)
+    local Perf = StockPiler2.Perf
+    if Perf and Perf.Begin then
+        Perf.Begin("Inv.ApplySlots")
+    end
     if StockPiler2.LearnBridge and StockPiler2.LearnBridge.OnInventoryUpdated then
         StockPiler2.LearnBridge.OnInventoryUpdated()
     end
@@ -38,6 +61,9 @@ function Bridge.OnCraftingSlotUpdated(updatedSlots)
         StockPiler2.Inventory.ApplySlotUpdates("craft", updatedSlots, "engine-crafting-slot")
     else
         StockPiler2.Inventory.MarkDirty({ reason = "engine-crafting-slot", full = true })
+    end
+    if Perf and Perf.End then
+        Perf.End("Inv.ApplySlots")
     end
     if StockPiler2.Brew and StockPiler2.Brew.OnCraftingUpdated then
         StockPiler2.Brew.OnCraftingUpdated()
@@ -60,12 +86,7 @@ function Bridge.OnCraftingUpdated()
     if StockPiler2.Brew and StockPiler2.Brew.OnCraftingUpdated then
         StockPiler2.Brew.OnCraftingUpdated()
     end
-    if StockPiler2Window and StockPiler2Window.RefreshFooterButtons
-        and DoesWindowExist("StockPiler2Window")
-        and WindowGetShowing("StockPiler2Window") == true
-    then
-        StockPiler2Window.RefreshFooterButtons()
-    end
+    RequestFooterIfOpen()
 end
 
 function Bridge.OnCultivationUpdated()
@@ -85,13 +106,8 @@ function Bridge.OnCultivationUpdated()
     if StockPiler2.LearnBridge and StockPiler2.LearnBridge.OnCultivationUpdated then
         StockPiler2.LearnBridge.OnCultivationUpdated()
     end
-    -- Harvest footer enable/disable must track plot stage without waiting for Watch list debounce.
-    if StockPiler2Window and StockPiler2Window.RefreshFooterButtons
-        and DoesWindowExist("StockPiler2Window")
-        and WindowGetShowing("StockPiler2Window") == true
-    then
-        StockPiler2Window.RefreshFooterButtons()
-    end
+    -- Coalesce footer (harvest readiness) to once per UPDATE_PROCESSED.
+    RequestFooterIfOpen()
     -- Seedling / Flowering unlocks Water / Nutrient — wake AutoGrow so orch ticks.
     if StockPiler2.Grow and StockPiler2.Grow.NeedsCurrentStageAdditive
         and StockPiler2.Grow.NeedsCurrentStageAdditive()
@@ -119,9 +135,14 @@ function Bridge.OnLoadingEnd()
 end
 
 function Bridge.OnUpdateProcessed(timeElapsed)
+    StockPiler2.FrameCounter = (tonumber(StockPiler2.FrameCounter) or 0) + 1
     -- Attribute previous frame hitch to trail left by last tick's work.
     if StockPiler2.Perf and StockPiler2.Perf.OnFrame then
         StockPiler2.Perf.OnFrame(timeElapsed)
+    end
+    -- Drain coalesced Garden.SyncAll (UpdatedIndex==0 storms) once per frame.
+    if StockPiler2.Garden and StockPiler2.Garden.FlushPendingSyncAll then
+        StockPiler2.Garden.FlushPendingSyncAll()
     end
     -- Publish one snapGen for all L0 AdjustUid this frame before refine/plan.
     if StockPiler2.Inventory and StockPiler2.Inventory.FlushPendingSnapGen then
@@ -129,6 +150,9 @@ function Bridge.OnUpdateProcessed(timeElapsed)
     end
     if StockPiler2.Macro and StockPiler2.Macro.DrainEnabledSync then
         StockPiler2.Macro.DrainEnabledSync()
+    end
+    if StockPiler2Window and StockPiler2Window.FlushPendingFooterRefresh then
+        StockPiler2Window.FlushPendingFooterRefresh()
     end
     if StockPiler2.LearnBridge and StockPiler2.LearnBridge.OnUpdateProcessed then
         StockPiler2.LearnBridge.OnUpdateProcessed()
