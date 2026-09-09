@@ -6,6 +6,13 @@ StockPiler2.MaterialSpec = StockPiler2.MaterialSpec or {}
 
 local MS = StockPiler2.MaterialSpec
 
+local function T(key, tokens)
+    if StockPiler2.T then
+        return StockPiler2.T(key, tokens)
+    end
+    return L"[" .. towstring(tostring(key or "")) .. L"]"
+end
+
 local function ToNarrow(text)
     return StockPiler2.ToNarrow(text)
 end
@@ -65,23 +72,79 @@ local function SlotTypeConstants()
     }
 end
 
+local function AddBonusValue(bonuses, ref, val)
+    ref = tonumber(ref) or 0
+    if ref <= 0 or val == nil then
+        return
+    end
+    if bonuses[ref] == nil then
+        bonuses[ref] = {}
+    end
+    bonuses[ref][#bonuses[ref] + 1] = SignedBonus(val)
+end
+
 local function ParseBonuses(itemData)
     local bonuses = {}
-    if type(itemData) ~= "table" or type(itemData.craftingBonus) ~= "table" then
+    if type(itemData) ~= "table" then
         return bonuses
     end
-    for _, bonus in ipairs(itemData.craftingBonus) do
-        if type(bonus) == "table" then
-            local ref = tonumber(bonus.bonusReference) or 0
-            if ref > 0 then
-                if bonuses[ref] == nil then
-                    bonuses[ref] = {}
+    -- Array form from bag DataUtils (bonusReference / bonusValue).
+    if type(itemData.craftingBonus) == "table" then
+        for _, bonus in ipairs(itemData.craftingBonus) do
+            if type(bonus) == "table" then
+                AddBonusValue(bonuses, bonus.bonusReference, bonus.bonusValue)
+            end
+        end
+    end
+    -- Map form on many craft items: CraftItemInfo[ref] = { value } (often has TYPE/
+    -- LEVEL/STAB/POWER when craftingBonus is empty or EFFECT-less).
+    if type(itemData.CraftItemInfo) == "table" then
+        for ref, vals in pairs(itemData.CraftItemInfo) do
+            local nref = tonumber(ref) or 0
+            if nref > 0 and bonuses[nref] == nil then
+                if type(vals) == "table" then
+                    AddBonusValue(bonuses, nref, vals[1])
+                else
+                    AddBonusValue(bonuses, nref, vals)
                 end
-                bonuses[ref][#bonuses[ref] + 1] = SignedBonus(bonus.bonusValue)
+            end
+        end
+    end
+    -- Engine API fallback when both tables are thin.
+    if next(bonuses) == nil
+        and type(CraftItemInfo) == "table"
+        and type(CraftItemInfo.GetItemBonuses) == "function"
+    then
+        local ok, vData = StockPiler2.TryCallQuiet(
+            "CraftItemInfo.GetItemBonuses",
+            CraftItemInfo.GetItemBonuses,
+            itemData
+        )
+        if ok and type(vData) == "table" then
+            for ref, vals in pairs(vData) do
+                local nref = tonumber(ref) or 0
+                if nref > 0 and type(vals) == "table" then
+                    AddBonusValue(bonuses, nref, vals[1])
+                end
             end
         end
     end
     return bonuses
+end
+
+--- Normalize SavedVariables string keys ("1") to numeric refs for BonusMatch.
+local function NormalizeBonusKeys(bonuses)
+    if type(bonuses) ~= "table" then
+        return {}
+    end
+    local out = {}
+    for k, v in pairs(bonuses) do
+        local nref = tonumber(k)
+        if nref and nref > 0 and v ~= nil then
+            out[nref] = v
+        end
+    end
+    return out
 end
 
 local function FirstBonus(bonuses, ref)
@@ -239,61 +302,6 @@ local EFFECT_KEY_TO_ID = {
     movespeed = 1110,
 }
 
-local EFFECT_ID_TO_NAME = {
-    heal = L"Healing",
-    regen = L"Restoration",
-    hot = L"Restoration",
-    ap = L"Energy",
-    str = L"Strength",
-    int = L"Intelligence",
-    wil = L"Willpower",
-    wp = L"Willpower",
-    tou = L"Toughness",
-    rskill = L"Ballistic Skill",
-    bs = L"Ballistic Skill",
-    shabs = L"Absorb Shield",
-    absorb = L"Absorb Shield",
-    arm = L"Armor",
-    armor = L"Armor",
-    rcorp = L"Corporeal Resist",
-    rele = L"Elemental Resist",
-    rspi = L"Spirit Resist",
-    shdmg = L"Thorn Shield",
-    dmg = L"Molotov",
-    dmgaoe = L"Napalm",
-    dmgcone = L"Flaming Breath",
-    snare = L"Snare",
-    hytoucrit = L"Toughness+Melee Crit",
-    hystrmelee = L"Strength+Melee",
-    hywillheal = L"Willpower+Healing",
-    hystrheal = L"Strength+Healing",
-    hyintmcrit = L"Intelligence+Magic Crit",
-    hyaccrcrit = L"Ballistics+Ranged Crit",
-    hywoumelee = L"Wounds+Melee",
-    hywoucrit = L"Wounds+Melee Crit",
-    hywoumcrit = L"Wounds+Magic Crit",
-    hywourcrit = L"Wounds+Ranged Crit",
-    hywouheal = L"Wounds+Healing",
-    hywoustr = L"Wounds+Strength",
-    hyresist = L"All resists",
-    hywouarmpen = L"Wounds+Reduced armor pen.",
-    hywouinit = L"Wounds+Initiative",
-    hytounocrit = L"Toughness+Reduced chance to be Crit",
-    hyhpregencritdmg = L"Healthregen+Reduced Crit Dmg",
-    hywsarmpen = L"Weapon Skill+Reduced armor pen.",
-    hywsnocrit = L"Weapon Skill+Reduced chance to be Crit",
-    trapoth = L"Apothecary Skill",
-    trcult = L"Cultivation Skill",
-    trsalv = L"Magical Salvaging Skill",
-    trtal = L"Talisman Making Skill",
-    rez = L"Resurrection",
-    morale = L"Morale Gain",
-    autoheal = L"Reactive Heal",
-    freecast = L"Free Cast Chance",
-    pet = L"Summon Pet",
-    movespeed = L"Move Speed",
-}
-
 local DESC_EFFECT_PATTERNS = {
     { "intelligence", "int" },
     { "strength", "str" },
@@ -441,8 +449,8 @@ function MS.EffectKeyFromEffectId(effectId)
     return EFFECT_ID_TO_KEY[effectId]
 end
 
---- Parse once per snapshot item + role. Matches used to call FromItemData
---- on every bag item for every recipe spec (~1s BuildPlan after harvest).
+--- Parse once per uid + role. Keys by uniqueID (not item table identity) so
+--- Flatten/slot rebuilds do not pin every historical itemData object forever.
 function MS.FromItemDataCached(itemData, roleHint)
     if type(itemData) ~= "table" then
         return nil
@@ -451,16 +459,20 @@ function MS.FromItemDataCached(itemData, roleHint)
     if type(inv) ~= "table" then
         return MS.FromItemData(itemData, roleHint)
     end
+    local uid = tonumber(itemData.uniqueID) or 0
+    if uid <= 0 then
+        return MS.FromItemData(itemData, roleHint)
+    end
     local cache = inv._specParseCache
     if type(cache) ~= "table" then
         cache = {}
         inv._specParseCache = cache
     end
     local role = roleHint or ""
-    local byRole = cache[itemData]
+    local byRole = cache[uid]
     if type(byRole) ~= "table" then
         byRole = {}
-        cache[itemData] = byRole
+        cache[uid] = byRole
     end
     local hit = byRole[role]
     if hit == false then
@@ -534,8 +546,13 @@ function MS.Copy(spec)
     end
     local bonuses = {}
     if type(spec.bonuses) == "table" then
-        for k, v in pairs(spec.bonuses) do
-            bonuses[k] = v
+        -- Prefer numeric refs so BonusMatch / Key stay stable after SavedVariables.
+        if NormalizeBonusKeys then
+            bonuses = NormalizeBonusKeys(spec.bonuses)
+        else
+            for k, v in pairs(spec.bonuses) do
+                bonuses[k] = v
+            end
         end
     end
     return {
@@ -611,6 +628,8 @@ function MS.Matches(itemData, spec)
     if other == nil or other.incomplete == true then
         return false
     end
+    local otherBonuses = NormalizeBonusKeys(other.bonuses)
+    local specBonuses = NormalizeBonusKeys(spec.bonuses)
     local role = spec.role or other.role or "ingredient"
     if tonumber(other.tradeSkill) ~= tonumber(spec.tradeSkill) then
         return false
@@ -631,10 +650,10 @@ function MS.Matches(itemData, spec)
         end
         -- Liniment / hybrid mains share slot+fx families; stab/power separate powders.
         local B = CraftBonusRefs()
-        if not BonusMatch(other.bonuses, spec.bonuses, B.STABILITY) then
+        if not BonusMatch(otherBonuses, specBonuses, B.STABILITY) then
             return false
         end
-        if not BonusMatch(other.bonuses, spec.bonuses, B.POWER) then
+        if not BonusMatch(otherBonuses, specBonuses, B.POWER) then
             return false
         end
         return true
@@ -654,10 +673,10 @@ function MS.Matches(itemData, spec)
                 return false
             end
         end
-        if not BonusMatch(other.bonuses, spec.bonuses, B.STABILITY) then
+        if not BonusMatch(otherBonuses, specBonuses, B.STABILITY) then
             return false
         end
-        if not BonusMatch(other.bonuses, spec.bonuses, B.MULTIPLIER) then
+        if not BonusMatch(otherBonuses, specBonuses, B.MULTIPLIER) then
             return false
         end
         return true
@@ -667,10 +686,10 @@ function MS.Matches(itemData, spec)
             return false
         end
         local B = CraftBonusRefs()
-        if role == "extender" and not BonusMatch(other.bonuses, spec.bonuses, B.DURATION) then
+        if role == "extender" and not BonusMatch(otherBonuses, specBonuses, B.DURATION) then
             return false
         end
-        if role == "multiplier" and not BonusMatch(other.bonuses, spec.bonuses, B.MULTIPLIER) then
+        if role == "multiplier" and not BonusMatch(otherBonuses, specBonuses, B.MULTIPLIER) then
             return false
         end
         return true
@@ -730,10 +749,14 @@ function MS.AsApothecaryProduct(specOrItem, roleHint)
     if IsMaterialSpec(specOrItem) then
         spec = MS.Copy(specOrItem)
     else
-        spec = MS.FromItemDataCached(specOrItem, roleHint)
+        -- Copy: never mutate FromItemDataCached entries in place.
+        spec = MS.Copy(MS.FromItemDataCached(specOrItem, roleHint))
     end
     if type(spec) ~= "table" then
         return nil
+    end
+    if type(spec.bonuses) == "table" then
+        spec.bonuses = NormalizeBonusKeys(spec.bonuses)
     end
     if roleHint and roleHint ~= "" then
         spec.role = roleHint
@@ -752,8 +775,26 @@ function MS.ProductKey(specOrItem, roleHint)
 end
 
 --- Incomplete bag mains (powders / Primals) omit EFFECT; brew learn stamps Items[uid].
+--- Also used when description stamped fx but CraftItemInfo/TYPE was missing (slotType 0).
+local function MainProductNeedsEnrichment(product)
+    if type(product) ~= "table" or product.role ~= "main" then
+        return false
+    end
+    if product.incomplete == true then
+        return true
+    end
+    if (tonumber(product.slotType) or 0) <= 0 then
+        return true
+    end
+    local B = CraftBonusRefs()
+    if type(product.bonuses) ~= "table" or product.bonuses[B.STABILITY] == nil then
+        return true
+    end
+    return false
+end
+
 local function EnrichIncompleteProductFromLearnedItems(product, itemData)
-    if type(product) ~= "table" or product.incomplete ~= true then
+    if type(product) ~= "table" or not MainProductNeedsEnrichment(product) then
         return product
     end
     if product.role ~= "main" or not MS.ApplyMainEffectId then
@@ -774,23 +815,116 @@ local function EnrichIncompleteProductFromLearnedItems(product, itemData)
     if effectId <= 0 then
         return product
     end
-    local enriched = MS.Copy(product)
+    -- Prefer the learned complete fingerprint for this uid (bag CraftItemInfo often
+    -- omits EFFECT; description-only parse can mark complete with slotType 0).
+    local enriched = MS.Copy(learned)
     if type(enriched) ~= "table" then
         return product
     end
-    MS.ApplyMainEffectId(enriched, effectId)
-    -- Fill missing stab/power from the learned row when bag parse was thin.
-    if type(learned.bonuses) == "table" then
-        if type(enriched.bonuses) ~= "table" then
-            enriched.bonuses = {}
-        end
-        for k, v in pairs(learned.bonuses) do
+    enriched.bonuses = NormalizeBonusKeys(enriched.bonuses)
+    enriched.role = "main"
+    enriched.incomplete = false
+    enriched.effectId = effectId
+    if type(enriched.bonuses) ~= "table" then
+        enriched.bonuses = {}
+    end
+    enriched.bonuses[CraftBonusRefs().EFFECT] = effectId
+    -- Fill any holes from the bag parse (live stab/power if learned was thin).
+    if type(product.bonuses) == "table" then
+        for k, v in pairs(NormalizeBonusKeys(product.bonuses)) do
             if enriched.bonuses[k] == nil then
                 enriched.bonuses[k] = v
             end
         end
     end
+    if (tonumber(enriched.slotType) or 0) <= 0 and (tonumber(product.slotType) or 0) > 0 then
+        enriched.slotType = product.slotType
+    end
+    if (tonumber(enriched.skillLevel) or 0) <= 0 and (tonumber(product.skillLevel) or 0) > 0 then
+        enriched.skillLevel = product.skillLevel
+    end
     return enriched
+end
+
+--- Cultivated plant products (not Primals/powders). Seed/spore items excluded.
+local function ItemLooksCultivatedPlant(itemData)
+    if type(itemData) ~= "table" then
+        return false
+    end
+    if StockPiler2.Inventory and StockPiler2.Inventory.IsSeedOrSporeItem
+        and StockPiler2.Inventory.IsSeedOrSporeItem(itemData) == true
+    then
+        return false
+    end
+    if itemData.isRefinable == true then
+        return true
+    end
+    local uid = tonumber(itemData.uniqueID) or 0
+    if uid > 0 and StockPiler2.SeedMap and StockPiler2.SeedMap.GetSeedUidsForPlant then
+        local mapped = StockPiler2.SeedMap.GetSeedUidsForPlant(uid)
+        if type(mapped) == "table" and #mapped > 0 then
+            return true
+        end
+    end
+    return false
+end
+
+--- Complete thin/incomplete bag mains for ProductMatches without pooling Primals.
+local function EnrichThinMainForMatch(product, itemData, target)
+    if type(product) ~= "table" or not MainProductNeedsEnrichment(product) then
+        return product
+    end
+    product = EnrichIncompleteProductFromLearnedItems(product, itemData)
+    if type(product) ~= "table" or not MainProductNeedsEnrichment(product) then
+        return product
+    end
+    -- Snapshot slots often omit description; DB / Items sample may still carry it.
+    local desc = type(itemData) == "table" and itemData.description or nil
+    local uid = type(itemData) == "table" and (tonumber(itemData.uniqueID) or 0) or 0
+    if (desc == nil or ToNarrow(desc) == "") and uid > 0 then
+        local dbItem = ResolveItemDataForUid(uid)
+        if type(dbItem) == "table" then
+            desc = dbItem.description
+        end
+    end
+    local fromDesc = EffectIdFromDescription(desc)
+    if fromDesc and fromDesc > 0 then
+        local enriched = MS.Copy(product)
+        if type(enriched) == "table" then
+            enriched.bonuses = NormalizeBonusKeys(enriched.bonuses)
+            if MS.ApplyMainEffectId(enriched, fromDesc) then
+                product = enriched
+                if not MainProductNeedsEnrichment(product) then
+                    return product
+                end
+            end
+        end
+    end
+    -- Cultivated plants omit EFFECT on the item; stamp recipe fx only when
+    -- skill/slot/stab/power already match (never for Primals / powders).
+    if type(target) == "table"
+        and target.role == "main"
+        and ItemLooksCultivatedPlant(itemData)
+        and (tonumber(target.effectId) or 0) > 0
+    then
+        local B = CraftBonusRefs()
+        local bagBonuses = NormalizeBonusKeys(product.bonuses)
+        local targetBonuses = NormalizeBonusKeys(target.bonuses)
+        if tonumber(product.skillLevel) == tonumber(target.skillLevel)
+            and tonumber(product.slotType) == tonumber(target.slotType)
+            and BonusMatch(bagBonuses, targetBonuses, B.STABILITY)
+            and BonusMatch(bagBonuses, targetBonuses, B.POWER)
+        then
+            local enriched = MS.Copy(product)
+            if type(enriched) == "table" then
+                enriched.bonuses = bagBonuses
+                if MS.ApplyMainEffectId(enriched, target.effectId) then
+                    return enriched
+                end
+            end
+        end
+    end
+    return product
 end
 
 --- Stat-equivalent match across uid variants and cultivation forms.
@@ -815,10 +949,14 @@ function MS.ProductMatches(itemData, spec)
         return false
     end
     -- Do not stamp the recipe fx onto every incomplete bag main (pools Primals).
-    -- Resolve fx from the learned Items fingerprint for this uid after first brew.
-    if product.incomplete == true then
-        product = EnrichIncompleteProductFromLearnedItems(product, itemData)
+    -- Resolve fx from Items, description, or cult-plant stab/power match.
+    if MainProductNeedsEnrichment(product) then
+        product = EnrichThinMainForMatch(product, itemData, target)
         if type(product) ~= "table" or product.incomplete == true then
+            return false
+        end
+        -- Still thin after enrich (no Items stamp / no cult match) — reject.
+        if MainProductNeedsEnrichment(product) and (tonumber(product.effectId) or 0) <= 0 then
             return false
         end
     end
@@ -872,23 +1010,32 @@ function MS.IsGrowable(spec)
         or role == "extender" or role == "multiplier" or role == "stimulant"
 end
 
-local ROLE_ABBR = {
-    container = "Container",
-    main = "Main",
-    stabilizer = "Stabilizer",
-    goldweed = "Goldweed",
-    extender = "Extender",
-    multiplier = "Multiplier",
-    stimulant = "Stimulant",
+local ROLE_LOC_KEYS = {
+    container = "material.role.container",
+    main = "material.role.main",
+    stabilizer = "material.role.stabilizer",
+    goldweed = "material.role.goldweed",
+    extender = "material.role.extender",
+    multiplier = "material.role.multiplier",
+    stimulant = "material.role.stimulant",
+    ingredient = "material.role.ingredient",
 }
 
 function MS.RoleTitle(role)
-    return ROLE_ABBR[role or ""] or role or "Material"
+    role = role or ""
+    local key = ROLE_LOC_KEYS[role]
+    if key then
+        return T(key)
+    end
+    if role ~= "" then
+        return towstring(role)
+    end
+    return T("material.role.material")
 end
 
 function MS.ShortLabel(spec)
     if type(spec) ~= "table" then
-        return L"?"
+        return T("material.tip.unknown")
     end
     local role = spec.role or "mat"
     local B = CraftBonusRefs()
@@ -942,31 +1089,33 @@ function MS.DescribeLines(spec, perCraft)
     end
     lines[1] = towstring(title)
     if spec.incomplete == true then
-        lines[#lines + 1] = L"Incomplete spec (missing effect fingerprint)"
+        lines[#lines + 1] = T("material.tip.incomplete")
         local bound = tonumber(spec.boundUid) or 0
         if bound > 0 then
-            lines[#lines + 1] = L"Bound to item uid: " .. towstring(tostring(bound))
+            lines[#lines + 1] = T("material.tip.bound_uid", { uid = tostring(bound) })
         end
     end
     local B = CraftBonusRefs()
     if spec.role == "main" and spec.effectId then
-        lines[#lines + 1] = L"Effect id: " .. towstring(tostring(spec.effectId))
+        lines[#lines + 1] = T("material.tip.effect_id", { id = tostring(spec.effectId) })
     end
     local stab = MS.Stability(spec)
     if stab ~= 0 then
-        lines[#lines + 1] = L"Stability: " .. towstring((stab >= 0 and "+" or "") .. tostring(stab))
+        lines[#lines + 1] = T("material.tip.stability", {
+            signed = (stab >= 0 and "+" or "") .. tostring(stab),
+        })
     end
     local mult = spec.bonuses and spec.bonuses[B.MULTIPLIER]
     if mult and mult ~= 0 then
-        lines[#lines + 1] = L"Multiplier: x" .. towstring(tostring(mult))
+        lines[#lines + 1] = T("material.tip.multiplier", { n = tostring(mult) })
     end
     local dur = spec.bonuses and spec.bonuses[B.DURATION]
     if dur and dur ~= 0 then
-        lines[#lines + 1] = L"Duration: +" .. towstring(tostring(dur))
+        lines[#lines + 1] = T("material.tip.duration", { n = tostring(dur) })
     end
     local lv = tonumber(spec.skillLevel) or 0
     if lv > 0 then
-        lines[#lines + 1] = L"Skill: " .. towstring(tostring(lv))
+        lines[#lines + 1] = T("material.tip.skill", { n = tostring(lv) })
     end
     return lines
 end
@@ -975,8 +1124,14 @@ local function EffectPhrase(key)
     if not key or key == "" then
         return nil
     end
-    if EFFECT_ID_TO_NAME[key] then
-        return EFFECT_ID_TO_NAME[key]
+    local locKey = "material.effect." .. key
+    if StockPiler2.Locale and StockPiler2.Locale.ResolveTemplate then
+        local template = StockPiler2.Locale.ResolveTemplate(locKey)
+        if template then
+            return template
+        end
+    else
+        return T(locKey)
     end
     return towstring(key)
 end
@@ -986,19 +1141,19 @@ function MS.TradeSkillDisplayName(spec)
     if GameData and GameData.TradeSkills then
         local g = GameData.TradeSkills
         if ts == g.APOTHECARY then
-            return L"Apothecary"
+            return T("material.trade.apothecary")
         end
         if ts == g.CULTIVATION then
-            return L"Cultivation"
+            return T("material.trade.cultivation")
         end
         if ts == g.TALISMAN then
-            return L"Talisman Making"
+            return T("material.trade.talisman")
         end
     end
     if type(spec) == "table" and tonumber(spec.cultivationType) or 0 ~= 0 then
-        return L"Cultivation"
+        return T("material.trade.cultivation")
     end
-    return L"Apothecary"
+    return T("material.trade.apothecary")
 end
 
 function MS.EffectDisplayName(spec)
@@ -1016,7 +1171,7 @@ function MS.EffectDisplayName(spec)
             return phrase
         end
     end
-    return L"Effect id: " .. towstring(tostring(effectId))
+    return T("material.tip.effect_id", { id = tostring(effectId) })
 end
 
 function MS.FormatBonusLine(ref, value)
@@ -1041,27 +1196,28 @@ function MS.FormatBonusLine(ref, value)
         end
         if name == nil or name == L"" then
             local fallback = {
-                [1] = L"Stability",
-                [2] = L"Power",
-                [3] = L"Duration",
-                [4] = L"Multiplier",
-                [12] = L"Super-Critical Chance",
-                [13] = L"Fail Chance",
-                [14] = L"Super-Critical Chance",
+                [1] = T("material.bonus.stability"),
+                [2] = T("material.bonus.power"),
+                [3] = T("material.bonus.duration"),
+                [4] = T("material.bonus.multiplier"),
+                [12] = T("material.bonus.supercrit"),
+                [13] = T("material.bonus.fail"),
+                [14] = T("material.bonus.supercrit"),
             }
-            name = fallback[ref] or L"Bonus"
+            name = fallback[ref] or T("material.bonus.generic")
         end
         local percentRefs = { [12] = true, [13] = true, [14] = true }
+        local valueStr = tostring(value)
         if percentRefs[ref] then
             if value < 0 then
-                text = towstring(tostring(value)) .. L"% " .. name
+                text = T("material.bonus.pct", { value = valueStr, name = name })
             else
-                text = L"+" .. towstring(tostring(value)) .. L"% " .. name
+                text = T("material.bonus.pct_plus", { value = valueStr, name = name })
             end
         elseif value < 0 then
-            text = towstring(tostring(value)) .. L" " .. name
+            text = T("material.bonus.flat", { value = valueStr, name = name })
         else
-            text = L"+" .. towstring(tostring(value)) .. L" " .. name
+            text = T("material.bonus.flat_plus", { value = valueStr, name = name })
         end
     end
     local kind = "positive"
@@ -1075,12 +1231,15 @@ end
 
 function MS.IngredientHeaderText(spec)
     if type(spec) ~= "table" then
-        return L"?"
+        return T("material.tip.unknown")
     end
     local role = spec.role or "mat"
     local lv = tonumber(spec.skillLevel) or 0
-    return towstring(tostring(lv)) .. L" " .. MS.TradeSkillDisplayName(spec)
-        .. L" - " .. towstring(MS.RoleTitle(role))
+    return T("material.tip.header", {
+        lv = tostring(lv),
+        trade = MS.TradeSkillDisplayName(spec),
+        role = MS.RoleTitle(role),
+    })
 end
 
 function MS.DescribeTooltipRows(spec, _perCraft)
@@ -1100,13 +1259,11 @@ function MS.DescribeTooltipRows(spec, _perCraft)
         local bound = tonumber(spec.boundUid) or 0
         if bound > 0 then
             rows[#rows + 1] = {
-                text = L"Incomplete spec (bound to item uid "
-                    .. towstring(tostring(bound))
-                    .. L")",
+                text = T("material.tip.incomplete_bound", { uid = tostring(bound) }),
                 kind = "warning",
             }
         else
-            rows[#rows + 1] = { text = L"Incomplete spec (missing effect fingerprint)", kind = "warning" }
+            rows[#rows + 1] = { text = T("material.tip.incomplete"), kind = "warning" }
         end
     end
 
@@ -1159,21 +1316,21 @@ local function CultivationTypeName(cultType)
     local spore = (types and types.SPORE) or 5
     local seed = (types and types.SEED) or 1
     if cultType == spore then
-        return L"Spore"
+        return T("material.cult.spore")
     end
     if cultType == seed or cultType == 0 then
-        return L"Seed"
+        return T("material.cult.seed")
     end
     if cultType == ((types and types.SOIL) or 2) then
-        return L"Soil"
+        return T("material.cult.soil")
     end
     if cultType == ((types and types.WATERCAN) or 3) then
-        return L"Watering Can"
+        return T("material.cult.watering_can")
     end
     if cultType == ((types and types.NUTRIENT) or 4) then
-        return L"Nutrient"
+        return T("material.cult.nutrient")
     end
-    return L"Seed"
+    return T("material.cult.seed")
 end
 
 local function ResolveSeedItem(seed)
@@ -1210,12 +1367,12 @@ function MS.GrowsPhrase(spec)
     if role == "main" then
         local effectName = MS.EffectDisplayName(spec)
         if effectName and effectName ~= L"" then
-            return L"Grows " .. effectName
+            return T("material.tip.grows", { name = effectName })
         end
-        return L"Grows Main"
+        return T("material.tip.grows_main")
     end
     if role ~= "" and role ~= "mat" and role ~= "ingredient" then
-        return L"Grows " .. towstring(MS.RoleTitle(role))
+        return T("material.tip.grows", { name = MS.RoleTitle(role) })
     end
     return nil
 end
@@ -1276,7 +1433,7 @@ end
 --- Main:  header "175 Apothecary - Main", detail "Armor, -19 Stability, +15 Power"
 function MS.NeedLabelParts(spec, context)
     if type(spec) ~= "table" then
-        return { header = L"material", detail = L"" }
+        return { header = T("material.tip.fallback_material"), detail = L"" }
     end
     context = type(context) == "table" and context or {}
     local asSeed = context.asSeed == true or type(context.seed) == "table"
@@ -1302,16 +1459,16 @@ function MS.NeedLabelParts(spec, context)
     end
 
     local lv = tonumber(lineSpec.skillLevel) or tonumber(plantSpec.skillLevel) or 0
-    local trade = L"Apothecary"
-    local slot = towstring(MS.RoleTitle(plantSpec.role or lineSpec.role or "mat"))
+    local trade = T("material.trade.apothecary")
+    local slot = MS.RoleTitle(plantSpec.role or lineSpec.role or "mat")
     if asSeed then
-        trade = L"Cultivating"
+        trade = T("material.trade.cultivating")
         slot = CultivationTypeName(cultType)
         if lv <= 0 then
             lv = tonumber(plantSpec.skillLevel) or 0
         end
     elseif (tonumber(lineSpec.cultivationType) or 0) ~= 0 then
-        trade = L"Cultivating"
+        trade = T("material.trade.cultivating")
         slot = CultivationTypeName(lineSpec.cultivationType)
     else
         trade = MS.TradeSkillDisplayName(lineSpec)
@@ -1319,16 +1476,20 @@ function MS.NeedLabelParts(spec, context)
             local cit = SlotTypeConstants()
             local st = tonumber(lineSpec.slotType) or 0
             if st == (tonumber(cit.CONTAINER_ESSENCE) or 7) then
-                slot = L"Essence Container"
+                slot = T("material.slot.essence_container")
             elseif st == (tonumber(cit.CONTAINER_DYE) or 6) then
-                slot = L"Dye Container"
+                slot = T("material.slot.dye_container")
             else
-                slot = L"Container"
+                slot = T("material.slot.container")
             end
         end
     end
 
-    local header = towstring(tostring(lv)) .. L" " .. trade .. L" - " .. slot
+    local header = T("material.tip.header", {
+        lv = tostring(lv),
+        trade = trade,
+        role = slot,
+    })
     local paren = {}
     if asSeed then
         local grows = MS.GrowsPhrase(plantSpec)
@@ -1362,14 +1523,17 @@ end
 function MS.NeedLabel(spec, context)
     local parts = MS.NeedLabelParts(spec, context)
     if parts.detail ~= nil and parts.detail ~= L"" then
-        return parts.header .. L" (" .. parts.detail .. L")"
+        return T("material.tip.need_parens", {
+            header = parts.header,
+            detail = parts.detail,
+        })
     end
     return parts.header
 end
 
 function MS.Label(spec)
     if type(spec) ~= "table" then
-        return L"?"
+        return T("material.tip.unknown")
     end
     local role = spec.role or "mat"
     local lv = tonumber(spec.skillLevel) or 0

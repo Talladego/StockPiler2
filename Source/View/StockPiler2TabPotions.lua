@@ -3,6 +3,14 @@
 ----------------------------------------------------------------
 
 StockPiler2TabPotions = {}
+
+local function T(key, tokens)
+    if StockPiler2.T then
+        return StockPiler2.T(key, tokens)
+    end
+    return L"[" .. towstring(tostring(key or "")) .. L"]"
+end
+
 StockPiler2TabPotions.listData = {}
 StockPiler2TabPotions.displayOrder = {}
 
@@ -17,11 +25,13 @@ local SORT_IDS = {
     [6] = "yield",
     [7] = "have",
     [8] = "watch",
+    [9] = "level",
 }
 
 local SORT_HEADERS = {
     watch = "SP2TabPotionsSortWatch",
     name = "SP2TabPotionsSortName",
+    level = "SP2TabPotionsSortLevel",
     effect = "SP2TabPotionsSortEffect",
     power = "SP2TabPotionsSortPower",
     stability = "SP2TabPotionsSortStability",
@@ -31,13 +41,14 @@ local SORT_HEADERS = {
 }
 
 local SORT_HEADER_LABELS = {
-    name = L"Name",
-    effect = L"Effect",
-    power = L"Power",
-    stability = L"Stability",
-    superCrit = L"Super-Crit",
-    yield = L"Yield",
-    have = L"Stock",
+    name = T("potions.sort.name"),
+    level = T("potions.sort.level"),
+    effect = T("potions.sort.effect"),
+    power = T("potions.sort.power"),
+    stability = T("potions.sort.stability"),
+    superCrit = T("potions.sort.super_crit"),
+    yield = T("potions.sort.yield"),
+    have = T("potions.sort.have"),
 }
 
 local EFFECT_CYCLE = {
@@ -49,34 +60,34 @@ local EFFECT_CYCLE = {
 }
 
 local EFFECT_LABELS = {
-    str = L"Str",
-    int = L"Int",
-    wp = L"WP",
-    bs = L"BS",
-    tou = L"Tou",
-    armor = L"Armor",
-    absorb = L"Absorb",
-    heal = L"Heal",
-    hot = L"HoT",
-    ap = L"AP",
-    hytoucrit = L"T+MC",
-    hystrmelee = L"S+Melee",
-    hywillheal = L"WP+Heal",
-    hystrheal = L"S+Heal",
-    hyintmcrit = L"I+MagC",
-    hyaccrcrit = L"BS+RC",
-    hywoumelee = L"W+Melee",
-    hywoucrit = L"W+MC",
-    hywoumcrit = L"W+MagC",
-    hywourcrit = L"W+RC",
-    hywouheal = L"W+Heal",
-    hywoustr = L"W+Str",
-    hyresist = L"HyResist",
-    hywouarmpen = L"W+AP",
-    hywouinit = L"W+Init",
-    hytounocrit = L"T-Crit",
-    hyhpregencritdmg = L"HoT-CD",
-    hywsarmpen = L"WS+AP",
+    str = T("effect.short.str"),
+    int = T("effect.short.int"),
+    wp = T("effect.short.wp"),
+    bs = T("effect.short.bs"),
+    tou = T("effect.short.tou"),
+    armor = T("effect.short.armor"),
+    absorb = T("effect.short.absorb"),
+    heal = T("effect.short.heal"),
+    hot = T("effect.short.hot"),
+    ap = T("effect.short.ap"),
+    hytoucrit = T("effect.short.hytoucrit"),
+    hystrmelee = T("effect.short.hystrmelee"),
+    hywillheal = T("effect.short.hywillheal"),
+    hystrheal = T("effect.short.hystrheal"),
+    hyintmcrit = T("effect.short.hyintmcrit"),
+    hyaccrcrit = T("effect.short.hyaccrcrit"),
+    hywoumelee = T("effect.short.hywoumelee"),
+    hywoucrit = T("effect.short.hywoucrit"),
+    hywoumcrit = T("effect.short.hywoumcrit"),
+    hywourcrit = T("effect.short.hywourcrit"),
+    hywouheal = T("effect.short.hywouheal"),
+    hywoustr = T("effect.short.hywoustr"),
+    hyresist = T("effect.short.hyresist"),
+    hywouarmpen = T("effect.short.hywouarmpen"),
+    hywouinit = T("effect.short.hywouinit"),
+    hytounocrit = T("effect.short.hytounocrit"),
+    hyhpregencritdmg = T("effect.short.hyhpregencritdmg"),
+    hywsarmpen = T("effect.short.hywsarmpen"),
 }
 
 local function ToNarrow(text)
@@ -119,9 +130,10 @@ local function ResolveTooltipItemData(entry, itemData)
 end
 
 local function ApplyPotionStats(row, entry, itemData)
-    local rankText = L"-"
-    local buffText = L"-"
-    local durationText = L"-"
+    local dash = T("ui.dash")
+    local rankText = dash
+    local buffText = dash
+    local durationText = dash
     row.rankNum = 0
     row.buffNum = 0
     row.durationSec = 0
@@ -138,11 +150,11 @@ local function ApplyPotionStats(row, entry, itemData)
             buffText = towstring(tostring(buffValue))
         end
         if instant then
-            durationText = L"Inst"
+            durationText = T("ui.inst")
         elseif durationSec and durationSec > 0 and StockPiler2.Classify.FormatDuration then
             durationText = StockPiler2.Classify.FormatDuration(durationSec)
             if durationText == L"" then
-                durationText = L"-"
+                durationText = dash
             end
         end
     end
@@ -150,6 +162,25 @@ local function ApplyPotionStats(row, entry, itemData)
     row.rankText = rankText
     row.buffText = buffText
     row.durationText = durationText
+    row.levelNum = row.rankNum
+    row.levelText = rankText
+end
+
+local function ItemRarityNameColor(itemData)
+    if itemData and DataUtils and DataUtils.GetItemRarityColor then
+        local ok, color
+        if StockPiler2.TryCallQuiet then
+            ok, color = StockPiler2.TryCallQuiet("DataUtils.GetItemRarityColor", DataUtils.GetItemRarityColor, itemData)
+        elseif StockPiler2.Debug and StockPiler2.Debug.TryCallQuiet then
+            ok, color = StockPiler2.Debug.TryCallQuiet("DataUtils.GetItemRarityColor", DataUtils.GetItemRarityColor, itemData)
+        else
+            ok, color = pcall(DataUtils.GetItemRarityColor, itemData)
+        end
+        if ok and type(color) == "table" then
+            return tonumber(color.r) or 255, tonumber(color.g) or 255, tonumber(color.b) or 255
+        end
+    end
+    return 255, 255, 255
 end
 
 local function BuildRecipeDataForPotion(potionKey, potionName, recipe, potionLevel, potionUid)
@@ -195,6 +226,7 @@ local function BuildRecipeDataForPotion(potionKey, potionName, recipe, potionLev
         potionLevel = tonumber(potionLevel) or 0,
         potionUid = uid,
         recipeSpecKey = recipe.recipeSpecKey,
+        recipe = recipe,
         recipeYield = recipeYield,
         crafts = tonumber(recipe.crafts) or 0,
         brewAttempts = attempts,
@@ -266,7 +298,7 @@ end
 local function FormatPercentStat(value)
     value = tonumber(value) or 0
     if value == 0 then
-        return L"-"
+        return T("ui.dash")
     end
     return towstring(tostring(value) .. "%")
 end
@@ -274,7 +306,7 @@ end
 local function FormatYieldStat(value)
     value = tonumber(value) or 0
     if value <= 0 then
-        return L"-"
+        return T("ui.dash")
     end
     local rounded = math.floor(value + 0.5)
     if math.abs(value - rounded) < 0.05 then
@@ -298,6 +330,13 @@ local function CompareRows(a, b, column, ascending)
             return CompareName(a, b)
         end
         return finish(na < nb)
+    elseif column == "level" then
+        local la = a.levelNum or a.rankNum or 0
+        local lb = b.levelNum or b.rankNum or 0
+        if la == lb then
+            return CompareName(a, b)
+        end
+        return finish(la < lb)
     elseif column == "effect" then
         local ea = ToNarrow(a.effectText)
         local eb = ToNarrow(b.effectText)
@@ -382,7 +421,7 @@ local function InitEffectCombo()
         return
     end
     ComboBoxClearMenuItems(w)
-    ComboBoxAddMenuItem(w, L"All effects")
+    ComboBoxAddMenuItem(w, T("potions.all_effects"))
     for i = 2, #EFFECT_CYCLE do
         local key = EFFECT_CYCLE[i]
         ComboBoxAddMenuItem(w, EFFECT_LABELS[key])
@@ -397,10 +436,10 @@ local function UpdateSortHeaderLabels()
         end
     end
     if DoesWindowExist("SP2TabPotionsSortRecipe") then
-        ButtonSetText("SP2TabPotionsSortRecipe", L"Recipe")
+        ButtonSetText("SP2TabPotionsSortRecipe", T("potions.sort.recipe"))
     end
     if DoesWindowExist("SP2TabPotionsSortForget") then
-        ButtonSetText("SP2TabPotionsSortForget", L"Forget")
+        ButtonSetText("SP2TabPotionsSortForget", T("potions.sort.forget"))
     end
 end
 
@@ -525,6 +564,7 @@ local function BuildVisibleList()
             observed = true,
         }
         ApplyPotionStats(row, entry, itemData)
+        row.nameR, row.nameG, row.nameB = ItemRarityNameColor(itemData)
         local recipe = nil
         if RSpec and RSpec.RecipeSpecForPotion then
             recipe = RSpec.RecipeSpecForPotion(potionKey)
@@ -541,7 +581,7 @@ local function BuildVisibleList()
             row.yieldNum = stats.yield
             row.yieldText = FormatYieldStat(stats.yield)
         end
-        row.recipeData = BuildRecipeDataForPotion(potionKey, baseName, recipe, row.rankNum, uid)
+        row.recipeData = BuildRecipeDataForPotion(potionKey, baseName, recipe, row.levelNum or row.rankNum, uid)
         row.hasRecipe = row.recipeData ~= nil
         if PassesFilters(row, nameFilter, effectFilter) then
             rows[#rows + 1] = row
@@ -586,13 +626,10 @@ local function SetIconTexture(iconWin, iconNum)
 end
 
 function StockPiler2TabPotions.Initialize()
-    LabelSetText("SP2TabPotionsBannerTitle", L"Known potions")
-    LabelSetText(
-        "SP2TabPotionsBannerText",
-        L"Recipes are learned by brewing manually. One row per recipe; columns are fingerprint stats (effect / rank / buff / duration in the icon tip)."
-    )
-    LabelSetText("SP2TabPotionsSearchLabel", L"Search:")
-    LabelSetText("SP2TabPotionsEffectLabel", L"Effect:")
+    LabelSetText("SP2TabPotionsBannerTitle", T("potions.banner_title"))
+    LabelSetText("SP2TabPotionsBannerText", T("potions.banner_text"))
+    LabelSetText("SP2TabPotionsSearchLabel", T("potions.search"))
+    LabelSetText("SP2TabPotionsEffectLabel", T("potions.effect"))
     UpdateSortHeaderLabels()
 
     local s = GetSettings()
@@ -625,35 +662,57 @@ function StockPiler2TabPotions.Refresh()
 end
 
 function StockPiler2TabPotions.UpdateRows()
-    if SP2TabPotionsList.PopulatorIndices == nil then
-        return
+    local numVisible = tonumber(SP2TabPotionsList.numVisibleRows) or 12
+    local indices = SP2TabPotionsList.PopulatorIndices
+    local active = {}
+    if type(indices) == "table" then
+        for rowIndex, dataIndex in ipairs(indices) do
+            active[rowIndex] = dataIndex
+        end
     end
-    for rowIndex, dataIndex in ipairs(SP2TabPotionsList.PopulatorIndices) do
-        local data = StockPiler2TabPotions.listData[dataIndex]
-        if data then
-            local rowName = "SP2TabPotionsListRow" .. rowIndex
-            DefaultColor.SetListRowTint(rowName .. "Background", rowIndex, false)
-            ButtonSetCheckButtonFlag(rowName .. "Watch", true)
-            ButtonSetPressedFlag(rowName .. "Watch", data.watched == true)
-            SetIconTexture(rowName .. "Icon", data.iconNum)
+    local listData = StockPiler2TabPotions.listData
+    for rowIndex = 1, numVisible do
+        local rowName = "SP2TabPotionsListRow" .. rowIndex
+        if not DoesWindowExist(rowName) then
+            -- skip
+        else
+            local dataIndex = active[rowIndex]
+            local data = dataIndex and type(listData) == "table" and listData[dataIndex] or nil
+            if data then
+                WindowSetShowing(rowName, true)
+                DefaultColor.SetListRowTint(rowName .. "Background", rowIndex, false)
+                ButtonSetCheckButtonFlag(rowName .. "Watch", true)
+                ButtonSetPressedFlag(rowName .. "Watch", data.watched == true)
+                SetIconTexture(rowName .. "Icon", data.iconNum)
 
-            LabelSetText(rowName .. "Name", data.name or L"")
-            LabelSetText(rowName .. "Effect", data.effectText or L"")
-            LabelSetText(rowName .. "Power", data.powerText or L"0")
-            LabelSetText(rowName .. "Stability", data.stabilityText or L"0")
-            LabelSetText(rowName .. "SuperCrit", data.superCritText or L"-")
-            LabelSetText(rowName .. "Yield", data.yieldText or L"-")
-            LabelSetText(rowName .. "Have", data.haveText or towstring(tostring(data.have or 0)))
-            LabelSetTextColor(rowName .. "Have", 255, 255, 255)
+                LabelSetText(rowName .. "Name", data.name or L"")
+                LabelSetTextColor(
+                    rowName .. "Name",
+                    tonumber(data.nameR) or 255,
+                    tonumber(data.nameG) or 255,
+                    tonumber(data.nameB) or 255
+                )
+                LabelSetText(rowName .. "Level", data.levelText or data.rankText or T("ui.dash"))
+                LabelSetText(rowName .. "Effect", data.effectText or L"")
+                LabelSetText(rowName .. "Power", data.powerText or L"0")
+                LabelSetText(rowName .. "Stability", data.stabilityText or L"0")
+                LabelSetText(rowName .. "SuperCrit", data.superCritText or T("ui.dash"))
+                LabelSetText(rowName .. "Yield", data.yieldText or T("ui.dash"))
+                LabelSetText(rowName .. "Have", data.haveText or towstring(tostring(data.have or 0)))
+                LabelSetTextColor(rowName .. "Have", 255, 255, 255)
 
-            local recipeWin = rowName .. "Recipe"
-            if DoesWindowExist(recipeWin) then
-                WindowSetShowing(recipeWin, data.hasRecipe == true)
-            end
+                local recipeWin = rowName .. "Recipe"
+                if DoesWindowExist(recipeWin) then
+                    WindowSetShowing(recipeWin, data.hasRecipe == true)
+                end
 
-            local forgetWin = rowName .. "Forget"
-            if DoesWindowExist(forgetWin) then
-                WindowSetShowing(forgetWin, data.hasRecipe == true)
+                local forgetWin = rowName .. "Forget"
+                if DoesWindowExist(forgetWin) then
+                    WindowSetShowing(forgetWin, data.hasRecipe == true)
+                end
+            else
+                -- Unused ListBox slots stay opaque white unless hidden.
+                WindowSetShowing(rowName, false)
             end
         end
     end
@@ -710,7 +769,6 @@ function StockPiler2TabPotions.OnToggleWatch()
     if not data then
         return
     end
-    local s = GetSettings()
     local potionKey = data.potionKey or data.id
     if not (StockPiler2.Catalog and StockPiler2.Catalog.EnsureWatch) then
         return
@@ -720,7 +778,10 @@ function StockPiler2TabPotions.OnToggleWatch()
     if watch.autoGrow == nil then
         watch.autoGrow = true
     end
-    StockPiler2.Watch.BumpGen()
+    data.watched = watch.enabled == true
+    if StockPiler2.Watch and StockPiler2.Watch.BumpGen then
+        StockPiler2.Watch.BumpGen()
+    end
     if StockPiler2.PlanSnapshot and StockPiler2.PlanSnapshot.Invalidate then
         StockPiler2.PlanSnapshot.Invalidate()
     end
@@ -739,9 +800,14 @@ function StockPiler2TabPotions.OnToggleWatch()
     elseif StockPiler2.Grow and StockPiler2.Grow.InvalidatePlantQueue then
         StockPiler2.Grow.InvalidatePlantQueue({ force = true })
     end
-    StockPiler2TabPotions.Refresh()
-    if StockPiler2TabWatch and StockPiler2TabWatch.Refresh then
-        StockPiler2TabWatch.Refresh()
+    if StockPiler2.Scheduler and StockPiler2.Scheduler.EnqueuePlanRebuild then
+        StockPiler2.Scheduler.EnqueuePlanRebuild({ nudge = true })
+    end
+    if StockPiler2.Ui and StockPiler2.Ui.MarkWatchUiDirty then
+        StockPiler2.Ui.MarkWatchUiDirty()
+    end
+    if StockPiler2TabPotions.UpdateRows then
+        StockPiler2TabPotions.UpdateRows()
     end
 end
 
@@ -763,7 +829,7 @@ local function ShowItemOrTextTooltip(itemData, title, line2, line3)
         end
     end
     Tooltips.CreateTextOnlyTooltip(SystemData.ActiveWindow.name)
-    Tooltips.SetTooltipText(1, 1, title or L"Item")
+    Tooltips.SetTooltipText(1, 1, title or T("ui.item_fallback"))
     local row = 2
     if line2 and line2 ~= L"" then
         Tooltips.SetTooltipText(row, 1, line2)
@@ -791,7 +857,7 @@ function StockPiler2TabPotions.OnMouseOverIcon()
     end
     if StockPiler2RecipeTooltip and StockPiler2RecipeTooltip.ShowPotionIconTooltip then
         StockPiler2RecipeTooltip.ShowPotionIconTooltip(SystemData.ActiveWindow.name, {
-            name = data.name or L"Potion",
+            name = data.name or T("ui.potion_fallback"),
             uniqueID = data.uniqueID,
             iconNum = data.iconNum,
             itemData = itemData,
@@ -803,7 +869,7 @@ function StockPiler2TabPotions.OnMouseOverIcon()
         })
         return
     end
-    ShowItemOrTextTooltip(itemData, data.name or L"Potion", nil, nil)
+    ShowItemOrTextTooltip(itemData, data.name or T("ui.potion_fallback"), nil, nil)
 end
 
 function StockPiler2TabPotions.OnMouseOverRecipe()
@@ -838,14 +904,17 @@ function StockPiler2TabPotions.ConfirmForgetRecipe()
     end
     if forgot then
         if StockPiler2.Ui.Print then
-            StockPiler2.Ui.Print(L"Forgot learned potion recipe: " .. towstring(label))
+            StockPiler2.Ui.Print(T("ui.forgot_recipe", { name = label }))
         end
         if StockPiler2.Grow and StockPiler2.Grow.InvalidatePlantQueue then
             StockPiler2.Grow.InvalidatePlantQueue({ force = true })
         end
         StockPiler2TabPotions.Refresh()
-        if StockPiler2TabWatch and StockPiler2TabWatch.Refresh then
-            StockPiler2TabWatch.Refresh()
+        if StockPiler2.Scheduler and StockPiler2.Scheduler.EnqueuePlanRebuild then
+            StockPiler2.Scheduler.EnqueuePlanRebuild({ nudge = true })
+        end
+        if StockPiler2.Ui and StockPiler2.Ui.MarkWatchUiDirty then
+            StockPiler2.Ui.MarkWatchUiDirty()
         end
     end
 end
@@ -886,10 +955,10 @@ function StockPiler2TabPotions.OnForgetRow()
         and RSpec.PotionRecipeKey(outputUid, recipeSpecKey) or compositeKey
     StockPiler2TabPotions._pendingForgetLabel = label
     if type(DialogManager) == "table" and type(DialogManager.MakeTwoButtonDialog) == "function" then
-        local yes = GetString and GetString(StringTables.Default.LABEL_YES) or L"Yes"
-        local no = GetString and GetString(StringTables.Default.LABEL_NO) or L"No"
+        local yes = GetString and GetString(StringTables.Default.LABEL_YES) or T("ui.yes")
+        local no = GetString and GetString(StringTables.Default.LABEL_NO) or T("ui.no")
         DialogManager.MakeTwoButtonDialog(
-            L"Forget this learned potion recipe?\n" .. towstring(label),
+            T("potions.forget_confirm", { name = towstring(label) }),
             yes,
             StockPiler2TabPotions.ConfirmForgetRecipe,
             no,
@@ -903,7 +972,7 @@ end
 function StockPiler2TabPotions.OnMouseOverForget()
     Tooltips.CreateTextOnlyTooltip(
         SystemData.ActiveWindow.name,
-        L"Forget this potion recipe path. Other outcomes or recipes for the same cauldron loadout are kept when still linked."
+        T("potions.forget_tip")
     )
     Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_RIGHT)
 end

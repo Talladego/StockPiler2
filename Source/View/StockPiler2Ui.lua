@@ -4,10 +4,19 @@
 
 StockPiler2.Ui = StockPiler2.Ui or {}
 
+local function T(key, tokens)
+    if StockPiler2.T then
+        return StockPiler2.T(key, tokens)
+    end
+    return L"[" .. towstring(tostring(key or "")) .. L"]"
+end
+
 StockPiler2.Ui.WATCH_UI_MIN_INTERVAL_SEC = 5.0
 StockPiler2.Ui._watchUiDirty = false
 StockPiler2.Ui._watchUiFlushedAt = 0
 StockPiler2.Ui._watchUiLastKey = nil
+StockPiler2.Ui._watchUiLastKnowledgeGen = 0
+StockPiler2.Ui._watchUiLastPlanGen = 0
 
 function StockPiler2.Ui.Print(msg)
     if StockPiler2.Debug and StockPiler2.Debug.Print then
@@ -17,7 +26,7 @@ end
 
 function StockPiler2.Ui.ToggleWindow()
     if not DoesWindowExist("StockPiler2Window") then
-        StockPiler2.Ui.Print(L"StockPiler2 window is not loaded.")
+        StockPiler2.Ui.Print(T("ui.window_missing"))
         return
     end
     if WindowUtils and WindowUtils.ToggleShowing then
@@ -38,23 +47,65 @@ function StockPiler2.Ui.ShowWindow(tabId)
     end
 end
 
+local function CurrentPlanGen()
+    if StockPiler2.PlanSnapshot and StockPiler2.PlanSnapshot.Get then
+        local plan = StockPiler2.PlanSnapshot.Get()
+        if type(plan) == "table" then
+            return tonumber(plan.planGen) or 0
+        end
+    end
+    return 0
+end
+
 local function WatchContentKey()
     local snapGen = 0
     if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
         snapGen = tonumber(StockPiler2.Inventory.GetSnapGen()) or 0
     end
-    local planGen = 0
-    if StockPiler2.PlanSnapshot and StockPiler2.PlanSnapshot.Get then
-        local plan = StockPiler2.PlanSnapshot.Get()
-        if type(plan) == "table" then
-            planGen = tonumber(plan.planGen) or 0
-        end
+    local planGen = CurrentPlanGen()
+    local knowledgeGen = 0
+    if StockPiler2.Knowledge and StockPiler2.Knowledge.GetGen then
+        knowledgeGen = tonumber(StockPiler2.Knowledge.GetGen()) or 0
+    end
+    local watchGen = 0
+    if StockPiler2.Watch and StockPiler2.Watch.GetGen then
+        watchGen = tonumber(StockPiler2.Watch.GetGen()) or 0
     end
     local autoGrowOn = false
     if StockPiler2.Watch and StockPiler2.Watch.IsAutoGrowEnabled then
         autoGrowOn = StockPiler2.Watch.IsAutoGrowEnabled() == true
     end
-    return tostring(snapGen) .. ":" .. tostring(planGen) .. ":" .. tostring(autoGrowOn)
+    return tostring(snapGen)
+        .. ":" .. tostring(planGen)
+        .. ":" .. tostring(knowledgeGen)
+        .. ":" .. tostring(watchGen)
+        .. ":" .. tostring(autoGrowOn)
+end
+
+--- True when Watch would only rebind a stale PlanSnapshot (avoid burning the 5s clock).
+local function IsWatchPlanStale()
+    local Sch = StockPiler2.Scheduler
+    if Sch and Sch.IsPlanRebuildPending and Sch.IsPlanRebuildPending() == true then
+        return true
+    end
+    local Planner = StockPiler2.Planner
+    if not Planner or not Planner.CacheKeyFromGens then
+        return false
+    end
+    local wantKey = Planner.CacheKeyFromGens()
+    local plan = StockPiler2.PlanSnapshot and StockPiler2.PlanSnapshot.Get and StockPiler2.PlanSnapshot.Get()
+    if type(plan) ~= "table" then
+        -- No snapshot yet: allow flush (BuildVisibleList may keep prior listData).
+        return false
+    end
+    return tostring(plan.cacheKey or "") ~= tostring(wantKey or "")
+end
+
+function StockPiler2.Ui.ClearWatchTipCaches()
+    if StockPiler2TabWatch then
+        StockPiler2TabWatch._statusTipCache = nil
+        StockPiler2TabWatch._seedBufferTipCache = nil
+    end
 end
 
 function StockPiler2.Ui.MarkWatchUiDirty()
@@ -85,8 +136,26 @@ function StockPiler2.Ui.FlushWatchUiIfDirty()
     then
         return
     end
-    -- Window open: always allow catch-up paint (never leave a blank/stale-stuck list
-    -- behind fill-burst gates). Interval still rate-limits heavy RefreshWatch.
+    -- Hold paint during harvest storm / plant quiet; dirty stays for post-storm flush.
+    -- Perf: without this, empty-plot UPDATE_PROCESSED painted UiFlush+WatchRows on the
+    -- same hitch as CultivationUpdated/WakeAfterHarvest. Do not remove the hold —
+    -- MarkWatchUiDirty still runs; first flush after storm/quiet picks it up.
+    local Sch = StockPiler2.Scheduler
+    if Sch and Sch.IsHarvestStormActive and Sch.IsHarvestStormActive() == true then
+        return
+    end
+    if StockPiler2.Grow and StockPiler2.Grow.IsPlantQuiet
+        and StockPiler2.Grow.IsPlantQuiet() == true
+    then
+        return
+    end
+    -- Window open: catch-up paint when plan/knowledge advances. Interval rate-limits
+    -- snap noise; while plan is stale, flush at most every 1s so live Stock overlay moves.
+    local knowledgeGen = 0
+    if StockPiler2.Knowledge and StockPiler2.Knowledge.GetGen then
+        knowledgeGen = tonumber(StockPiler2.Knowledge.GetGen()) or 0
+    end
+    local planGen = CurrentPlanGen()
     local contentKey = WatchContentKey()
     if StockPiler2.Ui._watchUiLastKey == contentKey then
         StockPiler2.Ui._watchUiDirty = false
@@ -97,7 +166,19 @@ function StockPiler2.Ui.FlushWatchUiIfDirty()
         now = tonumber(GetGameTime()) or 0
     end
     local last = tonumber(StockPiler2.Ui._watchUiFlushedAt) or 0
-    if last > 0 and (now - last) < StockPiler2.Ui.WATCH_UI_MIN_INTERVAL_SEC then
+    local knowledgeChanged = knowledgeGen ~= (tonumber(StockPiler2.Ui._watchUiLastKnowledgeGen) or 0)
+    local planChanged = planGen ~= (tonumber(StockPiler2.Ui._watchUiLastPlanGen) or 0)
+    -- While plan lags bags, still allow rate-limited paints: BuildVisibleList overlays
+    -- live Stock/Craftable on the last plan (Status catches up on planGen).
+    local interval = StockPiler2.Ui.WATCH_UI_MIN_INTERVAL_SEC
+    if not knowledgeChanged and not planChanged and IsWatchPlanStale() then
+        interval = math.min(interval, 1.0)
+    end
+    if not knowledgeChanged
+        and not planChanged
+        and last > 0
+        and (now - last) < interval
+    then
         return
     end
     if StockPiler2.Perf and StockPiler2.Perf.Begin then
@@ -106,6 +187,8 @@ function StockPiler2.Ui.FlushWatchUiIfDirty()
     StockPiler2.Ui._watchUiDirty = false
     StockPiler2.Ui._watchUiFlushedAt = now
     StockPiler2.Ui._watchUiLastKey = contentKey
+    StockPiler2.Ui._watchUiLastKnowledgeGen = knowledgeGen
+    StockPiler2.Ui._watchUiLastPlanGen = planGen
     if StockPiler2Window and StockPiler2Window.RefreshActiveTab then
         StockPiler2Window.RefreshActiveTab()
     end
@@ -129,7 +212,10 @@ function StockPiler2.Ui.RegisterEventRefresh()
     local function markDirty()
         StockPiler2.Ui.MarkWatchUiDirty()
     end
-    B.Subscribe(E.PLAN_UPDATED, markDirty)
+    B.Subscribe(E.PLAN_UPDATED, function()
+        StockPiler2.Ui.ClearWatchTipCaches()
+        StockPiler2.Ui.MarkWatchUiDirty()
+    end)
     B.Subscribe(E.PLAN_INVALIDATED, markDirty)
     B.Subscribe(E.INVENTORY_SNAPSHOT, markDirty)
     B.Subscribe(E.GARDEN_SNAPSHOT, markDirty)
@@ -145,6 +231,8 @@ function StockPiler2.Ui.RegisterEventRefresh()
             -- so a later dirty flush cannot no-op on a pre-login content key.
             StockPiler2.Ui._watchUiLastKey = nil
             StockPiler2.Ui._watchUiFlushedAt = 0
+            StockPiler2.Ui._watchUiLastPlanGen = 0
+            StockPiler2.Ui.ClearWatchTipCaches()
             StockPiler2.Ui.MarkWatchUiDirty()
         end)
     end

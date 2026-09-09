@@ -12,6 +12,7 @@ local _ring = {}
 local _cues = {
     criticalSuccess = false,
     criticalFailure = false,
+    specialMoment = false,
     createdName = nil,
     harvestedCount = nil,
     harvestedName = nil,
@@ -92,6 +93,7 @@ end
 local function ClearCues()
     _cues.criticalSuccess = false
     _cues.criticalFailure = false
+    _cues.specialMoment = false
     _cues.createdName = nil
     _cues.harvestedCount = nil
     _cues.harvestedName = nil
@@ -103,6 +105,7 @@ local function SnapshotCues()
         return {
             criticalSuccess = false,
             criticalFailure = false,
+            specialMoment = false,
             createdName = nil,
             harvestedCount = nil,
             harvestedName = nil,
@@ -112,6 +115,7 @@ local function SnapshotCues()
     return {
         criticalSuccess = _cues.criticalSuccess == true,
         criticalFailure = _cues.criticalFailure == true,
+        specialMoment = _cues.specialMoment == true,
         createdName = _cues.createdName,
         harvestedCount = _cues.harvestedCount,
         harvestedName = _cues.harvestedName,
@@ -146,6 +150,8 @@ local function ApplyCueToPending(kind)
             pending.chatCriticalSuccess = true
         elseif kind == "critical_failure" then
             pending.chatCriticalFailure = true
+        elseif kind == "special_moment" then
+            pending.chatSpecialMoment = true
         elseif kind == "harvested" then
             pending.chatHarvestedCount = _cues.harvestedCount
             pending.chatHarvestedName = _cues.harvestedName
@@ -162,9 +168,6 @@ end
 local function IsIgnoredNoise(text)
     local lower = string.lower(text)
     if string.find(lower, "cultivation plot advanced", 1, true) then
-        return true
-    end
-    if string.find(lower, "cultivation plot flowering completed", 1, true) then
         return true
     end
     -- Login after aborted grow (logout mid-cycle): seeds returned to bags.
@@ -186,6 +189,10 @@ local function ParseCraftingLine(text)
     end
 
     local lower = string.lower(text)
+    -- Cult skill-up often fires around flowering complete; arm attribution before ignore-style noise.
+    if string.find(lower, "cultivation plot flowering completed", 1, true) then
+        return { kind = "flowering_complete", text = text }
+    end
     if string.find(lower, "critical success", 1, true) == 1
         or lower == "critical success."
         or string.find(lower, "^critical success%.?")
@@ -199,6 +206,13 @@ local function ParseCraftingLine(text)
         or string.find(lower, "^critical failure%.?")
     then
         return { kind = "critical_failure", text = text }
+    end
+    -- Cultivation tier-up (not the same as yield-3 Critical Success).
+    if string.find(lower, "special moment", 1, true) == 1
+        or lower == "special moment."
+        or string.find(lower, "^special moment%.?")
+    then
+        return { kind = "special_moment", text = text }
     end
 
     local qty, name = string.match(text, "^You have harvested (%d+) (.+)%.?$")
@@ -216,6 +230,16 @@ local function ParseCraftingLine(text)
     if created then
         created = string.gsub(created, "%.$", "")
         return { kind = "created", text = text, name = created }
+    end
+
+    -- Engine uses 0-based plot index in this message (plant P2 → "Illegal Plot Number 1!").
+    local illegalIdx = string.match(text, "^Illegal Plot Number (%d+)!?")
+    if illegalIdx then
+        return {
+            kind = "illegal_plot",
+            text = text,
+            plotNum = (tonumber(illegalIdx) or 0) + 1,
+        }
     end
 
     return { kind = "unhandled", text = text }
@@ -251,8 +275,44 @@ function CC.OnChatTextArrived()
     if parsed.kind == "ignore" then
         return
     end
+    if parsed.kind == "flowering_complete" then
+        Log("flowering_complete")
+        if StockPiler2.SeedMap and StockPiler2.SeedMap.ArmCultSkillPendingFromPlots then
+            StockPiler2.SeedMap.ArmCultSkillPendingFromPlots("flowering")
+        end
+        return
+    end
     if parsed.kind == "unhandled" then
         Log("unhandled " .. tostring(parsed.text))
+        return
+    end
+    if parsed.kind == "illegal_plot" then
+        local plotNum = tonumber(parsed.plotNum) or 0
+        Log("illegal_plot P" .. tostring(plotNum))
+        local Garden = StockPiler2.Garden
+        if plotNum > 0 and Garden and type(Garden._plots) == "table" then
+            local row = Garden._plots[plotNum]
+            if type(row) ~= "table" then
+                row = {
+                    plotNum = plotNum,
+                    stage = 0,
+                    seedUid = 0,
+                    plantUid = 0,
+                    additives = {},
+                }
+                Garden._plots[plotNum] = row
+            end
+            row.locked = true
+            Garden._gen = (tonumber(Garden._gen) or 0) + 1
+            Garden._planGen = (tonumber(Garden._planGen) or 0) + 1
+        end
+        if plotNum > 0 and StockPiler2.Grow and StockPiler2.Grow.ClearPendingPlot then
+            StockPiler2.Grow.ClearPendingPlot(plotNum, { rollbackCommit = true })
+        end
+        if StockPiler2.Grow then
+            StockPiler2.Grow._plantQueueDirty = true
+            StockPiler2.Grow._cachedPlantJob = nil
+        end
         return
     end
 
@@ -265,6 +325,10 @@ function CC.OnChatTextArrived()
         _cues.criticalFailure = true
         Log("critical_failure")
         ApplyCueToPending("critical_failure")
+    elseif parsed.kind == "special_moment" then
+        _cues.specialMoment = true
+        Log("special_moment")
+        ApplyCueToPending("special_moment")
     elseif parsed.kind == "created" then
         _cues.createdName = parsed.name
         Log("created name=" .. tostring(parsed.name))

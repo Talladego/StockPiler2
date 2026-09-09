@@ -5,6 +5,13 @@
 StockPiler2.Buy = StockPiler2.Buy or {}
 local Buy = StockPiler2.Buy
 
+local function T(key, tokens)
+    if StockPiler2.T then
+        return StockPiler2.T(key, tokens)
+    end
+    return L"[" .. towstring(tostring(key or "")) .. L"]"
+end
+
 local BRASS_PER_GOLD = 10000
 local MAX_PURCHASES_PER_VISIT = 80
 
@@ -745,19 +752,18 @@ local function ChatVisitStop(reason)
     local listText = VisitBoughtListText()
     local msg = nil
     if bought > 0 and listText ~= "" then
-        msg = L"Bought: " .. towstring(listText)
-            .. L" (spent " .. towstring(FormatSpentGoldLabel(spent)) .. L")."
-    elseif reason == "reserved" or reason == "budget" or reason == "cap" then
-        msg = L"AutoBuy stopped."
+        msg = T("buy.bought", {
+            list = listText,
+            spent = FormatSpentGoldLabel(spent),
+        })
+    elseif reason == "reserved" then
+        msg = T("buy.stopped_reserve")
+    elseif reason == "budget" then
+        msg = T("buy.stopped_budget")
+    elseif reason == "cap" then
+        msg = T("buy.stopped_cap")
     else
         return
-    end
-    if reason == "reserved" then
-        msg = msg .. L" Stopped: gold reserve."
-    elseif reason == "budget" then
-        msg = msg .. L" Stopped: budget."
-    elseif reason == "cap" then
-        msg = msg .. L" Stopped: purchase cap."
     end
     ChatVisitNotify(msg)
 end

@@ -119,6 +119,8 @@ function StockPiler2.Items.UpsertFromItemData(itemData, kindHint)
         isRefinable = itemData.isRefinable == true,
         itemType = tonumber(itemData.type) or tonumber(itemData.itemType) or 0,
         iLevel = tonumber(itemData.iLevel) or 0,
+        rarity = tonumber(itemData.rarity),
+        itemSet = tonumber(itemData.itemSet),
     }
     local hasLiveCraft = ItemDataHasCraftBonuses(itemData)
     if StockPiler2.MaterialSpec and StockPiler2.MaterialSpec.FromItemData then
@@ -192,6 +194,8 @@ function StockPiler2.Items.AsItemData(uid)
         itemType = tonumber(row.itemType) or 0,
         type = tonumber(row.itemType) or 0,
         iLevel = tonumber(row.iLevel) or 0,
+        rarity = tonumber(row.rarity),
+        itemSet = tonumber(row.itemSet) or 0,
         craftingBonus = nil,
     }
 end

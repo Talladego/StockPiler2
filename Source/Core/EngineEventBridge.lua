@@ -23,10 +23,8 @@ local function BusFire(name, payload)
 end
 
 local function RequestFooterIfOpen()
-    if StockPiler2Window and StockPiler2Window.RequestFooterRefresh
-        and DoesWindowExist("StockPiler2Window")
-        and WindowGetShowing("StockPiler2Window") == true
-    then
+    -- Always queue readiness sync so hotbar macros update even when SP2 is closed.
+    if StockPiler2Window and StockPiler2Window.RequestFooterRefresh then
         StockPiler2Window.RequestFooterRefresh()
     end
 end
@@ -65,8 +63,14 @@ function Bridge.OnCraftingSlotUpdated(updatedSlots)
     if Perf and Perf.End then
         Perf.End("Inv.ApplySlots")
     end
-    if StockPiler2.Brew and StockPiler2.Brew.OnCraftingUpdated then
-        StockPiler2.Brew.OnCraftingUpdated()
+    -- Perf: Brew job active → always pass through (ReconcileBoardIntegrity + Tick).
+    -- Idle craft-bag rearrange must NOT MarkBrewUiDue (was BrewUi+WatchRows on every
+    -- slot shuffle). Apo/crafting state still arms BrewUi via OnCraftingUpdated.
+    -- Do not call OnCraftingUpdated synchronously per craft-slot during loot storms.
+    local Brew = StockPiler2.Brew
+    local jobActive = Brew and type(Brew._job) == "table"
+    if jobActive and Brew.OnCraftingUpdated then
+        Brew.OnCraftingUpdated()
     end
     if StockPiler2.Grow and StockPiler2.Grow.NeedsCurrentStageAdditive
         and StockPiler2.Grow.NeedsCurrentStageAdditive()
@@ -83,15 +87,32 @@ function Bridge.OnCraftingUpdated()
     if StockPiler2.LearnBridge and StockPiler2.LearnBridge.OnCraftingUpdated then
         StockPiler2.LearnBridge.OnCraftingUpdated()
     end
-    if StockPiler2.Brew and StockPiler2.Brew.OnCraftingUpdated then
-        StockPiler2.Brew.OnCraftingUpdated()
+    local Sch = StockPiler2.Scheduler
+    local Brew = StockPiler2.Brew
+    local jobActive = Brew and type(Brew._job) == "table"
+    if jobActive then
+        if Brew.OnCraftingUpdated then
+            Brew.OnCraftingUpdated()
+        end
+    elseif Sch and Sch.ShouldHoldBrewUi and Sch.ShouldHoldBrewUi() == true then
+        if Sch.MarkBrewUiDue then
+            Sch.MarkBrewUiDue()
+        end
+        if Sch.IsHarvestStormActive and Sch.IsHarvestStormActive() == true then
+            Sch._brewUiStormHeld = true
+        end
+    elseif Sch and Sch.MarkBrewUiDue then
+        Sch.MarkBrewUiDue()
+    elseif Brew and Brew.OnCraftingUpdated then
+        Brew.OnCraftingUpdated()
     end
     RequestFooterIfOpen()
 end
 
 function Bridge.OnCultivationUpdated()
-    if StockPiler2.Perf and StockPiler2.Perf.Mark then
-        StockPiler2.Perf.Mark("CultivationUpdated")
+    local Perf = StockPiler2.Perf
+    if Perf and Perf.Begin then
+        Perf.Begin("CultivationUpdated")
     end
     local plotNum = 0
     if GameData and GameData.Player and GameData.Player.Cultivation then
@@ -115,6 +136,79 @@ function Bridge.OnCultivationUpdated()
     then
         StockPiler2.Scheduler.WakeAutoGrow()
     end
+    if Perf and Perf.End then
+        Perf.End("CultivationUpdated")
+    end
+end
+
+function Bridge.OnTradeSkillUpdated()
+    local Caps = StockPiler2.TradeSkillCaps
+    if not Caps then
+        return
+    end
+    if Caps.MarkTradeSkillsReady then
+        Caps.MarkTradeSkillsReady()
+    end
+    local cult = Caps.CultivationLevel and Caps.CultivationLevel() or 0
+    local apo = Caps.ApothecaryLevel and Caps.ApothecaryLevel() or 0
+    local levelsHash = Caps.LevelsHash and Caps.LevelsHash() or (tostring(cult) .. ":" .. tostring(apo))
+    local prev = Bridge._skillPrev
+    local hashChanged = Bridge._skillLevelsHash ~= levelsHash
+    local firstSkillsReady = Bridge._skillsWereReady ~= true
+    Bridge._skillLevelsHash = levelsHash
+    Bridge._skillsWereReady = true
+    if type(prev) ~= "table" then
+        Bridge._skillPrev = { cult = cult, apo = apo }
+        hashChanged = true
+    else
+        local dCult = cult - (tonumber(prev.cult) or cult)
+        local dApo = apo - (tonumber(prev.apo) or apo)
+        prev.cult = cult
+        prev.apo = apo
+        -- Logout / char switch: ignore large negative jumps.
+        if dCult <= -5 or dApo <= -5 then
+            if Caps.ResetTradeSkillsReady then
+                Caps.ResetTradeSkillsReady()
+            end
+            Bridge._skillsWereReady = false
+            Bridge._skillLevelsHash = nil
+            return
+        end
+        if dCult > 0 and StockPiler2.SeedMap and StockPiler2.SeedMap.OnCultSkillDelta then
+            StockPiler2.SeedMap.OnCultSkillDelta(dCult)
+        end
+        if dApo > 0 and StockPiler2.RecipeSpec and StockPiler2.RecipeSpec.OnApoSkillDelta then
+            StockPiler2.RecipeSpec.OnApoSkillDelta(dApo)
+        end
+    end
+    -- Login: skills just became known — drop any premature skill-gate NotifyOnce.
+    if firstSkillsReady then
+        if StockPiler2.Debug and StockPiler2.Debug.ClearNotifyOnceContaining then
+            StockPiler2.Debug.ClearNotifyOnceContaining(":need_skill")
+            StockPiler2.Debug.ClearNotifyOnceContaining(":need_apothecary")
+        end
+        if StockPiler2.Planner then
+            local keys = StockPiler2.Planner._watchBlockOnceKeys
+            if type(keys) == "table" then
+                for watchKey, onceKey in pairs(keys) do
+                    local s = tostring(onceKey or "")
+                    if string.find(s, ":need_skill", 1, true)
+                        or string.find(s, ":need_apothecary", 1, true)
+                    then
+                        keys[watchKey] = nil
+                    end
+                end
+            end
+        end
+    end
+    if hashChanged or firstSkillsReady then
+        if StockPiler2.Scheduler and StockPiler2.Scheduler.EnqueuePlanRebuild then
+            StockPiler2.Scheduler.EnqueuePlanRebuild()
+        end
+        if StockPiler2TabWatch and StockPiler2TabWatch.RefreshSkillGates then
+            StockPiler2TabWatch.RefreshSkillGates()
+        end
+    end
 end
 
 function Bridge.OnStoreShow()
@@ -127,6 +221,17 @@ function Bridge.OnStoreShow()
 end
 
 function Bridge.OnLoadingEnd()
+    -- Re-arm skill readiness; tradeSkills are often still empty here.
+    if StockPiler2.TradeSkillCaps and StockPiler2.TradeSkillCaps.ResetTradeSkillsReady then
+        local Caps = StockPiler2.TradeSkillCaps
+        Caps.ResetTradeSkillsReady()
+        if Caps.AreTradeSkillsReady then
+            Caps.AreTradeSkillsReady() -- mark ready immediately if levels already warm
+        end
+    end
+    Bridge._skillLevelsHash = nil
+    Bridge._skillPrev = nil
+    Bridge._skillsWereReady = false
     if StockPiler2.Garden and StockPiler2.Garden.SyncAll then
         StockPiler2.Garden.SyncAll()
     end
@@ -136,10 +241,7 @@ end
 
 function Bridge.OnUpdateProcessed(timeElapsed)
     StockPiler2.FrameCounter = (tonumber(StockPiler2.FrameCounter) or 0) + 1
-    -- Attribute previous frame hitch to trail left by last tick's work.
-    if StockPiler2.Perf and StockPiler2.Perf.OnFrame then
-        StockPiler2.Perf.OnFrame(timeElapsed)
-    end
+    -- Perf hitch attribution is owned by LibPerf (optional); do not call OnFrame here.
     -- Drain coalesced Garden.SyncAll (UpdatedIndex==0 storms) once per frame.
     if StockPiler2.Garden and StockPiler2.Garden.FlushPendingSyncAll then
         StockPiler2.Garden.FlushPendingSyncAll()
@@ -153,6 +255,14 @@ function Bridge.OnUpdateProcessed(timeElapsed)
     end
     if StockPiler2Window and StockPiler2Window.FlushPendingFooterRefresh then
         StockPiler2Window.FlushPendingFooterRefresh()
+    end
+    -- One Brew.OnCraftingUpdated max per frame (craft-slot coalesce); storm may still hold.
+    -- Promote post-storm BrewUi arm from a prior expiry frame before flush (0.4.101).
+    if StockPiler2.Scheduler and StockPiler2.Scheduler.PromotePostStormBrewUi then
+        StockPiler2.Scheduler.PromotePostStormBrewUi()
+    end
+    if StockPiler2.Scheduler and StockPiler2.Scheduler.FlushBrewUiIfDue then
+        StockPiler2.Scheduler.FlushBrewUiIfDue()
     end
     if StockPiler2.LearnBridge and StockPiler2.LearnBridge.OnUpdateProcessed then
         StockPiler2.LearnBridge.OnUpdateProcessed()
@@ -182,6 +292,9 @@ function Bridge.Register()
     if ev.PLAYER_CULTIVATION_UPDATED then
         RegisterEventHandler(ev.PLAYER_CULTIVATION_UPDATED, "StockPiler2.EngineEventBridge.OnCultivationUpdated")
     end
+    if ev.TRADE_SKILL_UPDATED then
+        RegisterEventHandler(ev.TRADE_SKILL_UPDATED, "StockPiler2.EngineEventBridge.OnTradeSkillUpdated")
+    end
     if ev.LOADING_END then
         RegisterEventHandler(ev.LOADING_END, "StockPiler2.EngineEventBridge.OnLoadingEnd")
     end
@@ -193,6 +306,13 @@ function Bridge.Register()
     end
     if StockPiler2.VendorAdapter and StockPiler2.VendorAdapter.EnsureStoreHook then
         StockPiler2.VendorAdapter.EnsureStoreHook()
+    end
+    local Caps = StockPiler2.TradeSkillCaps
+    if Caps then
+        Bridge._skillPrev = {
+            cult = Caps.CultivationLevel and Caps.CultivationLevel() or 0,
+            apo = Caps.ApothecaryLevel and Caps.ApothecaryLevel() or 0,
+        }
     end
     Bridge._registered = true
     StockPiler2.Debug.LogAlways("init engine event bridge registered")
@@ -218,6 +338,9 @@ function Bridge.Unregister()
     end
     if ev.PLAYER_CULTIVATION_UPDATED then
         UnregisterEventHandler(ev.PLAYER_CULTIVATION_UPDATED, "StockPiler2.EngineEventBridge.OnCultivationUpdated")
+    end
+    if ev.TRADE_SKILL_UPDATED then
+        UnregisterEventHandler(ev.TRADE_SKILL_UPDATED, "StockPiler2.EngineEventBridge.OnTradeSkillUpdated")
     end
     if ev.LOADING_END then
         UnregisterEventHandler(ev.LOADING_END, "StockPiler2.EngineEventBridge.OnLoadingEnd")

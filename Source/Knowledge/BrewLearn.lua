@@ -5,6 +5,13 @@
 StockPiler2.BrewLearn = StockPiler2.BrewLearn or {}
 local BL = StockPiler2.BrewLearn
 
+local function T(key, tokens)
+    if StockPiler2.T then
+        return StockPiler2.T(key, tokens)
+    end
+    return L"[" .. towstring(tostring(key or "")) .. L"]"
+end
+
 local function ToNarrow(value)
     return StockPiler2.ToNarrow(value)
 end
@@ -292,7 +299,120 @@ function StockPiler2.BrewLearn.RecipeStabilityTotal(materials)
 end
 
 function StockPiler2.BrewLearn.RecipeIsStable(materials)
-    return BL.RecipeStabilityTotal(materials) >= 0
+    -- Engine HIGH (safe succeed) needs stability total > 0; total == 0 is MEDIUM/risky.
+    return BL.RecipeStabilityTotal(materials) > 0
+end
+
+local function SuccessChanceLabel(chance)
+    chance = tonumber(chance) or 0
+    local CSC = GameData and GameData.CraftingSuccessChance
+    if type(CSC) == "table" then
+        if chance == CSC.HIGH then
+            return "HIGH"
+        end
+        if chance == CSC.MEDIUM then
+            return "MEDIUM"
+        end
+        if chance == CSC.LOW then
+            return "LOW"
+        end
+        if chance == CSC.INVALID then
+            return "INVALID"
+        end
+    end
+    return "chance=" .. tostring(chance)
+end
+
+local function EmitBrewStability(msg)
+    if StockPiler2.Debug and StockPiler2.Debug.LogOp then
+        StockPiler2.Debug.LogOp("brew", msg)
+    elseif StockPiler2.Trace then
+        StockPiler2.Trace(msg)
+    end
+end
+
+--- Diagnostic: SP2 bonus-sum stability vs engine SuccessChance for current cauldron mats.
+--- reason: pending | fail | valid
+function StockPiler2.BrewLearn.LogCauldronStability(reason, materials)
+    reason = tostring(reason or "check")
+    if type(materials) ~= "table" or #materials == 0 then
+        materials = BL.CaptureApothecaryMaterials and BL.CaptureApothecaryMaterials() or nil
+    end
+    if type(materials) ~= "table" or #materials == 0 then
+        return false
+    end
+
+    local parts = {}
+    for i = 1, #materials do
+        local m = materials[i]
+        if type(m) == "table" then
+            local stab = BL.GetMaterialStability(m)
+            local skill = tonumber(m.craftingSkillRequirement) or 0
+            local uid = tonumber(m.uniqueID) or 0
+            local per = tonumber(m.perCraft) or 1
+            local name = m.nameNarrow
+            if name == nil or name == "" then
+                name = ToNarrow(m.name)
+            end
+            if name == nil or name == "" then
+                name = tostring(uid)
+            end
+            local stabNum = tonumber(stab) or 0
+            local stabText = tostring(stabNum)
+            if stabNum > 0 then
+                stabText = "+" .. stabText
+            end
+            parts[#parts + 1] = string.format(
+                "%s uid=%d x%d skill=%d stab=%s (%s)",
+                tostring(m.role or "?"),
+                uid,
+                per,
+                skill,
+                stabText,
+                name
+            )
+        end
+    end
+
+    local sp2Total = BL.RecipeStabilityTotal(materials)
+    local sp2Stable = BL.RecipeIsStable(materials) == true
+    local chance = 0
+    local state = -1
+    local err = 0
+    local ometer = 0
+    if GameData and GameData.CraftingStatus then
+        chance = tonumber(GameData.CraftingStatus.SuccessChance) or 0
+        state = tonumber(GameData.CraftingStatus.State) or -1
+        err = tonumber(GameData.CraftingStatus.ErrorCode) or 0
+        ometer = tonumber(GameData.CraftingStatus.OmeterValue) or 0
+    end
+    local chanceLabel = SuccessChanceLabel(chance)
+    local fp = table.concat(parts, ";")
+        .. "|t=" .. tostring(sp2Total)
+        .. "|c=" .. tostring(chance)
+        .. "|o=" .. tostring(ometer)
+        .. "|s=" .. tostring(state)
+        .. "|r=" .. reason
+    if reason == "valid" and BL._lastStabilityFp == fp then
+        return false
+    end
+    if reason == "valid" then
+        BL._lastStabilityFp = fp
+    end
+
+    EmitBrewStability(string.format(
+        "stability reason=%s sp2Total=%d sp2Stable=%s engineChance=%s(%d) ometer=%d state=%d err=%d mats=[%s]",
+        reason,
+        tonumber(sp2Total) or 0,
+        tostring(sp2Stable),
+        chanceLabel,
+        chance,
+        ometer,
+        state,
+        err,
+        table.concat(parts, " | ")
+    ))
+    return true
 end
 
 local GROW_BREW_ROLE_ORDER = {
@@ -320,7 +440,7 @@ function StockPiler2.BrewLearn.EffectiveMaterialPerCraft(mat, materials)
         return perCraft
     end
     local total = BL.RecipeStabilityTotal(materials)
-    if total >= 0 then
+    if total > 0 then
         return perCraft
     end
     local stab = BL.GetMaterialStability(mat) or 0
@@ -751,6 +871,9 @@ function StockPiler2.BrewLearn.BeginPendingCraft()
         StockPiler2.Trace("Brew pending key=" .. tostring(StockPiler2.BrewLearn._pendingCraft.recipeKey)
             .. " mats=" .. table.concat(parts, ", "))
     end
+    if BL.LogCauldronStability then
+        BL.LogCauldronStability("pending", materials)
+    end
 end
 
 local function TableCount(t)
@@ -1063,22 +1186,24 @@ function StockPiler2.BrewLearn.CompletePendingCraftLearn(opts)
             local delta = tonumber(out.lastDelta) or tonumber(out.crafts) or 1
             local name = out.name
             if name == nil or name == L"" then
-                name = L"potion"
+                name = T("brew.potion_fallback")
             end
-            local line = L"Brewed " .. name .. L" x" .. towstring(tostring(delta))
+            local line
             if chatCrit then
-                line = line .. L" (critical)"
+                line = T("brew.outcome_ok_crit", { name = name, count = tostring(delta) })
+            else
+                line = T("brew.outcome_ok", { name = name, count = tostring(delta) })
             end
             NotifyBrewOutcome(line)
         end
     elseif opts.failed == true then
-        local failName = L"potion"
+        local failName = T("brew.potion_fallback")
         if pending.chatCreatedName ~= nil and pending.chatCreatedName ~= L"" then
             failName = pending.chatCreatedName
         elseif type(chatCues) == "table" and chatCues.createdName ~= nil and chatCues.createdName ~= "" then
             failName = towstring(tostring(chatCues.createdName))
         end
-        NotifyBrewOutcome(L"Brew failed: " .. failName .. L".")
+        NotifyBrewOutcome(T("brew.outcome_fail", { name = failName }))
     end
     StockPiler2.BrewLearn._pendingCraft = nil
     if StockPiler2.CraftChat and StockPiler2.CraftChat.TakeCues then
@@ -1172,6 +1297,7 @@ function StockPiler2.BrewLearn.OnCraftingUpdated()
     local SUCCESS_REPEAT = GameData.CraftingStates.SUCCESS_REPEAT
     local FAIL = GameData.CraftingStates.FAIL
     local PERFORMING = GameData.CraftingStates.PERFORMING
+    local VALID = GameData.CraftingStates.VALID_RECIPE
     if state == PERFORMING then
         BL.BeginPendingCraft()
         return false
@@ -1182,10 +1308,18 @@ function StockPiler2.BrewLearn.OnCraftingUpdated()
         if backpackFull and err == backpackFull then
             return false
         end
+        local pending = StockPiler2.BrewLearn._pendingCraft
+        local mats = type(pending) == "table" and pending.materials or nil
+        if BL.LogCauldronStability then
+            BL.LogCauldronStability("fail", mats)
+        end
         return BL.CompletePendingCraftLearn({ failed = true }) == true
     end
     if state == SUCCESS or state == SUCCESS_REPEAT then
         return BL.CompletePendingCraftLearn() == true
+    end
+    if state == VALID and BL.LogCauldronStability then
+        BL.LogCauldronStability("valid", nil)
     end
     return false
 end

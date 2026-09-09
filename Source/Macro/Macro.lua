@@ -7,6 +7,13 @@
 StockPiler2.Macro = StockPiler2.Macro or {}
 local Macro = StockPiler2.Macro
 
+local function T(key, tokens)
+    if StockPiler2.T then
+        return StockPiler2.T(key, tokens)
+    end
+    return L"[" .. towstring(tostring(key or "")) .. L"]"
+end
+
 local MACRO_NAME = L"StockPiler2 Harvest"
 local MACRO_TEXT = L"/script StockPiler2.Macro.HarvestClick()"
 local MACRO_ICON = 2486 -- Abi_or_Mushroom01.dds (+ _disabled)
@@ -317,8 +324,10 @@ function Macro.UpdateMacro()
         local macro = macros[slot]
         if type(macro) == "table" and MacroText(macro) == L"" and (macro.name == nil or macro.name == L"") then
             SetMacroSlot(slot, MACRO_NAME, MACRO_TEXT, MACRO_ICON)
-            Print(L"<icon" .. towstring(tostring(MACRO_ICON)) .. L"> StockPiler2 Harvest macro created (slot "
-                .. towstring(tostring(slot)) .. L"). Drag it to your action bar.")
+            Print(T("macro.harvest_created", {
+                icon = tostring(MACRO_ICON),
+                slot = tostring(slot),
+            }))
             Macro.MacroWarningState.full = false
             Macro.MacroWarningState.missing = false
             return true
@@ -326,7 +335,7 @@ function Macro.UpdateMacro()
     end
 
     if not Macro.MacroWarningState.full then
-        Print(L"StockPiler2: could not create Harvest macro (no empty macro slot).")
+        Print(T("macro.harvest_full"))
         Macro.MacroWarningState.full = true
     end
     return false
@@ -348,8 +357,10 @@ function Macro.UpdateBrewMacro()
         local macro = macros[slot]
         if type(macro) == "table" and MacroText(macro) == L"" and (macro.name == nil or macro.name == L"") then
             SetMacroSlot(slot, BREW_MACRO_NAME, BREW_MACRO_TEXT, BREW_MACRO_ICON, "brew")
-            Print(L"<icon" .. towstring(tostring(BREW_MACRO_ICON)) .. L"> StockPiler2 Brew macro created (slot "
-                .. towstring(tostring(slot)) .. L"). Drag it to your action bar.")
+            Print(T("macro.brew_created", {
+                icon = tostring(BREW_MACRO_ICON),
+                slot = tostring(slot),
+            }))
             Macro.BrewMacroWarningState.full = false
             Macro.BrewMacroWarningState.missing = false
             return true
@@ -357,7 +368,7 @@ function Macro.UpdateBrewMacro()
     end
 
     if not Macro.BrewMacroWarningState.full then
-        Print(L"StockPiler2: could not create Brew macro (no empty macro slot).")
+        Print(T("macro.brew_full"))
         Macro.BrewMacroWarningState.full = true
     end
     return false
@@ -721,8 +732,7 @@ function Macro.RefreshMacroButtonAppearance(opts)
             local slots = CachedSlotsForMacro(macroId)
             if #slots == 0 then
                 if not Macro.MacroWarningState.unplaced then
-                    Print(L"<icon" .. towstring(tostring(MACRO_ICON))
-                        .. L"> StockPiler2 Harvest macro is not on any action bar. Drag it from the macro list to a hotbar slot.")
+                    Print(T("macro.harvest_unplaced", { icon = tostring(MACRO_ICON) }))
                     Macro.MacroWarningState.unplaced = true
                 end
             else
@@ -741,8 +751,7 @@ function Macro.RefreshMacroButtonAppearance(opts)
             local slots = CachedSlotsForMacro(brewId)
             if #slots == 0 then
                 if not Macro.BrewMacroWarningState.unplaced then
-                    Print(L"<icon" .. towstring(tostring(BREW_MACRO_ICON))
-                        .. L"> StockPiler2 Brew macro is not on any action bar. Drag it from the macro list to a hotbar slot.")
+                    Print(T("macro.brew_unplaced", { icon = tostring(BREW_MACRO_ICON) }))
                     Macro.BrewMacroWarningState.unplaced = true
                 end
             else

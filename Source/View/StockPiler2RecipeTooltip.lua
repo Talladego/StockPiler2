@@ -4,13 +4,17 @@
 
 StockPiler2RecipeTooltip = {}
 
-local RECIPE_TOOLTIP_SEP_LINE = L"----------------------------------------"
+local function T(key, tokens)
+    if StockPiler2.T then return StockPiler2.T(key, tokens) end
+    return L"[" .. towstring(tostring(key or "")) .. L"]"
+end
+
 local RECIPE_TOOLTIP_MAX_ROWS = 24
 
-StockPiler2RecipeTooltip.SEP_LINE = RECIPE_TOOLTIP_SEP_LINE
+StockPiler2RecipeTooltip.SEP_LINE = T("recipe.sep")
 
 local function AppendRecipeSeparator(body)
-    body[#body + 1] = { text = RECIPE_TOOLTIP_SEP_LINE, kind = "separator" }
+    body[#body + 1] = { text = T("recipe.sep"), kind = "separator" }
 end
 
 function StockPiler2RecipeTooltip.AppendSeparator(rows)
@@ -213,12 +217,12 @@ function StockPiler2RecipeTooltip.BuildRecipeTooltipRows(data)
         return body
     end
 
-    local potionName = data.name or L"Potion"
-    body[#body + 1] = { text = L"Recipe - " .. potionName, kind = "title" }
+    local potionName = data.name or T("ui.potion_fallback")
+    body[#body + 1] = { text = T("recipe.title", { name = potionName }), kind = "title" }
 
     local level = ResolveRecipePotionLevel(data)
     if level > 0 then
-        body[#body + 1] = { text = L"Level " .. towstring(tostring(level)), kind = "meta" }
+        body[#body + 1] = { text = T("recipe.level", { level = tostring(level) }), kind = "meta" }
     end
 
     local metaParts = {}
@@ -233,7 +237,7 @@ function StockPiler2RecipeTooltip.BuildRecipeTooltipRows(data)
         else
             yieldText = towstring(string.format("%.1f", rounded))
         end
-        metaParts[#metaParts + 1] = L"Yield: " .. yieldText .. L" per success"
+        metaParts[#metaParts + 1] = T("recipe.yield", { yield = yieldText })
     end
     local attempts = tonumber(data.brewAttempts) or 0
     local rate = tonumber(data.successRate)
@@ -242,11 +246,13 @@ function StockPiler2RecipeTooltip.BuildRecipeTooltipRows(data)
             rate = successes / attempts
         end
         local pct = math.floor((rate or 0) * 100 + 0.5)
-        metaParts[#metaParts + 1] = L"Success: " .. towstring(tostring(pct))
-            .. L"% (" .. towstring(tostring(successes))
-            .. L"/" .. towstring(tostring(attempts)) .. L")"
+        metaParts[#metaParts + 1] = T("recipe.success", {
+            pct = tostring(pct),
+            ok = tostring(successes),
+            att = tostring(attempts),
+        })
     elseif data.crafts and data.crafts > 0 then
-        metaParts[#metaParts + 1] = L"Brewed " .. towstring(tostring(data.crafts)) .. L" time(s)"
+        metaParts[#metaParts + 1] = T("recipe.brewed_times", { n = tostring(data.crafts) })
     end
     if #metaParts == 1 then
         body[#body + 1] = { text = metaParts[1], kind = "meta" }
@@ -258,11 +264,20 @@ function StockPiler2RecipeTooltip.BuildRecipeTooltipRows(data)
     local fails = tonumber(data.brewFailures) or 0
     local volatiles = tonumber(data.brewVolatiles) or 0
     if attempts > 0 and (mainKept > 0 or crits > 0 or fails > 0 or volatiles > 0) then
-        local outcome = L"Crit: " .. towstring(tostring(crits))
-            .. L"  Main kept: " .. towstring(tostring(mainKept))
-            .. L"  Fail: " .. towstring(tostring(fails))
+        local outcome
         if volatiles > 0 then
-            outcome = outcome .. L"  Volatile: " .. towstring(tostring(volatiles))
+            outcome = T("recipe.outcomes_vol", {
+                crit = tostring(crits),
+                kept = tostring(mainKept),
+                fail = tostring(fails),
+                vol = tostring(volatiles),
+            })
+        else
+            outcome = T("recipe.outcomes", {
+                crit = tostring(crits),
+                kept = tostring(mainKept),
+                fail = tostring(fails),
+            })
         end
         -- Fold into last meta line so 5-slot recipes keep separators within the row budget.
         local last = body[#body]
@@ -271,6 +286,15 @@ function StockPiler2RecipeTooltip.BuildRecipeTooltipRows(data)
         else
             body[#body + 1] = { text = outcome, kind = "meta" }
         end
+    end
+    local RS = StockPiler2.RecipeSpec
+    if RS and RS.FormatApoSkillUpLine and type(data.recipe) == "table" then
+        local apoLine = RS.FormatApoSkillUpLine(data.recipe)
+        if apoLine and apoLine ~= L"" then
+            body[#body + 1] = { text = apoLine, kind = "meta" }
+        end
+    elseif RS and RS.FormatApoSkillUpLine and data.apoSkillLine then
+        body[#body + 1] = { text = towstring(tostring(data.apoSkillLine)), kind = "meta" }
     end
 
     local materials = data.materials or {}
@@ -306,7 +330,10 @@ function StockPiler2RecipeTooltip.BuildRecipeTooltipRows(data)
                     end
                     slotRows = {
                         {
-                            text = towstring(tostring(role)) .. L": " .. towstring(tostring(matTitle)),
+                            text = T("recipe.role_mat", {
+                                role = tostring(role),
+                                title = tostring(matTitle),
+                            }),
                             kind = "ingredient",
                             role = role,
                         },
@@ -363,23 +390,23 @@ function StockPiler2RecipeTooltip.ColorForKind(kind, role)
     return RecipeTooltipColor(kind, role)
 end
 
-local EFFECT_FULL_LABELS = {
-    str = L"Strength",
-    int = L"Intelligence",
-    wp = L"Willpower",
-    bs = L"Ballistic Skill",
-    tou = L"Toughness",
-    armor = L"Armor",
-    absorb = L"Absorb",
-    heal = L"Heal",
-    hot = L"HoT",
-    ap = L"Action Points",
+local EFFECT_FULL_KEYS = {
+    str = "effect.full.str",
+    int = "effect.full.int",
+    wp = "effect.full.wp",
+    bs = "effect.full.bs",
+    tou = "effect.full.tou",
+    armor = "effect.full.armor",
+    absorb = "effect.full.absorb",
+    heal = "effect.full.heal",
+    hot = "effect.full.hot",
+    ap = "effect.full.ap",
 }
 
 --- Build placeholder rows when CreateItemTooltip cannot run (no Use-bonus in bags).
 function StockPiler2RecipeTooltip.BuildPotionPlaceholderRows(summary)
     summary = type(summary) == "table" and summary or {}
-    local name = summary.name or L"Potion"
+    local name = summary.name or T("ui.potion_fallback")
     local iconNum = tonumber(summary.iconNum) or 0
     if iconNum <= 0 and type(summary.itemData) == "table" then
         iconNum = tonumber(summary.itemData.iconNum) or 0
@@ -398,7 +425,7 @@ function StockPiler2RecipeTooltip.BuildPotionPlaceholderRows(summary)
     end
     local rows = {
         { text = name, kind = "title" },
-        { text = L"Potion", kind = "meta" },
+        { text = T("ui.potion_fallback"), kind = "meta" },
     }
     local iLevel = tonumber(summary.iLevel) or 0
     if iLevel <= 0 and type(summary.itemData) == "table" then
@@ -406,7 +433,7 @@ function StockPiler2RecipeTooltip.BuildPotionPlaceholderRows(summary)
     end
     if iLevel > 0 then
         rows[#rows + 1] = {
-            text = L"Item Level: " .. towstring(tostring(iLevel)),
+            text = T("recipe.item_level", { n = tostring(iLevel) }),
             kind = "meta",
         }
     end
@@ -416,32 +443,31 @@ function StockPiler2RecipeTooltip.BuildPotionPlaceholderRows(summary)
     end
     if rank > 0 then
         rows[#rows + 1] = {
-            text = L"Minimum Rank: " .. towstring(tostring(rank)),
+            text = T("recipe.min_rank", { n = tostring(rank) }),
             kind = "body",
         }
     end
     local effectKey = summary.effectKey
     if type(effectKey) == "string" and effectKey ~= "" then
-        local label = EFFECT_FULL_LABELS[effectKey] or towstring(effectKey)
+        local catalogKey = EFFECT_FULL_KEYS[effectKey]
+        local label = catalogKey and T(catalogKey) or towstring(effectKey)
         local buff = tonumber(summary.buffNum) or 0
         local durationSec = tonumber(summary.durationSec) or 0
         if buff > 0 and durationSec > 0 then
             local mins = math.floor(durationSec / 60)
-            local durText = mins > 0 and (towstring(tostring(mins)) .. L" minutes")
-                or (towstring(tostring(durationSec)) .. L" seconds")
+            local durText = mins > 0 and T("recipe.minutes", { n = tostring(mins) })
+                or T("recipe.seconds", { n = tostring(durationSec) })
             rows[#rows + 1] = {
-                text = L"Use: Increases your "
-                    .. label
-                    .. L" by "
-                    .. towstring(tostring(buff))
-                    .. L" for "
-                    .. durText
-                    .. L".",
+                text = T("recipe.use_buff", {
+                    stat = label,
+                    buff = tostring(buff),
+                    dur = durText,
+                }),
                 kind = "positive",
             }
         else
             rows[#rows + 1] = {
-                text = L"Effect: " .. label,
+                text = T("recipe.effect", { label = label }),
                 kind = "positive",
             }
         end
@@ -449,7 +475,7 @@ function StockPiler2RecipeTooltip.BuildPotionPlaceholderRows(summary)
     local uid = tonumber(summary.uniqueID) or 0
     if uid > 0 then
         rows[#rows + 1] = {
-            text = L"(" .. towstring(tostring(uid)) .. L")",
+            text = T("recipe.uid_parens", { uid = tostring(uid) }),
             kind = "meta",
         }
     end

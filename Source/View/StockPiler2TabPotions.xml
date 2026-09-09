@@ -161,12 +161,23 @@
                 </Button>
                 <Button name="$parentSortName" inherits="StockPiler2_SortHeader" id="1" textalign="left">
                     <Size>
-                        <AbsPoint x="348" y="28" />
+                        <AbsPoint x="304" y="28" />
                     </Size>
                     <TextOffset x="8" y="4" />
                     <Anchors>
                         <Anchor point="topleft" relativePoint="topleft">
                             <AbsPoint x="40" y="114" />
+                        </Anchor>
+                    </Anchors>
+                </Button>
+                <Button name="$parentSortLevel" inherits="StockPiler2_SortHeader" id="9" textalign="left">
+                    <Size>
+                        <AbsPoint x="44" y="28" />
+                    </Size>
+                    <TextOffset x="2" y="4" />
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="344" y="114" />
                         </Anchor>
                     </Anchors>
                 </Button>
@@ -271,6 +282,7 @@
                     <ListData table="StockPiler2TabPotions.listData" populationfunction="StockPiler2TabPotions.UpdateRows">
                         <ListColumns>
                             <ListColumn windowname="Name" variable="name" format="wstring" />
+                            <ListColumn windowname="Level" variable="levelText" format="wstring" />
                             <ListColumn windowname="Effect" variable="effectText" format="wstring" />
                             <ListColumn windowname="Power" variable="powerText" format="wstring" />
                             <ListColumn windowname="Stability" variable="stabilityText" format="wstring" />

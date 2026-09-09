@@ -244,6 +244,19 @@ function D.ClearNotifyOncePrefix(prefix)
     end
 end
 
+--- Clear NotifyOnce keys that contain a substring (e.g. ":need_skill").
+function D.ClearNotifyOnceContaining(needle)
+    needle = tostring(needle or "")
+    if needle == "" then
+        return
+    end
+    for k, _ in pairs(_notifyOnce) do
+        if type(k) == "string" and string.find(k, needle, 1, true) then
+            _notifyOnce[k] = nil
+        end
+    end
+end
+
 --- Play a GameData.Sound / numeric id (no-op while loading or if PlaySound missing).
 function D.PlayUiSound(soundId)
     soundId = tonumber(soundId)

@@ -110,11 +110,22 @@
 
                 <Label name="$parentName" font="font_chat_text" maxchars="48" textalign="leftcenter" handleinput="false" wordwrap="false">
                     <Size>
-                        <AbsPoint x="314" y="28" />
+                        <AbsPoint x="270" y="28" />
                     </Size>
                     <Anchors>
                         <Anchor point="topleft" relativePoint="topleft" relativeTo="$parent">
                             <AbsPoint x="58" y="2" />
+                        </Anchor>
+                    </Anchors>
+                </Label>
+
+                <Label name="$parentLevel" font="font_chat_text" maxchars="4" textalign="rightcenter" handleinput="false" wordwrap="false">
+                    <Size>
+                        <AbsPoint x="40" y="28" />
+                    </Size>
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft" relativeTo="$parent">
+                            <AbsPoint x="344" y="2" />
                         </Anchor>
                     </Anchors>
                 </Label>

@@ -47,11 +47,65 @@ local function BackpackTypeForBagKey(bagKey)
     return CA.InventoryBackpackType()
 end
 
-function CA.NumPlots()
-    if GameData and GameData.Player and GameData.Player.Cultivation then
-        return tonumber(GameData.Player.Cultivation.NumPlots) or 4
+--- Unlocked plot count by Cultivation skill (RoR: +1 plot per 50 skill, max 4 at 150).
+--- GameData.Player.Cultivation.NumPlots is often missing/stale and reports 4 too early.
+function CA.PlotsForCultivatingSkill(level)
+    level = tonumber(level) or 0
+    if level >= 150 then
+        return 4
+    end
+    if level >= 100 then
+        return 3
+    end
+    if level >= 50 then
+        return 2
+    end
+    return 1
+end
+
+function CA.MaxPlotSlots()
+    if GameData and GameData.Cultivation and GameData.Cultivation.NUM_OF_PLOTS ~= nil then
+        return tonumber(GameData.Cultivation.NUM_OF_PLOTS) or 4
     end
     return 4
+end
+
+function CA.NumPlots()
+    local maxSlots = CA.MaxPlotSlots()
+    local level = 0
+    if StockPiler2.TradeSkillCaps and StockPiler2.TradeSkillCaps.CultivationLevel then
+        level = tonumber(StockPiler2.TradeSkillCaps.CultivationLevel()) or 0
+    end
+    local unlocked = CA.PlotsForCultivatingSkill(level)
+    if unlocked < 1 then
+        unlocked = 1
+    end
+    if unlocked > maxSlots then
+        unlocked = maxSlots
+    end
+    return unlocked
+end
+
+function CA.IsPlotLocked(plotNum)
+    plotNum = tonumber(plotNum) or 0
+    if plotNum <= 0 then
+        return true
+    end
+    local Garden = StockPiler2.Garden
+    if Garden and type(Garden._plots) == "table" then
+        local row = Garden._plots[plotNum]
+        if type(row) == "table" and row.locked ~= nil then
+            return row.locked == true
+        end
+    end
+    if CA.ReadPlot then
+        local live = CA.ReadPlot(plotNum)
+        if type(live) == "table" and live.locked ~= nil then
+            return live.locked == true
+        end
+    end
+    -- Skill table fallback when Locked not yet synced.
+    return plotNum > CA.NumPlots()
 end
 
 local function StageEmpty()
@@ -150,8 +204,10 @@ function CA.ReadPlot(plotNum)
         seedIconNum = 0,
         seed = nil,
         additives = {},
+        locked = plotNum > CA.NumPlots(),
     }
     if plotNum <= 0 then
+        out.locked = true
         return out
     end
 
@@ -196,6 +252,11 @@ function CA.ReadPlot(plotNum)
                 out.plantUid = tonumber(info.PlantUniqueID) or 0
             end
             out.additives = ReadAdditivesMap(info.Additives)
+            if info.Locked ~= nil then
+                out.locked = info.Locked == true
+            elseif info.locked ~= nil then
+                out.locked = info.locked == true
+            end
             return out
         end
     end
@@ -225,6 +286,11 @@ function CA.ReadPlot(plotNum)
         end
         out.plantUid = tonumber(p.plantUniqueID) or 0
         out.additives = ReadAdditivesMap(p.Additives)
+        if p.Locked ~= nil then
+            out.locked = p.Locked == true
+        elseif p.locked ~= nil then
+            out.locked = p.locked == true
+        end
     end
     return out
 end

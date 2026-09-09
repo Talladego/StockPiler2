@@ -1,5 +1,5 @@
 ----------------------------------------------------------------
--- StockPiler2 Core/Audit — saved-data health (/sp2 audit)
+-- StockPiler2 Core/Audit — saved-data health (/sp2 audit) + mem counts (/sp2 mem)
 ----------------------------------------------------------------
 
 StockPiler2.Audit = StockPiler2.Audit or {}
@@ -279,4 +279,97 @@ function StockPiler2.Audit.Run(emitLog)
 
     StockPiler2.Audit.RunMapping(emitLog)
     Emit(emitLog, "--- end audit ---")
+end
+
+local function OccupiedSlots(bagMap)
+    local n = 0
+    if type(bagMap) ~= "table" then
+        return 0
+    end
+    for _, slots in pairs(bagMap) do
+        if type(slots) == "table" then
+            for _ in pairs(slots) do
+                n = n + 1
+            end
+        end
+    end
+    return n
+end
+
+--- Safe footprint triage: key counts only. Never walk item.bonus / full item trees.
+function StockPiler2.Audit.RunMem(emitLog)
+    emitLog = type(emitLog) == "function" and emitLog or function(msg)
+        StockPiler2.Debug.Print(msg)
+    end
+    Emit(emitLog, "--- StockPiler2 mem (counts only; do not d(StockPiler2)) ---")
+
+    local Inv = StockPiler2.Inventory
+    if type(Inv) ~= "table" then
+        Emit(emitLog, "  inventory: (missing)")
+    else
+        local meta = Inv.GetSnapshotMeta and Inv.GetSnapshotMeta() or {}
+        Emit(emitLog, string.format(
+            "  inventory snapGen=%d ready=%s uids=%d slots=%d samples=%d specParseCache=%d",
+            tonumber(meta.snapGen) or tonumber(Inv._snapGen) or 0,
+            tostring(meta.ready == true or Inv._ready == true),
+            tonumber(meta.uidCount) or TableSize(Inv._countByUid),
+            OccupiedSlots(Inv._itemBySlot),
+            TableSize(Inv._sampleByUid),
+            TableSize(Inv._specParseCache)
+        ))
+    end
+
+    local acct = StockPiler2.Account
+    if type(acct) ~= "table" then
+        Emit(emitLog, "  account: (missing)")
+    else
+        Emit(emitLog, string.format(
+            "  account items=%d recipes=%d potions=%d grows=%d refines=%d additives=%d vendorItems=%d",
+            TableSize(acct.items),
+            TableSize(acct.recipes),
+            TableSize(acct.potions),
+            TableSize(acct.grows),
+            TableSize(acct.refines),
+            TableSize(acct.additives),
+            TableSize(acct.vendorItems)
+        ))
+    end
+
+    local PS = StockPiler2.PlanSnapshot
+    local plan = PS and PS._plan
+    if type(plan) ~= "table" then
+        Emit(emitLog, "  planSnapshot: (none)")
+    else
+        local rows = type(plan.rows) == "table" and #plan.rows or 0
+        Emit(emitLog, string.format(
+            "  planSnapshot planGen=%s rows=%d",
+            tostring(plan.planGen or "?"),
+            rows
+        ))
+    end
+
+    local RS = StockPiler2.RecipeSpec
+    if type(RS) ~= "table" then
+        Emit(emitLog, "  recipeSpec caches: (missing)")
+    else
+        Emit(emitLog, string.format(
+            "  recipeSpec specHaveCache=%d demandCache=%d autoGrowSeedLines=%d",
+            TableSize(RS._specHaveCache),
+            TableSize(RS._demandCache),
+            type(RS._autoGrowSeedLines) == "table" and #RS._autoGrowSeedLines or 0
+        ))
+    end
+
+    local packs = StockPiler2.Locale and StockPiler2.Locale.Packs
+    local packKeys = 0
+    local langCount = 0
+    if type(packs) == "table" then
+        for _, pack in pairs(packs) do
+            langCount = langCount + 1
+            packKeys = packKeys + TableSize(pack)
+        end
+    end
+    Emit(emitLog, string.format("  locale packs=%d keys=%d", langCount, packKeys))
+
+    Emit(emitLog, "--- end mem ---")
 end

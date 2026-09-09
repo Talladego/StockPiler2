@@ -38,6 +38,9 @@ local function ActionablePlotChange(prev, row)
     if (tonumber(prev.plantUid) or 0) ~= (tonumber(row.plantUid) or 0) then
         return true
     end
+    if (prev.locked == true) ~= (row.locked == true) then
+        return true
+    end
     if IsPlotEmptyStage(prev.stage) ~= IsPlotEmptyStage(row.stage) then
         return true
     end
@@ -63,6 +66,7 @@ local function ApplyPlotRow(plotNum, row)
     local prev = Garden._plots[plotNum]
     local anyChange = type(prev) ~= "table" or prev.stage ~= row.stage
         or prev.seedUid ~= row.seedUid or prev.plantUid ~= row.plantUid
+        or (prev.locked == true) ~= (row.locked == true)
         or AdditiveFillKey(prev) ~= AdditiveFillKey(row)
     local planChange = ActionablePlotChange(prev, row)
     Garden._plots[plotNum] = row

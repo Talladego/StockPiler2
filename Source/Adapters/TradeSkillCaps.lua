@@ -5,6 +5,9 @@
 StockPiler2.TradeSkillCaps = StockPiler2.TradeSkillCaps or {}
 local Caps = StockPiler2.TradeSkillCaps
 
+-- Engine often leaves tradeSkills empty/0 until TRADE_SKILL_UPDATED after LOADING_END.
+Caps._skillsReady = Caps._skillsReady == true
+
 local function SkillId(name, fallback)
     if GameData and GameData.TradeSkills and GameData.TradeSkills[name] then
         return GameData.TradeSkills[name]
@@ -57,12 +60,43 @@ function Caps.Level(skillId)
     return 0
 end
 
+function Caps.CultivationLevel()
+    return Caps.Level(Caps.CultivationId())
+end
+
+function Caps.ApothecaryLevel()
+    return Caps.Level(Caps.ApothecaryId())
+end
+
+--- True once the client has delivered trade-skill levels this session.
+--- Until then Apo/Cult read as 0 and skill-gate chat/status is unreliable.
+function Caps.AreTradeSkillsReady()
+    if Caps._skillsReady == true then
+        return true
+    end
+    -- Warm path: levels already present (reload mid-session / late Scope init).
+    if Caps.ApothecaryLevel() > 0 or Caps.CultivationLevel() > 0 then
+        Caps._skillsReady = true
+        return true
+    end
+    return false
+end
+
+function Caps.MarkTradeSkillsReady()
+    Caps._skillsReady = true
+end
+
+--- Call on logout / character switch so the next login re-waits for skills.
+function Caps.ResetTradeSkillsReady()
+    Caps._skillsReady = false
+end
+
 function Caps.HasCultivation()
-    return Caps.Level(Caps.CultivationId()) > 0
+    return Caps.CultivationLevel() > 0
 end
 
 function Caps.HasApothecary()
-    return Caps.Level(Caps.ApothecaryId()) > 0
+    return Caps.ApothecaryLevel() > 0
 end
 
 function Caps.HasTalisman()

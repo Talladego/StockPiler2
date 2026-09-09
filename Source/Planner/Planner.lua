@@ -5,6 +5,16 @@
 StockPiler2.Planner = StockPiler2.Planner or {}
 local Planner = StockPiler2.Planner
 
+local function T(key, tokens)
+    if StockPiler2.T then
+        return StockPiler2.T(key, tokens)
+    end
+    return L"[" .. towstring(tostring(key or "")) .. L"]"
+end
+
+-- Engine gather label is wstring; compare/display via T so English TradeSkillCaps still match.
+local CULT_NAME = T("plan.fallback.cultivation")
+
 local function ToNarrow(value)
     if StockPiler2.ToNarrow then
         return StockPiler2.ToNarrow(value)
@@ -27,15 +37,15 @@ local function SetMaterialsShortStatus(row, growable, detail, buyLabel)
     if CanAutoGrowSkill() then
         if growable == true then
             row.statusKey = "restocking"
-            row.statusText = L"Restocking materials"
+            row.statusText = T("plan.status.restocking")
         else
             -- Growable short but AutoGrow off: user must enable AutoGrow (not a buy shortage).
             row.statusKey = "enable_autogrow"
-            row.statusText = L"Enable AutoGrow"
+            row.statusText = T("plan.status.enable_autogrow")
         end
     else
         row.statusKey = "buy_ingredients"
-        row.statusText = buyLabel or L"Buy plants"
+        row.statusText = buyLabel or T("plan.status.buy_plants")
     end
     if detail ~= nil then
         row.statusDetail = detail
@@ -43,6 +53,11 @@ local function SetMaterialsShortStatus(row, growable, detail, buyLabel)
 end
 
 local function ApplyNeedApothecaryStatus(row)
+    local Caps = StockPiler2.TradeSkillCaps
+    -- Avoid false "Need Apothecary" while tradeSkills are still 0 at login.
+    if Caps and Caps.AreTradeSkillsReady and Caps.AreTradeSkillsReady() ~= true then
+        return
+    end
     if CanBrewPotionsSkill() then
         return
     end
@@ -50,13 +65,105 @@ local function ApplyNeedApothecaryStatus(row)
         return
     end
     row.statusKey = "need_apothecary"
-    row.statusText = L"Need Apothecary"
+    row.statusText = T("plan.status.need_apothecary")
     local lines = {
-        L"Materials are ready, but only Apothecaries can brew potions.",
+        T("plan.line.ready_apo_only"),
     }
-    local Caps = StockPiler2.TradeSkillCaps
     if Caps and Caps.HasTalisman and Caps.HasTalisman() == true then
-        lines[#lines + 1] = L"This character is a Talisman maker."
+        lines[#lines + 1] = T("plan.line.talisman_maker")
+    end
+    row.statusLines = lines
+end
+
+--- Max Apothecary / Cultivation skillLevel required by recipe slots.
+local function RecipeSkillReqs(recipe)
+    local reqApo = 0
+    local reqCult = 0
+    if type(recipe) ~= "table" or type(recipe.slots) ~= "table" then
+        return reqApo, reqCult
+    end
+    local MS = StockPiler2.MaterialSpec
+    local RS = StockPiler2.RecipeSpec
+    for i = 1, #recipe.slots do
+        local slot = recipe.slots[i]
+        local spec = slot and slot.spec
+        if type(spec) ~= "table" and slot and RS and RS.ResolveSlotSpec then
+            spec = RS.ResolveSlotSpec(slot)
+        end
+        if type(spec) == "table" then
+            local lv = tonumber(spec.skillLevel) or 0
+            if lv > reqApo then
+                reqApo = lv
+            end
+            local growable = MS and MS.IsGrowable and MS.IsGrowable(spec) == true
+            if growable and lv > reqCult then
+                reqCult = lv
+            end
+        end
+    end
+    return reqApo, reqCult
+end
+
+--- Override status when recipe mats exceed player Cultivation / Apothecary levels.
+local function ApplyNeedSkillStatus(row)
+    if type(row) ~= "table" then
+        return
+    end
+    local Caps = StockPiler2.TradeSkillCaps
+    -- Login: Apo/Cult often read 0 until TRADE_SKILL_UPDATED — skip false need_skill.
+    if Caps and Caps.AreTradeSkillsReady and Caps.AreTradeSkillsReady() ~= true then
+        return
+    end
+    local key = tostring(row.statusKey or "")
+    if key == "potion_stocked" or key == "no_target" or key == "no_recipe" then
+        return
+    end
+    local recipe = row.recipe
+    if type(recipe) ~= "table" then
+        return
+    end
+    local reqApo, reqCult = RecipeSkillReqs(recipe)
+    local haveApo = Caps and Caps.ApothecaryLevel and Caps.ApothecaryLevel() or 0
+    local haveCult = Caps and Caps.CultivationLevel and Caps.CultivationLevel() or 0
+    haveApo = tonumber(haveApo) or 0
+    haveCult = tonumber(haveCult) or 0
+    local apoShort = reqApo > 0 and haveApo < reqApo
+    local cultShort = reqCult > 0 and haveCult < reqCult
+    if not apoShort and not cultShort then
+        return
+    end
+    row.skillReqApo = reqApo
+    row.skillReqCult = reqCult
+    row.skillHaveApo = haveApo
+    row.skillHaveCult = haveCult
+    row.statusKey = "need_skill"
+    if apoShort and cultShort then
+        local req = math.max(reqApo, reqCult)
+        row.statusText = T("plan.status.need_apo_cult", { req = tostring(req) })
+    elseif apoShort then
+        row.statusText = T("plan.status.need_apo_level", { req = tostring(reqApo) })
+    else
+        row.statusText = T("plan.status.need_cult_level", { req = tostring(reqCult) })
+    end
+    local lines = {}
+    if apoShort then
+        lines[#lines + 1] = T("plan.line.apo_skill_short", {
+            have = tostring(haveApo),
+            need = tostring(reqApo),
+        })
+    end
+    if cultShort then
+        lines[#lines + 1] = T("plan.line.cult_skill_short", {
+            have = tostring(haveCult),
+            need = tostring(reqCult),
+        })
+    end
+    if apoShort and cultShort then
+        lines[#lines + 1] = T("plan.line.skill_up_both")
+    elseif apoShort then
+        lines[#lines + 1] = T("plan.line.skill_up_apo")
+    else
+        lines[#lines + 1] = T("plan.line.skill_up_cult_buy")
     end
     row.statusLines = lines
 end
@@ -66,6 +173,7 @@ local RED_STATUS_KEYS = {
     no_recipe = true,
     enable_autogrow = true,
     need_apothecary = true,
+    need_skill = true,
     buy_ingredients = true,
     need_materials = true,
 }
@@ -82,6 +190,7 @@ local PLAYER_ACTION_STATUS_KEYS = {
     need_materials = true,
     enable_autogrow = true,
     need_apothecary = true,
+    need_skill = true,
 }
 
 Planner._watchBlockOnceKeys = Planner._watchBlockOnceKeys or {}
@@ -100,19 +209,27 @@ local function NotifyWatchRedBlocks(rows)
     if not D or not D.NotifyOnce then
         return
     end
+    local Caps = StockPiler2.TradeSkillCaps
+    local skillsReady = not Caps or not Caps.AreTradeSkillsReady
+        or Caps.AreTradeSkillsReady() == true
     local prev = Planner._watchBlockOnceKeys or {}
     local now = {}
     for i = 1, #rows do
         local row = rows[i]
         if type(row) == "table" then
             local statusKey = tostring(row.statusKey or "")
-            if RED_STATUS_KEYS[statusKey] == true then
+            -- Skill-gate chat waits until tradeSkills are populated (see AreTradeSkillsReady).
+            if (statusKey == "need_skill" or statusKey == "need_apothecary")
+                and skillsReady ~= true
+            then
+                -- skip
+            elseif RED_STATUS_KEYS[statusKey] == true then
                 local watchKey = tostring(row.potionKey or row.id or i)
                 local onceKey = "watch-block:" .. watchKey .. ":" .. statusKey
                 now[watchKey] = onceKey
                 local name = row.name
                 if name == nil or name == L"" then
-                    name = L"watch"
+                    name = T("watch.fallback")
                 end
                 local statusText = row.statusText
                 if statusText == nil or statusText == L"" then
@@ -137,13 +254,6 @@ local function NotifyAllWatchesReady(rows)
     if not D then
         return
     end
-    local Grow = StockPiler2.Grow
-    if Grow and Grow.IsSeedBufferSatisfied and Grow.IsSeedBufferSatisfied() ~= true then
-        if D.ClearNotifyOnce then
-            D.ClearNotifyOnce("watches-all-ready")
-        end
-        return
-    end
     local any = false
     local allGreen = true
     for i = 1, #rows do
@@ -157,12 +267,20 @@ local function NotifyAllWatchesReady(rows)
             end
         end
     end
+    -- Only pay CollectAutoGrowSeedLines (via IsSeedBufferSatisfied) when rows are green.
     if any and allGreen then
+        local Grow = StockPiler2.Grow
+        if Grow and Grow.IsSeedBufferSatisfied and Grow.IsSeedBufferSatisfied() ~= true then
+            if D.ClearNotifyOnce then
+                D.ClearNotifyOnce("watches-all-ready")
+            end
+            return
+        end
         local printed = false
         if D.NotifyOnce then
-            printed = D.NotifyOnce("watches-all-ready", L"All watches ready to craft.") == true
+            printed = D.NotifyOnce("watches-all-ready", T("plan.all_ready")) == true
         elseif D.Notify then
-            D.Notify(L"All watches ready to craft.")
+            D.Notify(T("plan.all_ready"))
             printed = true
         end
         if printed then
@@ -227,7 +345,7 @@ local function NotifyAutoGrowIdleBlocked(rows)
     end
     Planner._growIdleBlockOnceKey = onceKey
     local summary = table.concat(texts, "; ")
-    local msg = L"AutoGrow idle: " .. towstring(summary) .. L"."
+    local msg = T("plan.autogrow_idle", { summary = summary })
     local printed = false
     if D.NotifyOnce then
         printed = D.NotifyOnce(onceKey, msg) == true
@@ -387,6 +505,160 @@ function Planner.BuildRecipeSlotTooltipEntries(recipe, craftsNeeded, specDemand)
     return entries
 end
 
+--- Yellow Seed buffer when AutoGrow + buffer on and this recipe's seed lines are short.
+--- Shared by stocked and covered Ready paths (display only; Brew gates unchanged).
+local function TryApplySeedBufferShortStatus(row, recipe, potionKey)
+    local RS = StockPiler2.RecipeSpec
+    if not (RS and RS.ShouldAutoGrowPotion and RS.ShouldAutoGrowPotion(potionKey, nil) == true) then
+        return false
+    end
+    if not (StockPiler2.Watch
+        and StockPiler2.Watch.IsSeedBufferEnabled
+        and StockPiler2.Watch.IsSeedBufferEnabled() == true)
+    then
+        return false
+    end
+    if not (RS.WatchHasSeedBufferShort and RS.WatchHasSeedBufferShort(recipe) == true) then
+        return false
+    end
+    local buffer = StockPiler2.Watch.GetSeedBufferMin and StockPiler2.Watch.GetSeedBufferMin() or 5
+    row.statusKey = "need_seeds"
+    row.statusText = T("plan.status.seed_buffer")
+    row.statusLines = {
+        T("plan.line.seed_buffer_short", { buffer = tostring(buffer) }),
+        T("plan.line.seed_buffer_grow"),
+    }
+    return true
+end
+
+--- True when AutoGrow can increase supply of this contested spec (grow/refine).
+--- Containers and other non-growables return false (player buy).
+local function SpecIsAutoGrowProgressable(spec, role)
+    if role == "container" then
+        return false
+    end
+    local SM = StockPiler2.SeedMap
+    if SM and SM.IsGrowableSpec and SM.IsGrowableSpec(spec) == true then
+        return true
+    end
+    local MS = StockPiler2.MaterialSpec
+    if MS and MS.IsGrowable and MS.IsGrowable(spec) == true then
+        return true
+    end
+    return false
+end
+
+local function ContestedSlotLabel(spec)
+    local MS = StockPiler2.MaterialSpec
+    if MS and MS.NeedLabel then
+        return MS.NeedLabel(spec)
+    end
+    if MS and MS.Label then
+        return MS.Label(spec)
+    end
+    return T("plan.fallback.material")
+end
+
+--- When craftableShared, red Buy* only if every contested key is non-growable.
+--- Any growable/buffer plant contest → nil (keep yellow Shared; AutoGrow still works).
+--- Returns { role, have, need, label, buySeedOrMat, seedUid } or nil.
+local function ContestedBuyOnlyInfo(row)
+    local keys = row and row.contestedSpecKeys
+    if type(keys) ~= "table" then
+        return nil
+    end
+    local MS = StockPiler2.MaterialSpec
+    local RS = StockPiler2.RecipeSpec
+    if not (MS and MS.Key) then
+        return nil
+    end
+    local firstBuy = nil
+    local matched = {}
+
+    local function consider(spec, role, have, need, buySeedOrMat, seedUid)
+        if type(spec) ~= "table" then
+            return false
+        end
+        local specKey = MS.Key(spec)
+        if type(specKey) ~= "string" or keys[specKey] ~= true then
+            return false
+        end
+        matched[specKey] = true
+        if SpecIsAutoGrowProgressable(spec, role) then
+            return true -- growable contest remains
+        end
+        if firstBuy == nil then
+            firstBuy = {
+                role = role,
+                have = tonumber(have) or 0,
+                need = tonumber(need) or 0,
+                label = ContestedSlotLabel(spec),
+                buySeedOrMat = buySeedOrMat == true,
+                seedUid = tonumber(seedUid) or 0,
+            }
+        end
+        return false
+    end
+
+    local tipSlots = row.statusTipSlots
+    if type(tipSlots) == "table" then
+        for i = 1, #tipSlots do
+            local entry = tipSlots[i]
+            if type(entry) == "table" and type(entry.spec) == "table" then
+                if consider(entry.spec, entry.role, entry.have, entry.need,
+                    entry.buySeedOrMat, entry.seedUid)
+                then
+                    return nil
+                end
+            end
+        end
+    end
+
+    local recipe = row.recipe
+    if type(recipe) == "table" then
+        if RS and RS.HydrateRecipeSlots then
+            RS.HydrateRecipeSlots(recipe)
+        end
+        local slots = recipe.slots
+        if type(slots) == "table" then
+            local crafts = tonumber(row.craftsClaim) or tonumber(row.craftsNeeded) or 0
+            for i = 1, #slots do
+                local slot = slots[i]
+                if type(slot) == "table" then
+                    local spec = slot.spec or (RS and RS.ResolveSlotSpec and RS.ResolveSlotSpec(slot))
+                    if type(spec) == "table" then
+                        local specKey = MS.Key(spec)
+                        if type(specKey) == "string" and keys[specKey] == true
+                            and matched[specKey] ~= true
+                        then
+                            local perCraft = 1
+                            if RS and RS.EffectiveSpecPerCraft then
+                                perCraft = tonumber(RS.EffectiveSpecPerCraft(slot, slots)) or 1
+                            end
+                            local need = crafts * perCraft
+                            local have = 0
+                            if RS and RS.CountItemsMatchingSpec then
+                                have = tonumber(RS.CountItemsMatchingSpec(spec)) or 0
+                            end
+                            if consider(spec, slot.role, have, need, false, 0) then
+                                return nil
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Unmatched contested keys (e.g. seed-buffer): treat as AutoGrow-side → Shared.
+    for specKey, v in pairs(keys) do
+        if v == true and matched[specKey] ~= true then
+            return nil
+        end
+    end
+    return firstBuy
+end
+
 local function ApplySpecPlanStatus(row, target, recipe, demand)
     local RS = StockPiler2.RecipeSpec
     local MS = StockPiler2.MaterialSpec
@@ -397,28 +669,33 @@ local function ApplySpecPlanStatus(row, target, recipe, demand)
     row.statusTipSlots = nil
     if target.min <= 0 then
         row.statusKey = "no_target"
-        row.statusText = L"Set target"
-        row.statusLines = { L"Set a Target# for this potion." }
+        row.statusText = T("plan.status.set_target")
+        row.statusLines = { T("plan.line.set_target") }
         return
     end
     if recipe == nil then
         row.statusKey = "no_recipe"
-        row.statusText = L"Learn recipe"
+        row.statusText = T("plan.status.learn_recipe")
         if CanBrewPotionsSkill() then
             row.statusLines = {
-                L"Learn this recipe at the Apothecary, then brew it once so StockPiler can store the slots.",
+                T("plan.line.learn_recipe_apo"),
             }
         else
             row.statusLines = {
-                L"Learning potion recipes requires Apothecary. Brew once at the Apothecary to store the slots.",
+                T("plan.line.learn_recipe_need_apo"),
             }
         end
         return
     end
     if target.deficit <= 0 then
+        -- Match Ready: green Potions stocked only when buffer maintenance for this
+        -- AutoGrow watch is met; else yellow Seed buffer (Brew hold already global).
+        if TryApplySeedBufferShortStatus(row, recipe, target.potionKey) then
+            return
+        end
         row.statusKey = "potion_stocked"
-        row.statusText = L"Potions stocked"
-        row.statusLines = { L"Bag count is at or above the target." }
+        row.statusText = T("plan.status.potions_stocked")
+        row.statusLines = { T("plan.line.bag_at_target") }
         return
     end
     local yield = RS.RecipeOutputYield and RS.RecipeOutputYield(recipe) or (tonumber(recipe.recipeYield) or 2)
@@ -430,36 +707,19 @@ local function ApplySpecPlanStatus(row, target, recipe, demand)
     if RS.WatchCoveredByBagsAndCraftable
         and RS.WatchCoveredByBagsAndCraftable(target.entry, recipe, target.min)
     then
-        local wantsGrowCovered = RS.ShouldAutoGrowPotion
-            and RS.ShouldAutoGrowPotion(target.potionKey, nil) == true
-        if wantsGrowCovered
-            and StockPiler2.Watch
-            and StockPiler2.Watch.IsSeedBufferEnabled
-            and StockPiler2.Watch.IsSeedBufferEnabled() == true
-            and RS.WatchHasSeedBufferShort
-            and RS.WatchHasSeedBufferShort(recipe)
-        then
-            local buffer = StockPiler2.Watch.GetSeedBufferMin and StockPiler2.Watch.GetSeedBufferMin() or 5
-            row.statusKey = "need_seeds"
-            row.statusText = L"Seed buffer"
-            row.statusLines = {
-                L"Stock + Craftable covers the target, but watched seeds are below the buffer ("
-                    .. towstring(tostring(buffer))
-                    .. L").",
-                L"AutoGrow will refine or buffer-grow until the seed buffer is full. Brewing now risks a seed shortage.",
-            }
+        if TryApplySeedBufferShortStatus(row, recipe, target.potionKey) then
             return
         end
         row.statusKey = "ready_to_craft"
-        row.statusText = L"Ready to craft"
+        row.statusText = T("plan.status.ready_to_craft")
         if CanBrewPotionsSkill() then
             row.statusLines = {
-                L"Stock + Craftable covers the target. Open the Apothecary to brew.",
-                L"Potent / other rarities do not count. Growing resumes if stock is still short after brewing.",
+                T("plan.line.ready_open_apo"),
+                T("plan.line.ready_rarities_note"),
             }
         else
             row.statusLines = {
-                L"Stock + Craftable covers the target, but only Apothecaries can brew potions.",
+                T("plan.line.ready_apo_only_covered"),
             }
         end
         return
@@ -516,9 +776,6 @@ local function ApplySpecPlanStatus(row, target, recipe, demand)
     end
     row.statusSlots = statusSlots
 
-    local function haveNeed(entry)
-        return towstring(tostring(entry.have)) .. L"/" .. towstring(tostring(entry.need))
-    end
     local function matName(entry)
         if MS and MS.NeedLabel then
             return MS.NeedLabel(entry.spec)
@@ -526,88 +783,137 @@ local function ApplySpecPlanStatus(row, target, recipe, demand)
         if MS and MS.Label then
             return MS.Label(entry.spec)
         end
-        return L"material"
+        return T("plan.fallback.material")
     end
     local function seedName(entry)
         if MS and MS.NeedLabel then
             return MS.NeedLabel(entry.spec, { asSeed = true, seed = entry.seed })
         end
-        return L"seed"
+        return T("plan.fallback.seed")
     end
     local lines = {
-        L"Need " .. towstring(tostring(craftsNeeded)) .. L" crafts for "
-            .. towstring(tostring(target.deficit)) .. L" more of this potion."
-            .. L" Recipe yield "
-            .. towstring(tostring(yield))
-            .. L" is a best case; Potent / other rarities do not count.",
+        T("plan.line.need_crafts", {
+            crafts = tostring(craftsNeeded),
+            deficit = tostring(target.deficit),
+            yield = tostring(yield),
+        }),
     }
     if wantsGrow ~= true then
         if CanAutoGrowSkill() then
-            lines[#lines + 1] = L"Enable AutoGrow for this watch to plant short materials."
+            lines[#lines + 1] = T("plan.line.enable_autogrow_watch")
         else
-            lines[#lines + 1] =
-                L"Cultivation is required to AutoGrow. Buy plants or seeds, or use a Cultivator character."
+            lines[#lines + 1] = T("plan.line.cult_required")
             local Caps = StockPiler2.TradeSkillCaps
             local gather = Caps and Caps.GatheringLabel and Caps.GatheringLabel()
-            if gather ~= nil and gather ~= L"Cultivation" then
-                lines[#lines + 1] = L"This character gathers via "
-                    .. gather
-                    .. L" — plant mats must be bought or grown on a Cultivator."
+            if gather ~= nil and gather ~= CULT_NAME then
+                lines[#lines + 1] = T("plan.line.gathers_via", { gather = gather })
             end
         end
     end
     for i = 1, #plantShort do
         local entry = plantShort[i]
-        local verb = L"Plant "
-        if entry.needsRefine == true then
-            verb = L"Refine "
-        end
-        local line = verb .. matName(entry) .. L" (" .. haveNeed(entry) .. L")"
         local Grow = StockPiler2.Grow
+        local notes = nil
         if Grow and Grow.GrowingNotesForSpec then
-            local notes = Grow.GrowingNotesForSpec(entry.spec)
+            notes = Grow.GrowingNotesForSpec(entry.spec)
             entry.growingNotes = notes or L""
-            if notes and notes ~= L"" then
-                line = line .. L" -- " .. notes
+        end
+        local tokens = {
+            mat = matName(entry),
+            have = tostring(entry.have),
+            need = tostring(entry.need),
+        }
+        if notes and notes ~= L"" then
+            tokens.notes = notes
+            if entry.needsRefine == true then
+                lines[#lines + 1] = T("plan.line.refine_mat_notes", tokens)
+            else
+                lines[#lines + 1] = T("plan.line.plant_mat_notes", tokens)
+            end
+        elseif entry.needsRefine == true then
+            lines[#lines + 1] = T("plan.line.refine_mat", tokens)
+        else
+            lines[#lines + 1] = T("plan.line.plant_mat", tokens)
+        end
+        local seedUid = tonumber(entry.seedUid) or 0
+        local plantUid = tonumber(entry.plantUid) or 0
+        if seedUid <= 0 and StockPiler2.SeedMap and StockPiler2.SeedMap.ResolveSeedForSpec
+            and type(entry.spec) == "table"
+        then
+            local seed = StockPiler2.SeedMap.ResolveSeedForSpec(entry.spec)
+            if type(seed) == "table" then
+                seedUid = tonumber(seed.uniqueID) or 0
+                if plantUid <= 0 then
+                    plantUid = tonumber(seed.plantUid) or 0
+                end
             end
         end
-        lines[#lines + 1] = line
+        if seedUid > 0 and StockPiler2.SeedMap and StockPiler2.SeedMap.FormatHarvestTooltipRateLines then
+            local rateLines = StockPiler2.SeedMap.FormatHarvestTooltipRateLines(seedUid, plantUid)
+            if type(rateLines) == "table" then
+                for ri = 1, #rateLines do
+                    if rateLines[ri] and rateLines[ri] ~= "" then
+                        lines[#lines + 1] = towstring(rateLines[ri])
+                    end
+                end
+            end
+        elseif seedUid > 0 and StockPiler2.SeedMap and StockPiler2.SeedMap.FormatHarvestRateLine then
+            local rateLine = StockPiler2.SeedMap.FormatHarvestRateLine(seedUid, plantUid)
+            if type(rateLine) == "string" and rateLine ~= "" then
+                lines[#lines + 1] = towstring(rateLine)
+            end
+        end
     end
     for i = 1, #convertShort do
         local entry = convertShort[i]
-        lines[#lines + 1] = L"Grow recipe plants, then convert surplus for "
-            .. matName(entry) .. L" (" .. haveNeed(entry) .. L")"
+        local Refine = StockPiler2.Refine
+        local canRefineNow = Refine and Refine.HasResinConvertFeedstock
+            and Refine.HasResinConvertFeedstock() == true
+        local tokens = {
+            mat = matName(entry),
+            have = tostring(entry.have),
+            need = tostring(entry.need),
+        }
+        if canRefineNow then
+            lines[#lines + 1] = T("plan.line.refine_surplus", tokens)
+        else
+            lines[#lines + 1] = T("plan.line.grow_then_convert", tokens)
+        end
     end
     local buySeedOrMatShort = nil
     for i = 1, #buyShort do
         local entry = buyShort[i]
         if entry.buySeedOrMat == true then
             buySeedOrMatShort = buySeedOrMatShort or entry
-            lines[#lines + 1] = L"Buy "
-                .. seedName(entry)
-                .. L" (have "
-                .. towstring(tostring(entry.seedHave or 0))
-                .. L") or buy "
-                .. matName(entry)
-                .. L" ("
-                .. haveNeed(entry)
-                .. L")"
+            lines[#lines + 1] = T("plan.line.buy_seed_or_mat", {
+                seed = seedName(entry),
+                seedHave = tostring(entry.seedHave or 0),
+                mat = matName(entry),
+                have = tostring(entry.have),
+                need = tostring(entry.need),
+            })
+        elseif entry.role == "container" then
+            lines[#lines + 1] = T("plan.line.buy_flasks", {
+                mat = matName(entry),
+                have = tostring(entry.have),
+                need = tostring(entry.need),
+            })
         else
-            local verb = L"Buy "
-            if entry.role == "container" then
-                verb = L"Buy flasks: "
-            end
-            lines[#lines + 1] = verb .. matName(entry) .. L" (" .. haveNeed(entry) .. L")"
+            lines[#lines + 1] = T("plan.line.buy_mat", {
+                mat = matName(entry),
+                have = tostring(entry.have),
+                need = tostring(entry.need),
+            })
         end
     end
     if #plantShort + #convertShort + #buyShort == 0 then
-        lines[#lines + 1] = L"Materials look sufficient for this potion."
+        lines[#lines + 1] = T("plan.line.mats_sufficient")
     end
     row.statusLines = lines
     row.statusNeedLine = lines[1]
 
     -- Byproduct convert only claims "Restocking" when AutoGrow can feed it:
-    -- plant-kind deficits, or any recipe slot with seed credit (surplus grow for convert).
+    -- plant-kind deficits, seed credit, or refinable plant surplus for resin.
     local convertFeedable = limiting ~= nil
     if byproductShort ~= nil and not convertFeedable then
         for i = 1, #allEntries do
@@ -618,12 +924,32 @@ local function ApplySpecPlanStatus(row, target, recipe, demand)
             end
         end
     end
+    if byproductShort ~= nil and not convertFeedable then
+        local Refine = StockPiler2.Refine
+        if Refine and Refine.HasResinConvertFeedstock
+            and Refine.HasResinConvertFeedstock() == true
+        then
+            convertFeedable = true
+        end
+    end
+    row.convertFeedable = convertFeedable == true
     if byproductShort ~= nil
         and convertFeedable
         and (limiting == nil or (byproductShort.craftsHave or 0) <= (limiting.craftsHave or 0))
     then
         row.growable = wantsGrow
-        SetMaterialsShortStatus(row, wantsGrow, lines[2] or lines[1], L"Buy materials")
+        if wantsGrow == true and CanAutoGrowSkill()
+            and StockPiler2.Refine and StockPiler2.Refine.HasResinConvertFeedstock
+            and StockPiler2.Refine.HasResinConvertFeedstock() == true
+            and limiting == nil
+        then
+            row.statusKey = "restocking"
+            row.statusText = T("plan.status.refine_for_resin")
+            row.statusDetail = lines[2] or lines[1]
+            row.specDeficit = byproductShort
+            return
+        end
+        SetMaterialsShortStatus(row, wantsGrow, lines[2] or lines[1], T("plan.status.buy_materials"))
         row.specDeficit = byproductShort
         return
     end
@@ -635,62 +961,62 @@ local function ApplySpecPlanStatus(row, target, recipe, demand)
                 and StockPiler2.Watch.IsSeedBufferEnabled() == true
             then
                 row.statusKey = "need_seeds"
-                row.statusText = L"Seed buffer"
+                row.statusText = T("plan.status.seed_buffer")
             elseif CanAutoGrowSkill() and wantsGrow == true then
                 row.statusKey = "restocking"
-                row.statusText = L"Refine plants"
+                row.statusText = T("plan.status.refine_plants")
             else
-                SetMaterialsShortStatus(row, wantsGrow, lines[2] or lines[1], L"Buy plants")
+                SetMaterialsShortStatus(row, wantsGrow, lines[2] or lines[1], T("plan.status.buy_plants"))
             end
             row.statusDetail = lines[2] or lines[1]
             return
         end
-        local buyLabel = L"Buy plants"
+        local buyLabel = T("plan.status.buy_plants")
         if limiting.buySeedOrMat == true
             and limiting.seedUid
             and tonumber(limiting.seedUid) > 0
         then
-            buyLabel = L"Buy seeds"
+            buyLabel = T("plan.status.buy_seeds")
         end
         SetMaterialsShortStatus(row, wantsGrow, lines[2] or lines[1], buyLabel)
         return
     end
     if containerShort ~= nil then
         row.statusKey = "buy_ingredients"
-        row.statusText = L"Buy flasks"
+        row.statusText = T("plan.status.buy_flasks")
         row.statusDetail = lines[2] or lines[1]
         return
     end
     if buySeedOrMatShort ~= nil then
         row.statusKey = "buy_ingredients"
         row.statusText = buySeedOrMatShort.seedUid and tonumber(buySeedOrMatShort.seedUid) > 0
-            and L"Buy seeds"
-            or L"Buy seed or material"
+            and T("plan.status.buy_seeds")
+            or T("plan.status.buy_seed_or_mat")
         row.statusDetail = lines[2] or lines[1]
         row.specDeficit = buySeedOrMatShort
         return
     end
     if vendorShort ~= nil then
         row.statusKey = "buy_ingredients"
-        row.statusText = L"Buy materials"
+        row.statusText = T("plan.status.buy_materials")
         row.statusDetail = lines[2] or lines[1]
         return
     end
     -- Byproduct short but no seed/plant feedstock and no other buy shorts.
     if byproductShort ~= nil then
         row.statusKey = "buy_ingredients"
-        row.statusText = L"Buy materials"
+        row.statusText = T("plan.status.buy_materials")
         row.statusDetail = lines[2] or lines[1]
         row.specDeficit = byproductShort
         return
     end
     row.statusKey = "ready_to_craft"
-    row.statusText = L"Ready to craft"
+    row.statusText = T("plan.status.ready_to_craft")
     row.statusSlots = nil
     if CanBrewPotionsSkill() then
-        row.statusLines = { L"Ready to craft. Open the Apothecary to brew." }
+        row.statusLines = { T("plan.line.ready_open_apo_short") }
     else
-        row.statusLines = { L"Materials look ready, but only Apothecaries can brew potions." }
+        row.statusLines = { T("plan.line.mats_ready_apo_only") }
     end
 end
 
@@ -823,19 +1149,58 @@ function Planner.BuildWatchRows(ctx)
             row.craftableText = towstring(tostring(row.craftable or 0))
         end
         if row.statusKey == "ready_to_craft" and row.craftableShared == true then
-            row.statusKey = "ready_to_craft_shared"
-            row.statusText = L"Shared materials"
-            row.statusLines = {
-                L"Stock + Craftable covers the target, but shared materials are contested with other short watches.",
-                L"AutoGrow will keep filling shared plants until Craftable turns green. Footer Brew waits for uncontested Ready; row Load/Brew can brew early.",
-            }
+            -- Red Buy* only when contest is entirely non-growable (flasks / vendor mats).
+            -- Any growable plant or seed-buffer contest → yellow Shared (AutoGrow still works).
+            local buy = ContestedBuyOnlyInfo(row)
+            if buy ~= nil then
+                row.statusKey = "buy_ingredients"
+                if buy.role == "container" then
+                    row.statusText = T("plan.status.buy_flasks")
+                    row.statusLines = {
+                        T("plan.line.buy_flasks", {
+                            mat = buy.label,
+                            have = tostring(buy.have),
+                            need = tostring(buy.need),
+                        }),
+                        T("plan.line.shared_buy_contested"),
+                    }
+                elseif buy.buySeedOrMat == true and buy.seedUid > 0 then
+                    row.statusText = T("plan.status.buy_seeds")
+                    row.statusLines = {
+                        T("plan.line.buy_mat", {
+                            mat = buy.label,
+                            have = tostring(buy.have),
+                            need = tostring(buy.need),
+                        }),
+                        T("plan.line.shared_buy_contested"),
+                    }
+                else
+                    row.statusText = T("plan.status.buy_materials")
+                    row.statusLines = {
+                        T("plan.line.buy_mat", {
+                            mat = buy.label,
+                            have = tostring(buy.have),
+                            need = tostring(buy.need),
+                        }),
+                        T("plan.line.shared_buy_contested"),
+                    }
+                end
+            else
+                row.statusKey = "ready_to_craft_shared"
+                row.statusText = T("plan.status.shared_materials")
+                row.statusLines = {
+                    T("plan.line.shared_contested"),
+                    T("plan.line.shared_autogrow"),
+                }
+            end
         elseif row.statusKey == "ready_to_craft" then
             row.statusLines = {
-                L"Stock + Craftable covers the target and shared materials are uncontested.",
-                L"Use footer Brew or the row Brew button to load and craft. Growing resumes if stock is still short after brewing.",
+                T("plan.line.ready_uncontested"),
+                T("plan.line.ready_use_brew"),
             }
         end
         ApplyNeedApothecaryStatus(row)
+        ApplyNeedSkillStatus(row)
 
         -- Tip-ready full slot entries (stocked + short) so Status hover skips rebuild.
         local craftsNeeded = tonumber(row.craftsNeeded) or 0
@@ -867,9 +1232,15 @@ function Planner.BuildWatchRows(ctx)
     if Perf and Perf.End then
         Perf.End("Build.Tips")
     end
+    if Perf and Perf.Begin then
+        Perf.Begin("Build.Notify")
+    end
     NotifyWatchRedBlocks(rows)
     NotifyAllWatchesReady(rows)
     NotifyAutoGrowIdleBlocked(rows)
+    if Perf and Perf.End then
+        Perf.End("Build.Notify")
+    end
     return rows
 end
 
@@ -971,9 +1342,12 @@ function Planner.GetOrBuild(opts)
         end
     end
     -- Hot paths (footer CanBrewNow, Watch list): never sync-build; enqueue and return stale.
+    -- Perf: use nudge=true so repeated polls do not stretch _planAt forever (see
+    -- Scheduler.EnqueuePlanRebuild PLAN_MAX_STRETCH / nudge). Do not call
+    -- EnqueuePlanRebuild() without nudge from refresh=false paths.
     if opts.refresh == false then
         if Sch and Sch.EnqueuePlanRebuild then
-            Sch.EnqueuePlanRebuild()
+            Sch.EnqueuePlanRebuild({ nudge = true })
         end
         local stale = PS and PS.Get and PS.Get()
         if type(stale) == "table" then
@@ -1006,6 +1380,11 @@ function Planner.Build(opts)
     if StockPiler2.RecipeSpec and StockPiler2.RecipeSpec.BeginPlanCraftsMemo then
         StockPiler2.RecipeSpec.BeginPlanCraftsMemo()
     end
+    -- Perf: ClearPlanCaches BEFORE WarmHave so Have/plantUid resolve share one cache gen.
+    -- Clearing after WarmHave used to discard warm work mid-build. Do not reorder.
+    if StockPiler2.SeedMap and StockPiler2.SeedMap.ClearPlanCaches then
+        StockPiler2.SeedMap.ClearPlanCaches()
+    end
     -- One-pass have-cache for this snapGen (replaces blind wipe + per-spec bag walks).
     if Perf and Perf.Begin then
         Perf.Begin("Build.WarmHave")
@@ -1018,9 +1397,6 @@ function Planner.Build(opts)
     end
     if Perf and Perf.End then
         Perf.End("Build.WarmHave")
-    end
-    if StockPiler2.SeedMap and StockPiler2.SeedMap.ClearPlanCaches then
-        StockPiler2.SeedMap.ClearPlanCaches()
     end
     local ctx = Planner.BuildContext()
     local key = CacheKey(ctx)
@@ -1056,7 +1432,10 @@ function Planner.Build(opts)
     if StockPiler2.Debug and StockPiler2.Debug.LogOp then
         StockPiler2.Debug.LogOp("plan", string.format("rebuild gen=%d key=%s", planGen, key))
     end
-    if StockPiler2.Brew and StockPiler2.Brew.MaybeNotifyBrewReady then
+    -- Coalesce footer + brew-ready notify; do not run SyncActionReadiness inside Build.
+    if StockPiler2Window and StockPiler2Window.RequestFooterRefresh then
+        StockPiler2Window.RequestFooterRefresh()
+    elseif StockPiler2.Brew and StockPiler2.Brew.MaybeNotifyBrewReady then
         StockPiler2.Brew.MaybeNotifyBrewReady()
     end
     local B = StockPiler2.EventBus
@@ -1116,6 +1495,17 @@ local function DumpWatchRows(emit, rows)
                 emit("      statusText=" .. ToNarrow(row.statusText))
             end
             local recipe = row.recipe
+            local reqApo, reqCult = RecipeSkillReqs(recipe)
+            local Caps = StockPiler2.TradeSkillCaps
+            local haveApo = Caps and Caps.ApothecaryLevel and Caps.ApothecaryLevel() or 0
+            local haveCult = Caps and Caps.CultivationLevel and Caps.CultivationLevel() or 0
+            emit(string.format(
+                "      skill apo=%s/%s cult=%s/%s",
+                tostring(haveApo),
+                tostring(reqApo),
+                tostring(haveCult),
+                tostring(reqCult)
+            ))
             if type(recipe) == "table" and type(recipe.slots) == "table" then
                 local claim = tonumber(row.craftsClaim)
                 if claim == nil then
@@ -1199,27 +1589,45 @@ function Planner.DumpGrowPlan(emit)
     end
     if Garden and Garden.GetPlotsCopy then
         local plots = Garden.GetPlotsCopy()
-        for plotNum = 1, 4 do
+        local CA = StockPiler2.CultivatorAdapter
+        local unlocked = CA and CA.NumPlots and CA.NumPlots() or 4
+        local maxSlots = CA and CA.MaxPlotSlots and CA.MaxPlotSlots() or 4
+        emit(string.format("  unlockedPlots=%d maxSlots=%d cultSkill=%s",
+            unlocked,
+            maxSlots,
+            tostring(StockPiler2.TradeSkillCaps and StockPiler2.TradeSkillCaps.CultivationLevel
+                and StockPiler2.TradeSkillCaps.CultivationLevel())
+        ))
+        for plotNum = 1, maxSlots do
             local p = plots[plotNum]
             local pending = 0
             if StockPiler2.Grow and StockPiler2.Grow._pendingPlant then
                 pending = tonumber(StockPiler2.Grow._pendingPlant[plotNum]) or 0
             end
+            local locked = CA and CA.IsPlotLocked and CA.IsPlotLocked(plotNum)
             if type(p) == "table" then
+                if p.locked ~= nil then
+                    locked = p.locked == true
+                end
                 emit(string.format(
-                    "  P%d stage=%d seedUid=%d plantUid=%d pending=%d isPlotEmpty=%s",
+                    "  P%d stage=%d seedUid=%d plantUid=%d pending=%d locked=%s isPlotEmpty=%s",
                     plotNum,
                     tonumber(p.stage) or 0,
                     tonumber(p.seedUid) or 0,
                     tonumber(p.plantUid) or 0,
                     pending,
+                    tostring(locked == true),
                     tostring(StockPiler2.Grow and StockPiler2.Grow.IsPlotEmpty
                         and StockPiler2.Grow.IsPlotEmpty(plotNum))
                 ))
             else
                 emit(string.format(
-                    "  P%d (empty) pending=%d",
-                    plotNum, pending
+                    "  P%d (no cache) pending=%d locked=%s isPlotEmpty=%s",
+                    plotNum,
+                    pending,
+                    tostring(locked == true),
+                    tostring(StockPiler2.Grow and StockPiler2.Grow.IsPlotEmpty
+                        and StockPiler2.Grow.IsPlotEmpty(plotNum))
                 ))
             end
         end
@@ -1229,6 +1637,9 @@ function Planner.DumpGrowPlan(emit)
     end
     if StockPiler2.Refine and StockPiler2.Refine.DumpDiagnostics then
         StockPiler2.Refine.DumpDiagnostics(emit)
+    end
+    if StockPiler2.SeedMap and StockPiler2.SeedMap.DumpCraftCycleStats then
+        StockPiler2.SeedMap.DumpCraftCycleStats(emit)
     end
     emit("=== end grow plan ===")
 end
@@ -1266,7 +1677,7 @@ local function SpecJobLabel(spec)
     if MS and MS.Label then
         return MS.Label(spec)
     end
-    return L"material"
+    return T("plan.fallback.material")
 end
 
 --- Vendor buy list for enabled watches below target.

@@ -7,6 +7,13 @@ StockPiler2.RecipeSpec = StockPiler2.RecipeSpec or {}
 local RS = StockPiler2.RecipeSpec
 local MS = StockPiler2.MaterialSpec
 
+local function T(key, tokens)
+    if StockPiler2.T then
+        return StockPiler2.T(key, tokens)
+    end
+    return L"[" .. towstring(tostring(key or "")) .. L"]"
+end
+
 local function ToNarrow(text)
     return StockPiler2.ToNarrow(text)
 end
@@ -60,9 +67,101 @@ local function EnsureBrewStats(recipe)
     recipe.brewSuperCrits = tonumber(recipe.brewSuperCrits) or 0
     recipe.brewFailures = tonumber(recipe.brewFailures) or 0
     recipe.brewVolatiles = tonumber(recipe.brewVolatiles) or 0
+    recipe.apoSkillHits = tonumber(recipe.apoSkillHits) or 0
     -- Do not invent product counts from an old stored yield.
     recipe.yieldProductSum = tonumber(recipe.yieldProductSum) or 0
     recipe.yieldSamples = tonumber(recipe.yieldSamples) or 0
+end
+
+local APO_SKILL_PENDING_TTL_SEC = 8
+local APO_SKILL_RATE_MIN_ATTEMPTS = 5
+
+function RS.ArmApoSkillPending(recipeKey, reason)
+    if type(recipeKey) ~= "string" or recipeKey == "" then
+        return false
+    end
+    local now = 0
+    if type(GetGameTime) == "function" then
+        now = tonumber(GetGameTime()) or 0
+    end
+    RS._pendingApoSkill = {
+        recipeKey = recipeKey,
+        reason = tostring(reason or "brew"),
+        untilTime = now + APO_SKILL_PENDING_TTL_SEC,
+    }
+    return true
+end
+
+function RS.NoteApoSkillHit(recipe)
+    if type(recipe) ~= "table" then
+        return false
+    end
+    EnsureBrewStats(recipe)
+    recipe.apoSkillHits = (tonumber(recipe.apoSkillHits) or 0) + 1
+    return true
+end
+
+--- Empirical Apo +1 rate per brew attempt. nil rate if too few samples.
+function RS.ApoSkillUpRate(recipe)
+    if type(recipe) ~= "table" then
+        return nil
+    end
+    EnsureBrewStats(recipe)
+    local attempts = tonumber(recipe.brewAttempts) or 0
+    local hits = tonumber(recipe.apoSkillHits) or 0
+    if attempts < APO_SKILL_RATE_MIN_ATTEMPTS then
+        return nil, hits, attempts
+    end
+    return hits / attempts, hits, attempts
+end
+
+function RS.FormatApoSkillUpLine(recipe)
+    if type(recipe) ~= "table" then
+        return nil
+    end
+    local Caps = StockPiler2.TradeSkillCaps
+    local level = Caps and Caps.ApothecaryLevel and Caps.ApothecaryLevel() or 0
+    if level <= 0 or level >= 200 then
+        return nil
+    end
+    local rate, hits, attempts = RS.ApoSkillUpRate(recipe)
+    if rate == nil then
+        return nil
+    end
+    return T("recipe.apo_skill_up", {
+        pct = tostring(math.floor(rate * 100 + 0.5)),
+        n = tostring(attempts),
+    })
+end
+
+function RS.OnApoSkillDelta(deltaApo)
+    deltaApo = tonumber(deltaApo) or 0
+    if deltaApo <= 0 or deltaApo > 3 then
+        return false
+    end
+    local pending = RS._pendingApoSkill
+    if type(pending) ~= "table" then
+        return false
+    end
+    local now = 0
+    if type(GetGameTime) == "function" then
+        now = tonumber(GetGameTime()) or 0
+    end
+    if (tonumber(pending.untilTime) or 0) < now then
+        RS._pendingApoSkill = nil
+        return false
+    end
+    local key = pending.recipeKey
+    RS._pendingApoSkill = nil
+    if type(key) ~= "string" or key == "" then
+        return false
+    end
+    local recipes = RecipesTable()
+    local recipe = type(recipes) == "table" and recipes[key] or nil
+    if type(recipe) ~= "table" then
+        return false
+    end
+    return RS.NoteApoSkillHit(recipe)
 end
 
 -- RoR Lua quirk: local callees must be defined BEFORE callers (RoR-Interface docs/api/lua-local-order.md).
@@ -402,6 +501,7 @@ function RS.MergeRecipeRecords(into, from)
     into.brewSuperCrits = (tonumber(into.brewSuperCrits) or 0) + (tonumber(from.brewSuperCrits) or 0)
     into.brewFailures = (tonumber(into.brewFailures) or 0) + (tonumber(from.brewFailures) or 0)
     into.brewVolatiles = (tonumber(into.brewVolatiles) or 0) + (tonumber(from.brewVolatiles) or 0)
+    into.apoSkillHits = (tonumber(into.apoSkillHits) or 0) + (tonumber(from.apoSkillHits) or 0)
     into.yieldProductSum = (tonumber(into.yieldProductSum) or 0) + (tonumber(from.yieldProductSum) or 0)
     into.yieldSamples = (tonumber(into.yieldSamples) or 0) + (tonumber(from.yieldSamples) or 0)
     into.crafts = (tonumber(into.brewSuccesses) or 0)
@@ -838,11 +938,15 @@ function RS.RegisterKnownPotion(outputUid, out, recipeSpecKey, quality)
     existing.nameNarrow = out and (out.nameNarrow or ToNarrow(out.name)) or existing.nameNarrow
     existing.iconNum = out and tonumber(out.iconNum) or existing.iconNum or 0
     if StockPiler2.Items and StockPiler2.Items.Upsert then
+        local outItem = (out and type(out.itemData) == "table") and out.itemData or out
         StockPiler2.Items.Upsert(outputUid, {
             kind = "potion",
             name = existing.name,
             nameNarrow = existing.nameNarrow,
             iconNum = existing.iconNum,
+            rarity = outItem and tonumber(outItem.rarity),
+            itemSet = outItem and tonumber(outItem.itemSet),
+            iLevel = outItem and (tonumber(outItem.iLevel) or tonumber(outItem.level)),
         })
     end
     recipeSpecKey = tostring(recipeSpecKey or "")
@@ -1025,6 +1129,7 @@ function RS.StoreLearnedRecipeSpec(materials, outputs, opts)
     end
 
     recipe.brewAttempts = (tonumber(recipe.brewAttempts) or 0) + 1
+    RS.ArmApoSkillPending(fingerprint, "brew")
 
     if failed then
         recipe.brewFailures = (tonumber(recipe.brewFailures) or 0) + 1
@@ -1107,6 +1212,8 @@ function RS.StoreLearnedRecipeSpec(materials, outputs, opts)
     if StockPiler2.Scheduler and StockPiler2.Scheduler.EnqueuePlanRebuild then
         StockPiler2.Scheduler.EnqueuePlanRebuild()
     end
+    -- Link every outcomes[uid] fingerprint onto potions.*.recipeKeys now (not only on init).
+    RS.RelinkPotionRecipeKeysFromOutcomes()
     if StockPiler2.Knowledge and StockPiler2.Knowledge.Touch then
         StockPiler2.Knowledge.Touch()
     end
@@ -1978,6 +2085,26 @@ local function SpecHaveBoundUid(spec)
     return tonumber(spec.boundUid) or 0
 end
 
+--- Cultivated mains: SeedMap often knows plantUid even when bag ProductMatches fails
+--- (engine plant CraftItemInfo omits EFFECT). CountByUid is authoritative for that plant.
+--- Never call FindPlantUidForSpec here — that bag-walks and nested under WarmHave.
+local function SpecHavePlantUid(spec)
+    if type(spec) ~= "table" or tostring(spec.role or "") ~= "main" then
+        return 0
+    end
+    local SM = StockPiler2.SeedMap
+    if type(SM) ~= "table" then
+        return 0
+    end
+    if SM.FindPlantUidForHave then
+        return tonumber(SM.FindPlantUidForHave(spec)) or 0
+    end
+    if SM.CachedPlantUidForSpec then
+        return tonumber(SM.CachedPlantUidForSpec(spec)) or 0
+    end
+    return 0
+end
+
 local function EnsureSpecHaveCacheForSnap()
     local snapGen = 0
     if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
@@ -2091,6 +2218,16 @@ function RS.WarmSpecHaveCache(specs)
             end
         end)
     end
+    for i = 1, #pending do
+        local entry = pending[i]
+        local plantUid = SpecHavePlantUid(entry.spec)
+        if plantUid > 0 and StockPiler2.Inventory and StockPiler2.Inventory.CountByUid then
+            local byUid = tonumber(StockPiler2.Inventory.CountByUid(plantUid)) or 0
+            if byUid > (tonumber(cache[entry.key]) or 0) then
+                cache[entry.key] = byUid
+            end
+        end
+    end
     return filled + #pending
 end
 
@@ -2132,16 +2269,23 @@ function RS.BeginOrchTick()
     RS._orchTickDemandTick = nil
     RS._orchTickSeedLines = nil
     RS._orchTickSeedLinesTick = nil
+    RS._orchTickFocus = nil
+    RS._orchTickFocusTick = nil
 end
 
 local function AutoGrowSeedLinesCacheKey()
-    local snapGen = 0
-    if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
-        snapGen = tonumber(StockPiler2.Inventory.GetSnapGen()) or 0
-    end
+    -- Perf: seed lines are structural (watch → recipe → seedUid/plantUid).
+    -- Do NOT key on snapGen — every harvest loot snap used to invalidate and rebuild
+    -- CollectAutoGrowSeedLines under Orchestrator.Tick (paired with Grow.BufferFlags
+    -- at ~110–155ms). BufferFlags still uses snapGen (inventory-sensitive pending/short).
+    -- Do not re-add snapGen here.
     local gardenGen = 0
-    if StockPiler2.Garden and StockPiler2.Garden.GetGen then
-        gardenGen = tonumber(StockPiler2.Garden.GetGen()) or 0
+    if StockPiler2.Garden then
+        if StockPiler2.Garden.GetPlanGen then
+            gardenGen = tonumber(StockPiler2.Garden.GetPlanGen()) or 0
+        elseif StockPiler2.Garden.GetGen then
+            gardenGen = tonumber(StockPiler2.Garden.GetGen()) or 0
+        end
     end
     local watchGen = 0
     if StockPiler2.Watch and StockPiler2.Watch.GetGen then
@@ -2159,7 +2303,7 @@ local function AutoGrowSeedLinesCacheKey()
             enabled = "1"
         end
     end
-    return tostring(snapGen) .. ":" .. tostring(gardenGen) .. ":" .. tostring(watchGen)
+    return tostring(gardenGen) .. ":" .. tostring(watchGen)
         .. ":" .. tostring(buffer) .. ":" .. enabled
 end
 
@@ -2200,6 +2344,13 @@ function RS.CountItemsMatchingSpec(spec)
             end
         end)
     end
+    local plantUid = SpecHavePlantUid(spec)
+    if plantUid > 0 and StockPiler2.Inventory and StockPiler2.Inventory.CountByUid then
+        local byUid = tonumber(StockPiler2.Inventory.CountByUid(plantUid)) or 0
+        if byUid > total then
+            total = byUid
+        end
+    end
     if specKey ~= nil then
         cache[specKey] = total
     end
@@ -2233,7 +2384,7 @@ function RS.EffectiveSpecPerCraft(slot, slots)
         return perCraft
     end
     local total = RS.SpecStabilityTotal(slots)
-    if total >= 0 then
+    if total > 0 then
         return perCraft
     end
     local stab = MS.Stability(RS.ResolveSlotSpec(slot))
@@ -2382,8 +2533,90 @@ function RS.WatchCoveredByBagsAndCraftable(potion, recipe, target)
     return have + RS.CountPotionsCraftable(recipe) >= target
 end
 
+--- Spec keys where brewing this claim would leave seed-buffer refine feedstock short.
+--- Returns contestedSpecKeys map (or nil) and whether any key was contested.
+--- craftsClaim = crafts this watch intends to brew (min of possible/needed).
+function RS.RecipeSeedBufferContestedSpecs(recipe, craftsClaim)
+    if not (StockPiler2.Watch and StockPiler2.Watch.IsSeedBufferEnabled
+        and StockPiler2.Watch.IsSeedBufferEnabled() == true)
+    then
+        return nil, false
+    end
+    if type(recipe) ~= "table" then
+        return nil, false
+    end
+    craftsClaim = math.max(0, tonumber(craftsClaim) or 0)
+    if craftsClaim <= 0 then
+        return nil, false
+    end
+    local SM = StockPiler2.SeedMap
+    local Refine = StockPiler2.Refine
+    local MS = StockPiler2.MaterialSpec
+    if type(SM) ~= "table" or not SM.IsGrowableSpec or type(Refine) ~= "table"
+        or not Refine.GetSeedBudgetForSpec
+    then
+        return nil, false
+    end
+    if RS.HydrateRecipeSlots then
+        RS.HydrateRecipeSlots(recipe)
+    end
+    local slots = recipe.slots or {}
+    local contestedSpecKeys = {}
+    local any = false
+    local seen = {}
+    for i = 1, #slots do
+        local slot = slots[i]
+        local spec = slot and (slot.spec or (RS.ResolveSlotSpec and RS.ResolveSlotSpec(slot)))
+        if type(spec) == "table" and SM.IsGrowableSpec(spec) then
+            if SM.IsOneWayHarvestSpec and SM.IsOneWayHarvestSpec(spec) == true then
+                -- One-way: ignore for buffer contest.
+            else
+                local productKey = MS and MS.ProductKey and MS.ProductKey(spec) or tostring(i)
+                if seen[productKey] ~= true then
+                    seen[productKey] = true
+                    local seed = SM.ResolveSeedForSpec and SM.ResolveSeedForSpec(spec)
+                    local seedUid = 0
+                    local plantUid = 0
+                    if type(seed) == "table" then
+                        seedUid = tonumber(seed.uniqueID) or 0
+                        plantUid = tonumber(seed.plantUid) or 0
+                    end
+                    if plantUid <= 0 and SM.FindPlantUidForSpec then
+                        plantUid = tonumber(SM.FindPlantUidForSpec(spec)) or 0
+                    end
+                    if seedUid > 0 and plantUid > 0 then
+                        local budget = Refine.GetSeedBudgetForSpec(spec, seedUid)
+                        local headroom = tonumber(budget and budget.headroom) or 0
+                        if headroom > 0 then
+                            local perCraft = RS.EffectiveSpecPerCraft
+                                and RS.EffectiveSpecPerCraft(slot, slots) or 1
+                            local claim = craftsClaim * (tonumber(perCraft) or 1)
+                            local have = 0
+                            if RS.CountItemsMatchingSpec then
+                                have = tonumber(RS.CountItemsMatchingSpec(spec)) or 0
+                            end
+                            if have < claim + headroom then
+                                local specKey = MS and MS.Key and MS.Key(spec) or productKey
+                                if type(specKey) == "string" and specKey ~= "" then
+                                    contestedSpecKeys[specKey] = true
+                                    any = true
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if not any then
+        return nil, false
+    end
+    return contestedSpecKeys, true
+end
+
 --- Mark craftableShared on each info among deficit watches only.
 --- Stocked watches (deficit <= 0) never participate and get craftableShared = false.
+--- Also contested when brewing the claim would starve seed-buffer plant headroom.
 --- infos[i] fields: potionDeficit, craftable, craftsPossible, recipe
 function RS.ApplyDeficitCraftableShared(infos)
     if type(infos) ~= "table" then
@@ -2470,6 +2703,18 @@ function RS.ApplyDeficitCraftableShared(infos)
                                 contested = true
                                 contestedSpecKeys[specKey] = true
                             end
+                        end
+                    end
+                end
+                local bufKeys, bufContested = RS.RecipeSeedBufferContestedSpecs(
+                    recipe,
+                    tonumber(info.craftsClaim) or 0
+                )
+                if bufContested == true and type(bufKeys) == "table" then
+                    contested = true
+                    for k, v in pairs(bufKeys) do
+                        if v == true then
+                            contestedSpecKeys[k] = true
                         end
                     end
                 end
@@ -2570,6 +2815,7 @@ end
 --- Excludes one-way / non-refinable harvest (no plant→seed refine path).
 --- Cached per snap/garden/buffer settings (hot path: refine gates / intents).
 function RS.CollectAutoGrowSeedLines()
+    local Perf = StockPiler2.Perf
     local orchTick = tonumber(RS._orchTickId) or 0
     if orchTick > 0
         and RS._orchTickSeedLinesTick == orchTick
@@ -2585,6 +2831,9 @@ function RS.CollectAutoGrowSeedLines()
         end
         return RS._autoGrowSeedLines
     end
+    if Perf and Perf.Begin then
+        Perf.Begin("CollectAutoGrowSeedLines")
+    end
     local lines = {}
     local seen = {}
     local s = EnsureSettings()
@@ -2596,6 +2845,9 @@ function RS.CollectAutoGrowSeedLines()
         if orchTick > 0 then
             RS._orchTickSeedLines = lines
             RS._orchTickSeedLinesTick = orchTick
+        end
+        if Perf and Perf.End then
+            Perf.End("CollectAutoGrowSeedLines")
         end
         return lines
     end
@@ -2655,10 +2907,13 @@ function RS.CollectAutoGrowSeedLines()
     end
     RS._autoGrowSeedLinesKey = cacheKey
     RS._autoGrowSeedLines = lines
-    local orchTick = tonumber(RS._orchTickId) or 0
+    orchTick = tonumber(RS._orchTickId) or 0
     if orchTick > 0 then
         RS._orchTickSeedLines = lines
         RS._orchTickSeedLinesTick = orchTick
+    end
+    if Perf and Perf.End then
+        Perf.End("CollectAutoGrowSeedLines")
     end
     return lines
 end
@@ -2930,7 +3185,33 @@ end
 -- AutoGrow watches still below target, with the largest bottle gap
 -- (Target - Stock - Craftable). Plot assignment prefers these recipes so a
 -- zero-craftable watch is not starved by another watch's shared plants.
+-- Perf: cached per snapGen:watchGen; orch-tick alias shares one result per Tick
+-- (BeginOrchTick). Without orch-tick reuse, Tick called focus multiple times.
+-- Do not drop the _orchTickFocus short-circuit.
 function RS.CollectAutoGrowFocus()
+    local orchTick = tonumber(RS._orchTickId) or 0
+    if orchTick > 0
+        and RS._orchTickFocusTick == orchTick
+        and type(RS._orchTickFocus) == "table"
+    then
+        return RS._orchTickFocus
+    end
+    local snapGen = 0
+    if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
+        snapGen = tonumber(StockPiler2.Inventory.GetSnapGen()) or 0
+    end
+    local watchGen = 0
+    if StockPiler2.Watch and StockPiler2.Watch.GetGen then
+        watchGen = tonumber(StockPiler2.Watch.GetGen()) or 0
+    end
+    local cacheKey = tostring(snapGen) .. ":" .. tostring(watchGen)
+    if type(RS._autoGrowFocusCache) == "table" and RS._autoGrowFocusKey == cacheKey then
+        if orchTick > 0 then
+            RS._orchTickFocus = RS._autoGrowFocusCache
+            RS._orchTickFocusTick = orchTick
+        end
+        return RS._autoGrowFocusCache
+    end
     local s = EnsureSettings()
     local focus = {
         maxBottleGap = nil,
@@ -2938,6 +3219,12 @@ function RS.CollectAutoGrowFocus()
         watches = {},
     }
     if type(s.watches) ~= "table" or type(s.knownPotions) ~= "table" then
+        RS._autoGrowFocusCache = focus
+        RS._autoGrowFocusKey = cacheKey
+        if orchTick > 0 then
+            RS._orchTickFocus = focus
+            RS._orchTickFocusTick = orchTick
+        end
         return focus
     end
     local candidates = {}
@@ -2983,6 +3270,12 @@ function RS.CollectAutoGrowFocus()
                 focus.minCraftable = c
             end
         end
+    end
+    RS._autoGrowFocusCache = focus
+    RS._autoGrowFocusKey = cacheKey
+    if orchTick > 0 then
+        RS._orchTickFocus = focus
+        RS._orchTickFocusTick = orchTick
     end
     return focus
 end
@@ -3105,6 +3398,7 @@ end
 -- Sum ingredient need across every watched potion that should AutoGrow.
 -- Shared specs share one bag count; deficit = total need − have.
 function RS.BuildBalancedSpecDemand()
+    local Perf = StockPiler2.Perf
     local orchTick = tonumber(RS._orchTickId) or 0
     if orchTick > 0
         and RS._orchTickDemandTick == orchTick
@@ -3128,6 +3422,9 @@ function RS.BuildBalancedSpecDemand()
         end
         return RS._demandCache
     end
+    if Perf and Perf.Begin then
+        Perf.Begin("BuildBalancedSpecDemand")
+    end
     -- Do not wipe _specHaveCache here — Planner.Build / WarmSpecHaveCache owns snapGen keying.
     local s = EnsureSettings()
     local demand = {}
@@ -3137,6 +3434,9 @@ function RS.BuildBalancedSpecDemand()
         if orchTick > 0 then
             RS._orchTickDemand = demand
             RS._orchTickDemandTick = orchTick
+        end
+        if Perf and Perf.End then
+            Perf.End("BuildBalancedSpecDemand")
         end
         return demand
     end
@@ -3453,6 +3753,9 @@ function RS.BuildBalancedSpecDemand()
     if orchTickEnd > 0 then
         RS._orchTickDemand = demand
         RS._orchTickDemandTick = orchTickEnd
+    end
+    if Perf and Perf.End then
+        Perf.End("BuildBalancedSpecDemand")
     end
     return demand
 end

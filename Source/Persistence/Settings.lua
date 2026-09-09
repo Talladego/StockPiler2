@@ -21,8 +21,7 @@ StockPiler2.DefaultSettings = {
     characters = {},
     debugEnabled = false,
     eventTrace = false,
-    perfEnabled = false,
-    perfThresholdMs = 400,
+    language = 0,
     selectedTab = 1,
     potionNameFilter = "",
     potionEffectFilter = "",
@@ -71,11 +70,10 @@ function StockPiler2.Persistence.EnsureSettings()
     if s.selectedTab == nil then
         s.selectedTab = 1
     end
+    if s.language == nil then
+        s.language = 0
+    end
     StockPiler2.Debug.Enabled = s.debugEnabled == true
     StockPiler2.Debug.EventTrace = s.eventTrace == true
-    if StockPiler2.Perf then
-        StockPiler2.Perf.Enabled = s.perfEnabled == true
-        StockPiler2.Perf.FrameThresholdMs = tonumber(s.perfThresholdMs) or 400
-    end
     return s
 end

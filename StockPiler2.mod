@@ -2,7 +2,7 @@
 
 <ModuleFile xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 
-    <UiMod name="StockPiler2" version="0.4.62" date="2026-09-07">
+    <UiMod name="StockPiler2" version="0.4.114" date="2026-09-09">
 
         <Author name="Talladego" email="" />
 
@@ -30,6 +30,8 @@
 
             <Dependency name="LibSlash" optional="true" />
 
+            <Dependency name="LibPerf" optional="true" />
+
         </Dependencies>
 
 
@@ -37,6 +39,10 @@
         <Files>
 
             <File name="Source/Core/Debug.lua" />
+
+            <File name="Source/Locale/Locale.lua" />
+
+            <File name="Source/Locale/enUS.lua" />
 
             <File name="Source/Core/EventBus.lua" />
 

@@ -8,6 +8,9 @@ local LB = StockPiler2.LearnBridge
 LB._prevPlotStages = {}
 LB._apothecaryHooked = false
 LB._useItemRefineHooked = false
+-- Empty-edge harvest complete: wait ≥1 full UPDATE_PROCESSED past the hitch frame.
+LB._harvestCompletePending = false
+LB._harvestCompleteSeenUpdate = false
 
 local function StageGrown()
     if GameData and GameData.CultivationStage then
@@ -204,10 +207,13 @@ function LB.OnCultivationUpdated()
             end
         end
         if StockPiler2.SeedMap and StockPiler2.SeedMap.TryCompletePendingHarvest then
-            local learned = StockPiler2.SeedMap.TryCompletePendingHarvest(true) == true
-            if learned then
-                RefreshUiIfLearned()
-            end
+            -- Perf: do not TryCompletePendingHarvest(true) on the cultivation empty-edge
+            -- hitch (used to fuse Harvest.Snapshot/Complete with WakeAfterHarvest).
+            -- Defer ≥1 full UPDATE_PROCESSED (pending + seenUpdate) then one-shot force.
+            -- Cultivation event and UPDATE_PROCESSED can share a frame — seenUpdate
+            -- skips the hitch frame. Do not call force-complete synchronously here.
+            LB._harvestCompletePending = true
+            LB._harvestCompleteSeenUpdate = false
         end
     end
 
@@ -299,20 +305,61 @@ function LB.OnUpdateProcessed()
         and StockPiler2.SeedMap.TryCompletePendingHarvest
         and type(StockPiler2.SeedMap._pendingHarvest) == "table"
     then
-        -- Only instrument when a complete attempt will run (past settle/throttle).
-        -- Dirty-frame no-ops under trail hold used to stack LearnBridge.OnUpdate x100+.
-        local willAttempt = StockPiler2.SeedMap.ShouldAttemptHarvestComplete
-            and StockPiler2.SeedMap.ShouldAttemptHarvestComplete(false) == true
-        if willAttempt and StockPiler2.Perf and StockPiler2.Perf.Begin then
-            StockPiler2.Perf.Begin("LearnBridge.OnUpdate")
+        local forceOneShot = false
+        if LB._harvestCompletePending == true then
+            if LB._harvestCompleteSeenUpdate == true then
+                -- Second UPDATE_PROCESSED after empty-edge: run force complete.
+                LB._harvestCompletePending = false
+                LB._harvestCompleteSeenUpdate = false
+                forceOneShot = true
+            else
+                -- First UPDATE_PROCESSED (may be same hitch frame): mark seen, skip force.
+                LB._harvestCompleteSeenUpdate = true
+            end
         end
-        local learned = StockPiler2.SeedMap.TryCompletePendingHarvest(false) == true
-        if willAttempt and StockPiler2.Perf and StockPiler2.Perf.End then
-            StockPiler2.Perf.End("LearnBridge.OnUpdate")
+        if forceOneShot then
+            if StockPiler2.Perf and StockPiler2.Perf.Begin then
+                StockPiler2.Perf.Begin("LearnBridge.OnUpdate")
+            end
+            local learned = StockPiler2.SeedMap.TryCompletePendingHarvest(true) == true
+            if StockPiler2.Perf and StockPiler2.Perf.End then
+                StockPiler2.Perf.End("LearnBridge.OnUpdate")
+            end
+            -- Perf: Scheduler.OnUpdate runs later this frame — skip PlanRebuild so
+            -- Harvest.Complete does not fuse with WarmHave (0.4.95 trail ~185–210ms).
+            -- Do not remove SkipPlanThisFrame here.
+            if StockPiler2.Scheduler and StockPiler2.Scheduler.SkipPlanThisFrame then
+                StockPiler2.Scheduler.SkipPlanThisFrame()
+            end
+            if learned then
+                RefreshUiIfLearned()
+            end
+        else
+            -- Only instrument when a complete attempt will run (past settle/throttle).
+            -- Dirty-frame no-ops under trail hold used to stack LearnBridge.OnUpdate x100+.
+            local willAttempt = StockPiler2.SeedMap.ShouldAttemptHarvestComplete
+                and StockPiler2.SeedMap.ShouldAttemptHarvestComplete(false) == true
+            if willAttempt and StockPiler2.Perf and StockPiler2.Perf.Begin then
+                StockPiler2.Perf.Begin("LearnBridge.OnUpdate")
+            end
+            local learned = StockPiler2.SeedMap.TryCompletePendingHarvest(false) == true
+            if willAttempt and StockPiler2.Perf and StockPiler2.Perf.End then
+                StockPiler2.Perf.End("LearnBridge.OnUpdate")
+            end
+            if willAttempt then
+                -- Same SkipPlanThisFrame as force path — settle complete also stacks WarmHave.
+                if StockPiler2.Scheduler and StockPiler2.Scheduler.SkipPlanThisFrame then
+                    StockPiler2.Scheduler.SkipPlanThisFrame()
+                end
+            end
+            if learned then
+                RefreshUiIfLearned()
+            end
         end
-        if learned then
-            RefreshUiIfLearned()
-        end
+    elseif LB._harvestCompletePending == true then
+        -- Pending harvest cleared elsewhere; drop defer flags.
+        LB._harvestCompletePending = false
+        LB._harvestCompleteSeenUpdate = false
     end
     if StockPiler2.Refine and StockPiler2.Refine.OnUpdateProcessed then
         StockPiler2.Refine.OnUpdateProcessed()

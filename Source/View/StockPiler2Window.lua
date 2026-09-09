@@ -4,6 +4,13 @@
 
 StockPiler2Window = {}
 
+local function T(key, tokens)
+    if StockPiler2.T then
+        return StockPiler2.T(key, tokens)
+    end
+    return L"[" .. towstring(tostring(key or "")) .. L"]"
+end
+
 StockPiler2Window.TABS_POTIONS = 1
 StockPiler2Window.TABS_WATCH = 2
 StockPiler2Window.TABS_MAX = 2
@@ -17,7 +24,7 @@ StockPiler2Window.Tabs = {
     [1] = {
         window = "SP2TabPotions",
         name = "StockPiler2WindowTabButtonsPotions",
-        label = L"Potions",
+        labelKey = "ui.tab_potions",
         refresh = function()
             if StockPiler2TabPotions and StockPiler2TabPotions.Refresh then
                 StockPiler2TabPotions.Refresh()
@@ -27,7 +34,7 @@ StockPiler2Window.Tabs = {
     [2] = {
         window = "SP2TabWatch",
         name = "StockPiler2WindowTabButtonsWatch",
-        label = L"Watch",
+        labelKey = "ui.tab_watch",
         refresh = function()
             if StockPiler2TabWatch and StockPiler2TabWatch.Refresh then
                 StockPiler2TabWatch.Refresh()
@@ -53,67 +60,85 @@ function StockPiler2Window.RequestFooterRefresh()
     StockPiler2Window._footerRefreshPending = true
 end
 
-function StockPiler2Window.FlushPendingFooterRefresh()
-    if StockPiler2Window._footerRefreshPending ~= true then
-        return
-    end
-    StockPiler2Window._footerRefreshPending = false
-    if not DoesWindowExist("StockPiler2Window")
-        or WindowGetShowing("StockPiler2Window") ~= true
-    then
-        return
-    end
-    StockPiler2Window.RefreshFooterButtons()
-end
-
-function StockPiler2Window.RefreshFooterButtons()
+--- Sync Harvest/Brew readiness: macros always; footer chrome only when window is open.
+--- opts.immediate — apply Macro.RefreshMacroButtonAppearance now (notify/sound sync).
+--- Returns canHarvest, canBrew.
+function StockPiler2Window.SyncActionReadiness(opts)
+    opts = type(opts) == "table" and opts or {}
+    local immediate = opts.immediate == true
     local Perf = StockPiler2.Perf
     if Perf and Perf.Begin then
         Perf.Begin("Footer")
     end
+
+    local windowOpen = DoesWindowExist("StockPiler2Window")
+        and WindowGetShowing("StockPiler2Window") == true
     local onWatch = StockPiler2Window.SelectedTab == StockPiler2Window.TABS_WATCH
     local onPotions = StockPiler2Window.SelectedTab == StockPiler2Window.TABS_POTIONS
-    local canHarvest = false
-    local canBrew = false
-    if DoesWindowExist(CLEAR_WATCHES_WIN) then
-        WindowSetShowing(CLEAR_WATCHES_WIN, onPotions)
-    end
-    if DoesWindowExist(HARVEST_WIN) then
-        WindowSetShowing(HARVEST_WIN, onWatch)
-        if onWatch then
-            canHarvest = StockPiler2.Grow and StockPiler2.Grow.CanHarvestNow
-                and StockPiler2.Grow.CanHarvestNow() == true
-            -- Transition-only bind/clear via clickable gate (keeps HandleInput on for tooltips).
-            if StockPiler2.Grow and StockPiler2.Grow.SetFooterHarvestClickable then
-                StockPiler2.Grow.SetFooterHarvestClickable(canHarvest)
-            else
-                ButtonSetDisabledFlag(HARVEST_WIN, not canHarvest)
+
+    -- Live readiness for macros even when the SP2 window is closed.
+    local canHarvest = StockPiler2.Grow and StockPiler2.Grow.CanHarvestNow
+        and StockPiler2.Grow.CanHarvestNow() == true
+    local canBrew = StockPiler2.Brew and StockPiler2.Brew.CanBrewNow
+        and StockPiler2.Brew.CanBrewNow() == true
+
+    -- Early-out when nothing changed (craft-slot / cultivation storms).
+    if not immediate
+        and StockPiler2Window._footerWindowOpen == windowOpen
+        and StockPiler2Window._footerOnWatch == onWatch
+        and StockPiler2Window._footerOnPotions == onPotions
+        and StockPiler2Window._footerCanHarvest == canHarvest
+        and StockPiler2Window._footerCanBrew == canBrew
+    then
+        local appearanceKey = tostring(canHarvest) .. ":" .. tostring(canBrew)
+        if StockPiler2.Macro == nil
+            or StockPiler2.Macro._lastAppearanceKey == nil
+            or StockPiler2.Macro._lastAppearanceKey == appearanceKey
+        then
+            if Perf and Perf.End then
+                Perf.End("Footer")
             end
-        elseif StockPiler2.Grow and StockPiler2.Grow.ClearHarvestActionBound then
-            StockPiler2.Grow.ClearHarvestActionBound()
+            return canHarvest, canBrew
         end
     end
-    if DoesWindowExist(BREW_WIN) then
-        WindowSetShowing(BREW_WIN, onWatch)
-        if onWatch then
-            canBrew = StockPiler2.Brew and StockPiler2.Brew.CanBrewNow
-                and StockPiler2.Brew.CanBrewNow() == true
-            ButtonSetDisabledFlag(BREW_WIN, not canBrew)
+
+    if windowOpen then
+        if DoesWindowExist(CLEAR_WATCHES_WIN) then
+            WindowSetShowing(CLEAR_WATCHES_WIN, onPotions)
+        end
+        if DoesWindowExist(HARVEST_WIN) then
+            WindowSetShowing(HARVEST_WIN, onWatch)
+            if onWatch then
+                if StockPiler2.Grow and StockPiler2.Grow.SetFooterHarvestClickable then
+                    StockPiler2.Grow.SetFooterHarvestClickable(canHarvest)
+                else
+                    ButtonSetDisabledFlag(HARVEST_WIN, not canHarvest)
+                end
+            elseif StockPiler2.Grow and StockPiler2.Grow.ClearHarvestActionBound then
+                StockPiler2.Grow.ClearHarvestActionBound()
+            end
+        end
+        if DoesWindowExist(BREW_WIN) then
+            WindowSetShowing(BREW_WIN, onWatch)
+            if onWatch then
+                ButtonSetDisabledFlag(BREW_WIN, not canBrew)
+            end
         end
     end
-    -- Skip macro sync when footer readiness unchanged (cultivation update storms).
+
     local prevOnWatch = StockPiler2Window._footerOnWatch
     local prevHarvest = StockPiler2Window._footerCanHarvest
     local prevBrew = StockPiler2Window._footerCanBrew
+    StockPiler2Window._footerWindowOpen = windowOpen
     StockPiler2Window._footerOnWatch = onWatch
+    StockPiler2Window._footerOnPotions = onPotions
     StockPiler2Window._footerCanHarvest = canHarvest
     StockPiler2Window._footerCanBrew = canBrew
     local readinessChanged = prevOnWatch ~= onWatch
         or prevHarvest ~= canHarvest
         or prevBrew ~= canBrew
-    -- Also resync when footer state and last hotbar appearance disagree (e.g. brew
-    -- macro stayed lit after footer already disabled). Skip drift while brew is
-    -- busy/loading — craft-slot storms otherwise spam Macro.Appearance.
+    -- Resync when last hotbar appearance disagrees (closed-window lag / grey stick).
+    -- Skip drift while brew is busy/loading — craft-slot storms otherwise spam Macro.Appearance.
     if not readinessChanged and StockPiler2.Macro then
         local skipDrift = false
         if StockPiler2.Brew then
@@ -128,35 +153,58 @@ function StockPiler2Window.RefreshFooterButtons()
         end
         if not skipDrift then
             local appearanceKey = tostring(canHarvest) .. ":" .. tostring(canBrew)
-            if onWatch and StockPiler2.Macro._lastAppearanceKey ~= nil
+            if StockPiler2.Macro._lastAppearanceKey ~= nil
                 and StockPiler2.Macro._lastAppearanceKey ~= appearanceKey
             then
                 readinessChanged = true
             end
         end
     end
-    if not readinessChanged then
-        if Perf and Perf.End then
-            Perf.End("Footer")
+
+    if readinessChanged or immediate then
+        if StockPiler2.Macro then
+            if immediate and StockPiler2.Macro.RefreshMacroButtonAppearance then
+                StockPiler2.Macro._enabledSyncPending = false
+                StockPiler2.Macro._pendingCanHarvest = nil
+                StockPiler2.Macro._pendingCanBrew = nil
+                StockPiler2.Macro.RefreshMacroButtonAppearance({
+                    canHarvest = canHarvest,
+                    canBrew = canBrew,
+                })
+            elseif StockPiler2.Macro.RequestEnabledSync then
+                StockPiler2.Macro.RequestEnabledSync(canHarvest, canBrew)
+            elseif StockPiler2.Macro.SyncEnabledState then
+                StockPiler2.Macro.SyncEnabledState(canHarvest, canBrew)
+            end
         end
-        return
     end
-    if StockPiler2.Macro and StockPiler2.Macro.RequestEnabledSync then
-        if onWatch then
-            StockPiler2.Macro.RequestEnabledSync(canHarvest, canBrew)
-        else
-            StockPiler2.Macro.RequestEnabledSync()
-        end
-    elseif StockPiler2.Macro and StockPiler2.Macro.SyncEnabledState then
-        if onWatch then
-            StockPiler2.Macro.SyncEnabledState(canHarvest, canBrew)
-        else
-            StockPiler2.Macro.SyncEnabledState()
-        end
-    end
+
     if Perf and Perf.End then
         Perf.End("Footer")
     end
+    return canHarvest, canBrew
+end
+
+function StockPiler2Window.FlushPendingFooterRefresh()
+    if StockPiler2Window._footerRefreshPending ~= true then
+        return
+    end
+    StockPiler2Window._footerRefreshPending = false
+    -- Always sync macros; chrome updates only when the window is open (inside Sync).
+    StockPiler2Window.SyncActionReadiness()
+    -- Frame-coalesced brew-ready chat/sound (was inline on every craft-slot RefreshBrewUi).
+    if StockPiler2.Brew and StockPiler2.Brew.MaybeNotifyBrewReady then
+        StockPiler2.Brew.MaybeNotifyBrewReady()
+    end
+end
+
+function StockPiler2Window.RefreshFooterButtons()
+    -- Route through coalesced path so craft/cultivation storms pay Footer once/frame.
+    if StockPiler2Window.RequestFooterRefresh then
+        StockPiler2Window.RequestFooterRefresh()
+        return
+    end
+    StockPiler2Window.SyncActionReadiness()
 end
 
 function StockPiler2Window.Initialize()
@@ -165,24 +213,24 @@ function StockPiler2Window.Initialize()
     end
     local version = StockPiler2.Version or L""
     if version ~= L"" then
-        LabelSetText("StockPiler2WindowTitleBarText", L"StockPiler2 v" .. version)
+        LabelSetText("StockPiler2WindowTitleBarText", T("ui.title_version", { version = version }))
     else
-        LabelSetText("StockPiler2WindowTitleBarText", L"StockPiler2")
+        LabelSetText("StockPiler2WindowTitleBarText", T("ui.title"))
     end
     if DoesWindowExist(CLEAR_WATCHES_WIN) then
-        ButtonSetText(CLEAR_WATCHES_WIN, L"Clear watches")
+        ButtonSetText(CLEAR_WATCHES_WIN, T("ui.clear_watches"))
     end
     if DoesWindowExist(HARVEST_WIN) then
-        ButtonSetText(HARVEST_WIN, L"Harvest")
+        ButtonSetText(HARVEST_WIN, T("ui.harvest"))
         if StockPiler2.Grow and StockPiler2.Grow.EnsureHarvestActionBound then
             StockPiler2.Grow.EnsureHarvestActionBound()
         end
     end
     if DoesWindowExist(BREW_WIN) then
-        ButtonSetText(BREW_WIN, L"Brew")
+        ButtonSetText(BREW_WIN, T("ui.brew"))
     end
     for _, tab in ipairs(StockPiler2Window.Tabs) do
-        ButtonSetText(tab.name, tab.label)
+        ButtonSetText(tab.name, T(tab.labelKey))
     end
     StockPiler2Window.SelectTab(StockPiler2Window.SelectedTab)
 end
@@ -273,6 +321,10 @@ function StockPiler2Window.OnShow()
     if StockPiler2TabWatch and StockPiler2TabWatch.RefreshSkillGates then
         StockPiler2TabWatch.RefreshSkillGates()
     end
+    -- ListBox row chrome may have been recreated; never skip the first paint after open.
+    if StockPiler2TabWatch and StockPiler2TabWatch.ClearRowPaintCache then
+        StockPiler2TabWatch.ClearRowPaintCache()
+    end
     StockPiler2Window.PrimeTabListsIfNeeded()
     StockPiler2Window.RefreshActiveTab()
     StockPiler2Window.RequestListRepopulate()
@@ -291,7 +343,7 @@ function StockPiler2Window.OnRefresh()
     if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapshotItemCount then
         n = StockPiler2.Inventory.GetSnapshotItemCount()
     end
-    StockPiler2.Ui.Print(L"Refreshed local bags (" .. towstring(tostring(n)) .. L" item stacks).")
+    StockPiler2.Ui.Print(T("ui.bags_refreshed", { count = tostring(n) }))
 end
 
 function StockPiler2Window.ConfirmClearWatches()
@@ -299,7 +351,7 @@ function StockPiler2Window.ConfirmClearWatches()
     if StockPiler2.Catalog and StockPiler2.Catalog.ClearWatchList then
         n = tonumber(StockPiler2.Catalog.ClearWatchList()) or 0
     end
-    StockPiler2.Ui.Print(L"Cleared " .. towstring(tostring(n)) .. L" watch(es) for this character.")
+    StockPiler2.Ui.Print(T("ui.watches_cleared", { count = tostring(n) }))
     if StockPiler2TabWatch and StockPiler2TabWatch.Refresh then
         StockPiler2TabWatch.Refresh()
     end
@@ -315,16 +367,14 @@ function StockPiler2Window.OnClearWatches()
         end
     end
     if count <= 0 then
-        StockPiler2.Ui.Print(L"No watches to clear.")
+        StockPiler2.Ui.Print(T("ui.no_watches"))
         return
     end
     if type(DialogManager) == "table" and type(DialogManager.MakeTwoButtonDialog) == "function" then
-        local yes = GetString and GetString(StringTables.Default.LABEL_YES) or L"Yes"
-        local no = GetString and GetString(StringTables.Default.LABEL_NO) or L"No"
+        local yes = GetString and GetString(StringTables.Default.LABEL_YES) or T("ui.yes")
+        local no = GetString and GetString(StringTables.Default.LABEL_NO) or T("ui.no")
         DialogManager.MakeTwoButtonDialog(
-            L"Clear all watches for this character?\n"
-                .. towstring(tostring(count))
-                .. L" watch(es) will be removed.",
+            T("ui.clear_watches_confirm", { count = tostring(count) }),
             yes,
             StockPiler2Window.ConfirmClearWatches,
             no,
@@ -336,7 +386,7 @@ function StockPiler2Window.OnClearWatches()
 end
 
 function StockPiler2Window.OnMouseOverClearWatches()
-    Tooltips.CreateTextOnlyTooltip(SystemData.ActiveWindow.name, L"Remove all watches for this character.")
+    Tooltips.CreateTextOnlyTooltip(SystemData.ActiveWindow.name, T("ui.clear_watches_tip"))
     Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_RIGHT)
 end
 
@@ -386,11 +436,11 @@ function StockPiler2Window.OnMouseOverHarvest()
     if StockPiler2.Grow and StockPiler2.Grow.CountReadyHarvestPlots then
         ready = tonumber(StockPiler2.Grow.CountReadyHarvestPlots()) or 0
     end
-    local tip = L"Harvest the next ready plot."
+    local tip = T("ui.harvest_tip")
     if ready > 0 then
-        tip = tip .. L" Ready: " .. towstring(tostring(ready)) .. L"."
+        tip = T("ui.harvest_tip_ready", { count = tostring(ready) })
     else
-        tip = tip .. L" None ready."
+        tip = T("ui.harvest_tip_none")
     end
     Tooltips.CreateTextOnlyTooltip(SystemData.ActiveWindow.name, tip)
     Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_RIGHT)
@@ -430,7 +480,7 @@ function StockPiler2Window.OnMouseOverBrew()
     end
     Tooltips.CreateTextOnlyTooltip(
         SystemData.ActiveWindow.name,
-        L"Brew green Ready watches. R-click clears the load."
+        T("ui.brew_tip_fallback")
     )
     Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_TOP)
 end

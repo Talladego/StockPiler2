@@ -216,12 +216,10 @@ function Orch.Tick()
         if Orch.Phase ~= "idle" and not Orch.IsHarvestActive() and not Orch.IsBrewSessionActive() then
             SetPhase("idle", "fill-blocked")
         end
+        -- Fill-blocked grow: still allow AutoBuy if a vendor is open (under Tick trail).
+        TryBuyTick(Orch.NewOpId())
         if StockPiler2.Perf and StockPiler2.Perf.End then
             StockPiler2.Perf.End("Orchestrator.Tick")
-        end
-        -- Fill-blocked grow: still allow AutoBuy if a vendor is open.
-        if TryBuyTick(Orch.NewOpId()) then
-            return
         end
         return
     end
@@ -249,11 +247,29 @@ function Orch.Tick()
     end
     local refineDue = false
     local canPlant = false
-    if StockPiler2.Scheduler and StockPiler2.Scheduler.SetAutoGrowIdle then
-        StockPiler2.Scheduler.SetAutoGrowIdle(false)
-    end
     if StockPiler2.Grow and StockPiler2.Grow.HasEmptyPlot and StockPiler2.Grow.HasEmptyPlot() then
         canPlant = true
+    end
+    -- Post-harvest plant quiet / harvest storm: keep fast ticks but do not
+    -- probe/plant/refine/fill-block. Quiet alone used to end at 0.75s while storm
+    -- lasted 1.5s — Orch then ran BufferFlags+CollectAutoGrowSeedLines+Refine.TryTick
+    -- mid-storm. Also require storm even when canPlant is false (soft wake before
+    -- empties). Do not revert to `canPlant and plantQuiet` only.
+    local plantQuiet = StockPiler2.Grow
+        and StockPiler2.Grow.IsPlantQuiet
+        and StockPiler2.Grow.IsPlantQuiet() == true
+    local harvestStorm = StockPiler2.Scheduler
+        and StockPiler2.Scheduler.IsHarvestStormActive
+        and StockPiler2.Scheduler.IsHarvestStormActive() == true
+    if plantQuiet or harvestStorm then
+        if StockPiler2.Scheduler and StockPiler2.Scheduler.SetAutoGrowIdle then
+            StockPiler2.Scheduler.SetAutoGrowIdle(false)
+        end
+        TryBuyTick(Orch.NewOpId())
+        if StockPiler2.Perf and StockPiler2.Perf.End then
+            StockPiler2.Perf.End("Orchestrator.Tick")
+        end
+        return
     end
     local hasSeeds = false
     if canPlant and StockPiler2.Grow and StockPiler2.Grow.HasSeedsForNextPlant then
@@ -262,8 +278,26 @@ function Orch.Tick()
     local opId = Orch.NewOpId()
     local needAdditives = StockPiler2.Grow and StockPiler2.Grow.NeedsCurrentStageAdditive
         and StockPiler2.Grow.NeedsCurrentStageAdditive() == true
+    -- Stay in fast AutoGrow only when there is plantable work or additives.
+    if (canPlant and hasSeeds) or needAdditives then
+        if StockPiler2.Scheduler and StockPiler2.Scheduler.SetAutoGrowIdle then
+            StockPiler2.Scheduler.SetAutoGrowIdle(false)
+        end
+    end
     -- Plant-first: fill empty plots before any refine when seeds are ready.
-    if canPlant and hasSeeds then
+    -- Skip plant (not refine) while Grown plots remain — mid-batch harvest gate.
+    local holdHarvestBatch = StockPiler2.Grow
+        and StockPiler2.Grow.ShouldHoldPlantForReadyHarvest
+        and StockPiler2.Grow.ShouldHoldPlantForReadyHarvest() == true
+    if canPlant and hasSeeds and holdHarvestBatch then
+        if StockPiler2.Grow.LogSkipPlant then
+            StockPiler2.Grow.LogSkipPlant("harvest-batch")
+        end
+        -- Stay awake so WakeAfterHarvest / last ready clear can plant promptly.
+        if StockPiler2.Scheduler and StockPiler2.Scheduler.SetAutoGrowIdle then
+            StockPiler2.Scheduler.SetAutoGrowIdle(false)
+        end
+    elseif canPlant and hasSeeds then
         if StockPiler2.GrowExecutor and StockPiler2.GrowExecutor.Tick then
             local ok = StockPiler2.GrowExecutor.Tick(opId)
             if ok == true then
@@ -306,8 +340,15 @@ function Orch.Tick()
                 Orch._seedBufferRefineArmed = true
                 StockPiler2.Refine.MarkRefineDue("seed-buffer")
             end
+            if StockPiler2.Scheduler and StockPiler2.Scheduler.SetAutoGrowIdle then
+                StockPiler2.Scheduler.SetAutoGrowIdle(false)
+            end
         else
             Orch._seedBufferRefineArmed = false
+            -- Empty plots but no plantable job: back off burst ticks until snap/garden/demand wake.
+            if StockPiler2.Scheduler and StockPiler2.Scheduler.SetAutoGrowIdle then
+                StockPiler2.Scheduler.SetAutoGrowIdle(true)
+            end
         end
     else
         Orch._seedBufferRefineArmed = false
@@ -341,7 +382,7 @@ function Orch.Tick()
                     hasSeeds = StockPiler2.Grow.HasSeedsForNextPlant() == true
                 end
             end
-            if canPlant and hasSeeds then
+            if canPlant and hasSeeds and not holdHarvestBatch then
                 -- Inventory may have settled; try plant this tick instead of blocking.
                 if StockPiler2.GrowExecutor and StockPiler2.GrowExecutor.Tick then
                     local planted = StockPiler2.GrowExecutor.Tick(opId)
@@ -356,6 +397,8 @@ function Orch.Tick()
                         return
                     end
                 end
+            elseif canPlant and hasSeeds and holdHarvestBatch then
+                -- Ready harvest batch still open; TryPlant would no-op — do not fill-block.
             elseif canPlant and not hasSeeds and StockPiler2.Grow and StockPiler2.Grow.SetFillBlocked then
                 StockPiler2.Grow.SetFillBlocked(true, 5)
             end

@@ -11,12 +11,16 @@ Inv._countByUid = {}
 Inv._slotIndex = { main = {}, craft = {} }
 Inv._itemBySlot = { main = {}, craft = {} }
 Inv._sampleByUid = {}
+-- MaterialSpec.FromItemDataCached: uid -> { [role] = spec|false }. Cleared on snap bump.
+Inv._specParseCache = {}
 Inv._dirty = false
 Inv._dirtyFull = false
 Inv._needQueue = false
 -- L0 AdjustUid storms: coalesce snapGen + INVENTORY_SNAPSHOT to once per UPDATE_PROCESSED.
 Inv._snapPending = false
 Inv._snapPendingReason = nil
+-- Per-uid net deltas for the coalesced L0 batch (rearrange/swap often nets to 0).
+Inv._pendingUidDelta = nil
 
 local function Bus()
     return StockPiler2.EventBus
@@ -30,11 +34,18 @@ local function BumpGenImmediate(reason)
     if StockPiler2.Scheduler and StockPiler2.Scheduler.IsInventorySideEffectsSuppressed
         and StockPiler2.Scheduler.IsInventorySideEffectsSuppressed()
     then
+        -- Defer publish; do not drop — Have/plan must catch up after Build suppress.
+        Inv._snapPending = true
+        if Inv._snapPendingReason == nil then
+            Inv._snapPendingReason = reason or "suppress-defer"
+        end
         return
     end
     Inv._snapGen = (tonumber(Inv._snapGen) or 0) + 1
     Inv._snapPending = false
     Inv._snapPendingReason = nil
+    Inv._pendingUidDelta = nil
+    Inv._specParseCache = {}
     local E = Events()
     local B = Bus()
     if B and E and E.INVENTORY_SNAPSHOT then
@@ -47,6 +58,11 @@ local function BumpGenDeferred(reason)
     if StockPiler2.Scheduler and StockPiler2.Scheduler.IsInventorySideEffectsSuppressed
         and StockPiler2.Scheduler.IsInventorySideEffectsSuppressed()
     then
+        -- Still record pending so FlushPendingSnapGen publishes after suppress ends.
+        Inv._snapPending = true
+        if Inv._snapPendingReason == nil then
+            Inv._snapPendingReason = reason
+        end
         return
     end
     Inv._snapPending = true
@@ -56,9 +72,27 @@ local function BumpGenDeferred(reason)
 end
 
 --- Publish one snapGen for all L0 AdjustUid since last flush (call from UPDATE_PROCESSED).
+--- Perf: pure craft-bag rearrange/swap nets AdjustUid to 0 — skip snapGen + INVENTORY_SNAPSHOT
+--- so Watch/BufferFlags/BrewUi cascade does not run. Nonzero nets (loot/spend) publish as before.
 function Inv.FlushPendingSnapGen()
     if Inv._snapPending ~= true then
         return false
+    end
+    local pend = Inv._pendingUidDelta
+    Inv._pendingUidDelta = nil
+    if type(pend) == "table" then
+        local anyNet = false
+        for _, d in pairs(pend) do
+            if (tonumber(d) or 0) ~= 0 then
+                anyNet = true
+                break
+            end
+        end
+        if not anyNet then
+            Inv._snapPending = false
+            Inv._snapPendingReason = nil
+            return false
+        end
     end
     BumpGenImmediate(Inv._snapPendingReason or "L0-batch")
     return true
@@ -139,6 +173,12 @@ function Inv.AdjustUid(uid, delta, reason)
     else
         Inv._countByUid[uid] = nextCount
     end
+    local pend = Inv._pendingUidDelta
+    if type(pend) ~= "table" then
+        pend = {}
+        Inv._pendingUidDelta = pend
+    end
+    pend[uid] = (tonumber(pend[uid]) or 0) + delta
     BumpGenDeferred(reason or "adjust")
     return true
 end
@@ -338,6 +378,7 @@ local function RebuildFromBags(forceRefresh)
     Inv._slotIndex = slotIndex
     Inv._itemBySlot = itemBySlot
     Inv._sampleByUid = sampleByUid
+    Inv._specParseCache = {}
     Inv._ready = true
     Inv._dirty = false
     Inv._dirtyFull = false

@@ -5,6 +5,13 @@
 StockPiler2.Grow = StockPiler2.Grow or {}
 local Grow = StockPiler2.Grow
 
+local function T(key, tokens)
+    if StockPiler2.T then
+        return StockPiler2.T(key, tokens)
+    end
+    return L"[" .. towstring(tostring(key or "")) .. L"]"
+end
+
 Grow._pendingPlant = Grow._pendingPlant or {}
 Grow._pendingPlantAt = Grow._pendingPlantAt or {}
 Grow._pendingSeedUid = Grow._pendingSeedUid or {}
@@ -36,8 +43,9 @@ Grow._skillSkipSnapGen = -1
 Grow.PENDING_TTL_SEC = 10
 Grow.CHAT_HARVEST_WAKE_DEBOUNCE_SEC = 1.5
 Grow.HARVEST_FORCE_DEBOUNCE_SEC = 1.5
-Grow.POST_HARVEST_PLANT_DELAY_SEC = 1.2
-Grow.HARVEST_OP_LOCK_SEC = 1.5
+-- Quiet after plot-empty wake so replant does not stack on the engine harvest hitch.
+Grow.POST_HARVEST_PLANT_DELAY_SEC = 0.75
+Grow.HARVEST_OP_LOCK_SEC = 1.0
 
 local HARVEST_WIN = "StockPiler2WindowHarvest"
 local HARVEST_ACTION_WIN = "StockPiler2WindowHarvestAction"
@@ -48,7 +56,7 @@ local function RestoreHarvestChrome(windowName)
         return
     end
     if ButtonSetText then
-        ButtonSetText(windowName, L"Harvest")
+        ButtonSetText(windowName, T("ui.harvest"))
     end
     -- Mid-click rebinds can leave the pressed/highlight state stuck after gameaction thrash.
     if ButtonSetPressedFlag then
@@ -187,9 +195,9 @@ local function PlayUiSound(soundId)
 end
 
 local PLANT_REASON_LABEL = {
-    potion_stock = "stock",
-    seed_buffer = "buffer",
-    surplus = "surplus",
+    potion_stock = "grow.reason.stock",
+    seed_buffer = "grow.reason.buffer",
+    surplus = "grow.reason.surplus",
 }
 
 function Grow.StageEmpty()
@@ -262,8 +270,15 @@ function Grow.IsPlotEmpty(plotNum)
     if (tonumber(Grow._pendingPlant[plotNum]) or 0) > 0 then
         return false
     end
+    local CA = StockPiler2.CultivatorAdapter
+    if CA and CA.IsPlotLocked and CA.IsPlotLocked(plotNum) then
+        return false
+    end
     local plot = Grow.CachedPlot(plotNum)
     if type(plot) ~= "table" then
+        return false
+    end
+    if plot.locked == true then
         return false
     end
     return Grow.NormalizeStage(plot.stage) == Grow.StageEmpty()
@@ -457,9 +472,16 @@ local function BufferFlagsCacheKey()
     if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
         snapGen = tonumber(StockPiler2.Inventory.GetSnapGen()) or 0
     end
+    -- Perf: planGen (plant/empty/lock) only for garden — stage-tick gardenGen used to
+    -- rebuild BufferFlags → CollectAutoGrowSeedLines under Tick every growth stage.
+    -- snapGen stays: pending/short are inventory-sensitive. Do not switch garden to GetGen().
     local gardenGen = 0
-    if StockPiler2.Garden and StockPiler2.Garden.GetGen then
-        gardenGen = tonumber(StockPiler2.Garden.GetGen()) or 0
+    if StockPiler2.Garden then
+        if StockPiler2.Garden.GetPlanGen then
+            gardenGen = tonumber(StockPiler2.Garden.GetPlanGen()) or 0
+        elseif StockPiler2.Garden.GetGen then
+            gardenGen = tonumber(StockPiler2.Garden.GetGen()) or 0
+        end
     end
     local watchGen = 0
     if StockPiler2.Watch and StockPiler2.Watch.GetGen then
@@ -485,6 +507,10 @@ local function EnsureBufferFlagsCached()
     if Grow._bufferFlagsKey == key and type(Grow._bufferFlags) == "table" then
         return Grow._bufferFlags
     end
+    local Perf = StockPiler2.Perf
+    if Perf and Perf.Begin then
+        Perf.Begin("Grow.BufferFlags")
+    end
     local RS = StockPiler2.RecipeSpec
     local lines = (RS and RS.CollectAutoGrowSeedLines and RS.CollectAutoGrowSeedLines()) or {}
     local flags = {
@@ -493,6 +519,9 @@ local function EnsureBufferFlagsCached()
     }
     Grow._bufferFlagsKey = key
     Grow._bufferFlags = flags
+    if Perf and Perf.End then
+        Perf.End("Grow.BufferFlags")
+    end
     return flags
 end
 
@@ -572,7 +601,7 @@ local function PickBufferGrowCandidate(lines, SM, Inv)
                         if type(seed) ~= "table" then
                             seed = SM.ResolveSeedForSpec and SM.ResolveSeedForSpec(line.spec) or {
                                 uniqueID = seedUid,
-                                name = L"seed",
+                                name = T("grow.seed_fallback"),
                                 nameNarrow = "seed",
                             }
                         end
@@ -630,7 +659,7 @@ local function PickSurplusCandidate(lines, SM, Inv)
                     if type(seed) ~= "table" then
                         seed = SM.ResolveSeedForSpec and SM.ResolveSeedForSpec(line.spec) or {
                             uniqueID = seedUid,
-                            name = L"seed",
+                            name = T("grow.seed_fallback"),
                             nameNarrow = "seed",
                         }
                     end
@@ -788,6 +817,52 @@ local function JobFromDemandRow(row, SM, Inv)
     }
 end
 
+--- True when a potion_stock demand row still needs grow but cannot plant (no seeds)
+--- while refinable plants sit in bags. Used to defer seed_buffer/surplus plant so Orch
+--- can refine first (plant-first + buffer jobs otherwise fill plots and delay Shared close).
+--- Mirrors JobFromDemandRow gates through plantable<=0; does not re-run BuildBalancedSpecDemand.
+local function PotionStockNeedsRefineFirst(demand, SM, Inv)
+    if type(demand) ~= "table" or type(SM) ~= "table" then
+        return false
+    end
+    local Refine = StockPiler2.Refine
+    if type(Refine) ~= "table" or not Refine.CountRefinablePlants then
+        return false
+    end
+    for _, row in pairs(demand) do
+        if type(row) == "table" then
+            local deficit = tonumber(row.deficit) or 0
+            local craftsShort = tonumber(row.craftsShort)
+            if craftsShort == nil then
+                craftsShort = deficit
+            end
+            local spec = row.spec
+            if deficit > 0 and craftsShort > 0 and type(spec) == "table" and SM.IsGrowableSpec(spec) then
+                local seed = SM.ResolveSeedForSpec(spec)
+                if type(seed) == "table" then
+                    local seedUid = tonumber(seed.uniqueID) or 0
+                    if seedUid <= 0 and type(seed.itemData) == "table" then
+                        seedUid = tonumber(seed.itemData.uniqueID) or 0
+                    end
+                    if seedUid > 0 and not IsSkillSkippedUid(seedUid) and CanUseSeedUid(seedUid, Inv) then
+                        local seedHave = SeedHaveForResolved(spec, seed, seedUid, SM, Inv)
+                        local committed = tonumber(Grow._seedCommitted[seedUid]) or 0
+                        local avail = seedHave - committed
+                        local plantable = ComputePlantable(avail, deficit)
+                        if plantable <= 0 then
+                            local plantUid = tonumber(seed.plantUid) or 0
+                            if plantUid > 0 and Refine.CountRefinablePlants(plantUid, spec) > 0 then
+                                return true
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
 local function PreferJob(candidate, best, bestScore, bestShare, bestCrafts, bestPlotCount, bestRoleRank, useFocusScore)
     if candidate == nil then
         return best, bestScore, bestShare, bestCrafts, bestPlotCount, bestRoleRank, false
@@ -854,13 +929,23 @@ local function PreferJob(candidate, best, bestScore, bestShare, bestCrafts, best
 end
 
 function Grow.PickPlantCandidate()
+    local Perf = StockPiler2.Perf
+    if Perf and Perf.Begin then
+        Perf.Begin("PickPlantCandidate")
+    end
     local RS = StockPiler2.RecipeSpec
     local SM = StockPiler2.SeedMap
     local Inv = StockPiler2.Inventory
     if type(RS) ~= "table" or not RS.BuildBalancedSpecDemand then
+        if Perf and Perf.End then
+            Perf.End("PickPlantCandidate")
+        end
         return nil
     end
     if type(SM) ~= "table" or not SM.IsGrowableSpec or not SM.ResolveSeedForSpec then
+        if Perf and Perf.End then
+            Perf.End("PickPlantCandidate")
+        end
         return nil
     end
     local demand = RS.BuildBalancedSpecDemand()
@@ -914,22 +999,49 @@ function Grow.PickPlantCandidate()
         end
     end
     if best ~= nil then
+        if Perf and Perf.End then
+            Perf.End("PickPlantCandidate")
+        end
         return best
+    end
+    -- No plantable potion deficit. Prefer refine into potion seeds over buffer/surplus
+    -- plant: otherwise plant-first fills empty plots with seed_buffer and blocks refine
+    -- until plots are full (Shared/yellow watches stall a full grow cycle).
+    -- Do not revert to always returning buffer here — only defer when refine can unblock
+    -- potion_stock; buffer-only play and seed-starved-with-no-refinable stay unchanged.
+    if PotionStockNeedsRefineFirst(demand, SM, Inv) then
+        if Perf and Perf.End then
+            Perf.End("PickPlantCandidate")
+        end
+        return nil
     end
     if not (StockPiler2.Watch and StockPiler2.Watch.IsSeedBufferEnabled
         and StockPiler2.Watch.IsSeedBufferEnabled() == true)
     then
+        if Perf and Perf.End then
+            Perf.End("PickPlantCandidate")
+        end
         return nil
     end
     if not RS.CollectAutoGrowSeedLines then
+        if Perf and Perf.End then
+            Perf.End("PickPlantCandidate")
+        end
         return nil
     end
     local lines = RS.CollectAutoGrowSeedLines()
     best = PickBufferGrowCandidate(lines, SM, Inv)
     if best ~= nil then
+        if Perf and Perf.End then
+            Perf.End("PickPlantCandidate")
+        end
         return best
     end
-    return PickSurplusCandidate(lines, SM, Inv)
+    local surplus = PickSurplusCandidate(lines, SM, Inv)
+    if Perf and Perf.End then
+        Perf.End("PickPlantCandidate")
+    end
+    return surplus
 end
 
 function Grow.ClearPendingPlot(plotNum, opts)
@@ -1224,7 +1336,17 @@ function Grow.GetPlantJob()
     local Inv = StockPiler2.Inventory
     local Garden = StockPiler2.Garden
     local snapGen = Inv and Inv.GetSnapGen and Inv.GetSnapGen() or 0
-    local gardenGen = Garden and Garden.GetGen and Garden.GetGen() or 0
+    -- Perf: planGen (plant/empty/lock), not stage-tick gardenGen — avoid re-Pick /
+    -- BuildBalancedSpecDemand on every growth-stage tick under Orch.Tick.
+    -- Do not switch this comparison back to Garden.GetGen().
+    local gardenGen = 0
+    if Garden then
+        if Garden.GetPlanGen then
+            gardenGen = tonumber(Garden.GetPlanGen()) or 0
+        elseif Garden.GetGen then
+            gardenGen = tonumber(Garden.GetGen()) or 0
+        end
+    end
     if Grow._plantQueueDirty ~= true then
         if type(Grow._cachedPlantJob) == "table" then
             local adjusted = AdjustJobForCommitted(Grow._cachedPlantJob)
@@ -1339,12 +1461,18 @@ function Grow.AllPlantedPlotsHarvestReady()
 end
 
 --- Transition-only harvest-ready chat/sound (not on every footer CountReady).
+--- Same gates as the Harvest button/macro: all planted plots ready AND CanHarvestNow.
 function Grow.MaybeNotifyHarvestReady()
     local allReady, readyN = Grow.AllPlantedPlotsHarvestReady()
-    if allReady then
+    local canHarvest = Grow.CanHarvestNow and Grow.CanHarvestNow() == true
+    if allReady and canHarvest then
+        -- Light macros/footer before chat/sound so they stay in sync.
+        if StockPiler2Window and StockPiler2Window.SyncActionReadiness then
+            StockPiler2Window.SyncActionReadiness({ immediate = true })
+        end
         local printed = NotifyChatOnce(
             "harvest-ready",
-            L"Harvest ready: " .. towstring(tostring(readyN)) .. L" plot(s)."
+            T("grow.harvest_ready", { count = tostring(readyN) })
         )
         if printed then
             local soundId = GameData and GameData.Sound and GameData.Sound.HELP_TIPS_NEW
@@ -1654,7 +1782,8 @@ function Grow.SelectHarvestPlot(manual)
     return true, pick, plotData
 end
 
---- True when a harvest can proceed (Cultivation, ready plot, not brew-blocked).
+--- True when a harvest can proceed (Cultivation, all planted plots grown, not brew-blocked).
+--- Empty plots are ignored; button/macro stay lit mid-batch while remaining planted plots are ready.
 function Grow.CanHarvestNow()
     local Caps = StockPiler2.TradeSkillCaps
     if Caps and Caps.HasCultivation and Caps.HasCultivation() ~= true then
@@ -1665,8 +1794,31 @@ function Grow.CanHarvestNow()
     then
         return false
     end
-    local ready = Grow.CountReadyHarvestPlots and Grow.CountReadyHarvestPlots() or 0
-    return (tonumber(ready) or 0) > 0
+    local allReady = Grow.AllPlantedPlotsHarvestReady()
+    return allReady == true
+end
+
+--- User chat for one plot harvest (main plant only; no byproducts).
+function Grow.NotifyHarvestOutcome(plotNum, opts)
+    opts = type(opts) == "table" and opts or {}
+    plotNum = tonumber(plotNum) or 0
+    if opts.critFail == true then
+        NotifyChat(T("grow.harvest_crit_fail", { plot = tostring(plotNum) }))
+        return
+    end
+    local count = tonumber(opts.count) or 0
+    local name = opts.name
+    if name == nil or name == L"" or name == "" then
+        return
+    end
+    if type(name) == "string" then
+        name = towstring(name)
+    end
+    NotifyChat(T("grow.harvest_outcome", {
+        plot = tostring(plotNum),
+        count = tostring(math.max(1, count)),
+        name = name,
+    }))
 end
 
 --- Prepare CurrentPlot + harvest watch; game-action button performs the craft.
@@ -1701,13 +1853,67 @@ function Grow.PrepareHarvestPlot(manual)
     return true
 end
 
+--- True while post-harvest plant quiet window is active (Orch must not probe/plant).
+function Grow.IsPlantQuiet()
+    local quietUntil = tonumber(Grow._plantQuietUntil) or 0
+    if quietUntil <= 0 then
+        return false
+    end
+    local now = NowSec()
+    if now > 0 and now < quietUntil then
+        return true
+    end
+    if now >= quietUntil then
+        Grow._plantQuietUntil = 0
+    end
+    return false
+end
+
+--- Hold AutoGrow plant only during a uniform ready / mid-batch harvest wave:
+--- at least one Grown plot and no mid-grow plots (empty + ready + harvesting only).
+--- That keeps freed plots empty so CanHarvestNow stays true while you finish clicking.
+--- Staggered gardens (ready + still growing + empty) must NOT hold: SP2 harvest is
+--- already gated off by AllPlantedPlotsHarvestReady, and empties should still refill.
+function Grow.ShouldHoldPlantForReadyHarvest()
+    local ready = Grow.GetReadyHarvestPlots and Grow.GetReadyHarvestPlots() or nil
+    if type(ready) ~= "table" or #ready <= 0 then
+        return false
+    end
+    if Grow.HasPlotGrowing and Grow.HasPlotGrowing() == true then
+        return false
+    end
+    return true
+end
+
+local function ArmHarvestStorm(plantDelay)
+    local Sch = StockPiler2.Scheduler
+    if not (Sch and Sch.BeginHarvestStorm) then
+        return
+    end
+    plantDelay = tonumber(plantDelay) or (tonumber(Grow.POST_HARVEST_PLANT_DELAY_SEC) or 0.75)
+    local stormSec = plantDelay
+    local stormFloor = 1.5
+    if Sch.HARVEST_STORM_MIN_SEC then
+        stormFloor = tonumber(Sch.HARVEST_STORM_MIN_SEC) or 1.5
+    end
+    if stormSec < stormFloor then
+        stormSec = stormFloor
+    end
+    Sch.BeginHarvestStorm(stormSec)
+    return stormSec
+end
+
 --- Soft chat-only wake: quiet + clear block + WakeAutoGrow.
 --- Does not force-invalidate (LearnBridge plot-empty owns that). Avoids dual
 --- WakeAfterHarvest x2 stacking Planner/HasSeeds on the same harvest hitch.
 function Grow.WakeAfterHarvestChat()
     local now = NowSec()
-    local plantDelay = tonumber(Grow.POST_HARVEST_PLANT_DELAY_SEC) or 1.2
-    local quietUntil = now + plantDelay
+    local plantDelay = tonumber(Grow.POST_HARVEST_PLANT_DELAY_SEC) or 0.75
+    -- Perf: quiet must be >= storm floor (1.5s). When quiet was 0.75s and storm 1.5s,
+    -- Orch resumed plant/refine mid-storm (BufferFlags+CollectIntents) while bag/plan
+    -- were still deferred. Do not shorten quiet below stormSec.
+    local stormSec = ArmHarvestStorm(plantDelay) or math.max(plantDelay, 1.5)
+    local quietUntil = now + stormSec
     local prevQuiet = tonumber(Grow._plantQuietUntil) or 0
     if quietUntil > prevQuiet then
         Grow._plantQuietUntil = quietUntil
@@ -1727,30 +1933,35 @@ function Grow.WakeAfterHarvestChat()
 end
 
 --- After a plot becomes empty (cultivation): clear block, rebuild job, wake.
---- Marks refine due only when no plantable seed job exists (need buffer refill).
+--- Always MarkRefineDue on force; Orch plant-first clears refine when plantable.
 --- Per-plot wakes (P1–P4) share one force-invalidate + plant quiet window so replant
 --- does not stack on the engine harvest hitch.
+--- Perf: no sync HasSeeds/PickPlantCandidate on this hitch frame (0.4.95) — that used to
+--- fuse WakeAfterHarvest → PickPlantCandidate → Harvest.Complete on empty-plot trails.
+--- Orch probes after quiet. Do not reintroduce sync HasSeeds here.
 --- opts.soft=true — quiet/wake only (same as WakeAfterHarvestChat).
 function Grow.WakeAfterHarvest(plotNum, opts)
     opts = type(opts) == "table" and opts or {}
     if opts.soft == true then
         Grow.WakeAfterHarvestChat()
-        return Grow.HasSeedsForNextPlant and Grow.HasSeedsForNextPlant() == true
+        return false
     end
     local Perf = StockPiler2.Perf
     if Perf and Perf.Begin then
         Perf.Begin("Grow.WakeAfterHarvest")
     end
-    local function done(result)
+    local function done()
         if Perf and Perf.End then
             Perf.End("Grow.WakeAfterHarvest")
         end
-        return result
+        return false
     end
     plotNum = tonumber(plotNum) or 0
     local now = NowSec()
-    local plantDelay = tonumber(Grow.POST_HARVEST_PLANT_DELAY_SEC) or 1.2
-    local quietUntil = now + plantDelay
+    local plantDelay = tonumber(Grow.POST_HARVEST_PLANT_DELAY_SEC) or 0.75
+    -- Quiet >= storm (see WakeAfterHarvestChat) — keep windows aligned.
+    local stormSec = ArmHarvestStorm(plantDelay) or math.max(plantDelay, 1.5)
+    local quietUntil = now + stormSec
     local prevQuiet = tonumber(Grow._plantQuietUntil) or 0
     if quietUntil > prevQuiet then
         Grow._plantQuietUntil = quietUntil
@@ -1760,7 +1971,6 @@ function Grow.WakeAfterHarvest(plotNum, opts)
     local forceDebounce = tonumber(Grow.HARVEST_FORCE_DEBOUNCE_SEC) or 1.5
     local lastForce = tonumber(Grow._lastHarvestForceAt) or 0
     local doForce = lastForce <= 0 or now <= 0 or (now - lastForce) >= forceDebounce
-    local plantable = false
     if doForce then
         Grow._lastHarvestForceAt = now
         -- Keep PlanSnapshot: footer CanBrewNow / GetOrBuild must not sync-build mid-hitch.
@@ -1768,33 +1978,24 @@ function Grow.WakeAfterHarvest(plotNum, opts)
         if StockPiler2.Scheduler and StockPiler2.Scheduler.EnqueuePlanRebuild then
             StockPiler2.Scheduler.EnqueuePlanRebuild()
         end
-        if Grow.HasSeedsForNextPlant then
-            plantable = Grow.HasSeedsForNextPlant() == true
-        end
-        if not plantable and StockPiler2.Refine and StockPiler2.Refine.MarkRefineDue then
+        -- Do not sync HasSeeds/Pick on the hitch frame — Orch probes after plant quiet.
+        if StockPiler2.Refine and StockPiler2.Refine.MarkRefineDue then
             StockPiler2.Refine.MarkRefineDue("harvest")
-        elseif plantable and StockPiler2.Refine and StockPiler2.Refine.ClearPostHarvestState then
-            StockPiler2.Refine.ClearPostHarvestState()
         end
-    else
-        -- Debounced second wake on same hitch: skip HasSeeds (often BuildBalancedSpecDemand).
-        plantable = Grow._lastHarvestWakePlantable == true
     end
-    Grow._lastHarvestWakePlantable = plantable
     if StockPiler2.Scheduler and StockPiler2.Scheduler.WakeAutoGrow then
         StockPiler2.Scheduler.WakeAutoGrow()
     end
     LogOnce(
         "harvest-wake-" .. tostring(plotNum),
         string.format(
-            "harvest-wake P%s plantable=%s force=%s quiet=%.1f",
+            "harvest-wake P%s force=%s quiet=%.1f",
             tostring(plotNum > 0 and plotNum or "?"),
-            tostring(plantable),
             tostring(doForce),
-            plantDelay
+            stormSec
         )
     )
-    return done(plantable)
+    return done()
 end
 
 function Grow.LogSkipPlant(reason)
@@ -1831,6 +2032,10 @@ function Grow.TryPlantNextEmptyPlot(opId)
         end
         Grow._plantQuietUntil = 0
     end
+    if Grow.ShouldHoldPlantForReadyHarvest and Grow.ShouldHoldPlantForReadyHarvest() == true then
+        LogOnce("plant-harvest-batch", "plant hold: ready harvest plot(s) remain")
+        return false
+    end
     if StockPiler2.Perf and StockPiler2.Perf.Begin then
         StockPiler2.Perf.Begin("Grow.TryPlant")
     end
@@ -1866,12 +2071,21 @@ function Grow.TryPlantNextEmptyPlot(opId)
     -- Live soil check: cache can lag mid-harvest; never pending/commit a non-empty plot.
     if CA.ReadPlot then
         local live = CA.ReadPlot(plotNum)
-        if type(live) == "table" and Grow.NormalizeStage(live.stage) ~= Grow.StageEmpty() then
-            LogOnce("not-empty-live", "plant skip P" .. tostring(plotNum) .. " live not empty")
-            if StockPiler2.Perf and StockPiler2.Perf.End then
-                StockPiler2.Perf.End("Grow.TryPlant")
+        if type(live) == "table" then
+            if live.locked == true then
+                LogOnce("locked-live", "plant skip P" .. tostring(plotNum) .. " locked")
+                if StockPiler2.Perf and StockPiler2.Perf.End then
+                    StockPiler2.Perf.End("Grow.TryPlant")
+                end
+                return false
             end
-            return false
+            if Grow.NormalizeStage(live.stage) ~= Grow.StageEmpty() then
+                LogOnce("not-empty-live", "plant skip P" .. tostring(plotNum) .. " live not empty")
+                if StockPiler2.Perf and StockPiler2.Perf.End then
+                    StockPiler2.Perf.End("Grow.TryPlant")
+                end
+                return false
+            end
         end
     end
     local job = Grow.GetPlantJob()
@@ -1942,15 +2156,18 @@ function Grow.TryPlantNextEmptyPlot(opId)
         Grow.ClearPendingPlot(plotNum)
         LogGrow("plant failed P" .. tostring(plotNum) .. " err=" .. tostring(err))
         NotifyChat(
-            L"Plant failed P"
-                .. towstring(tostring(plotNum))
-                .. L": "
-                .. towstring(tostring(err or "unknown"))
+            T("grow.plant_failed", {
+                plot = tostring(plotNum),
+                err = tostring(err or "unknown"),
+            })
         )
         if StockPiler2.Perf and StockPiler2.Perf.End then
             StockPiler2.Perf.End("Grow.TryPlant")
         end
         return false
+    end
+    if StockPiler2.SeedMap and StockPiler2.SeedMap.NotePlantAttempt then
+        StockPiler2.SeedMap.NotePlantAttempt(seedUid)
     end
     Grow._lastSkipMsg = nil
     Grow._commitForceCleared = false
@@ -1971,21 +2188,20 @@ function Grow.TryPlantNextEmptyPlot(opId)
         end
     end
     local reasonRaw = tostring(job.plantReason or "potion_stock")
-    local reasonLabel = PLANT_REASON_LABEL[reasonRaw] or reasonRaw
-    local seedName = L"seed"
+    local reasonKey = PLANT_REASON_LABEL[reasonRaw]
+    local reasonLabel = reasonKey and T(reasonKey) or towstring(reasonRaw)
+    local seedName = T("grow.seed_fallback")
     if type(item) == "table" and item.name ~= nil and item.name ~= L"" then
         seedName = item.name
     elseif type(job.seed) == "table" and job.seed.name ~= nil and job.seed.name ~= L"" then
         seedName = job.seed.name
     end
     NotifyChat(
-        L"Planted P"
-            .. towstring(tostring(plotNum))
-            .. L" "
-            .. seedName
-            .. L" ("
-            .. towstring(reasonLabel)
-            .. L")"
+        T("grow.planted", {
+            plot = tostring(plotNum),
+            name = seedName,
+            reason = reasonLabel,
+        })
     )
     LogPlant(string.format(
         "P%d %s uid=%d plantUid=%d reason=%s deficit=%d craftsShort=%d plantable=%d opId=%s",
@@ -2373,42 +2589,42 @@ end
 local function StageLabel(stageNum)
     stageNum = Grow.NormalizeStage(stageNum)
     if stageNum == Grow.StageEmpty() then
-        return L"Empty"
+        return T("grow.stage.empty")
     end
     local CS = GameData and GameData.CultivationStage
     if CS then
         if CS.GERMINATION ~= nil and stageNum == CS.GERMINATION then
-            return L"Germination"
+            return T("grow.stage.germination")
         end
         if CS.SEEDLING ~= nil and stageNum == CS.SEEDLING then
-            return L"Seedling"
+            return T("grow.stage.seedling")
         end
         if CS.FLOWERING ~= nil and stageNum == CS.FLOWERING then
-            return L"Flowering"
+            return T("grow.stage.flowering")
         end
         if CS.GROWN ~= nil and stageNum == CS.GROWN then
-            return L"Ready to harvest"
+            return T("grow.stage.ready")
         end
         if CS.HARVESTING ~= nil and stageNum == CS.HARVESTING then
-            return L"Harvesting"
+            return T("grow.stage.harvesting")
         end
     end
     if stageNum == 1 then
-        return L"Germination"
+        return T("grow.stage.germination")
     end
     if stageNum == 2 then
-        return L"Seedling"
+        return T("grow.stage.seedling")
     end
     if stageNum == 3 then
-        return L"Flowering"
+        return T("grow.stage.flowering")
     end
     if stageNum == 4 then
-        return L"Ready to harvest"
+        return T("grow.stage.ready")
     end
     if stageNum == 5 then
-        return L"Harvesting"
+        return T("grow.stage.harvesting")
     end
-    return L"Stage " .. towstring(tostring(stageNum))
+    return T("grow.stage.n", { n = tostring(stageNum) })
 end
 
 --- Short cultivation notes for a material spec (Watch status / tooltip).
@@ -2549,7 +2765,7 @@ local function FormatSeconds(t, condensed)
             return TimeUtils.FormatTimeCondensed(t)
         end
     end
-    return towstring(tostring(math.ceil(t))) .. L"s"
+    return T("grow.tip.seconds", { n = tostring(math.ceil(t)) })
 end
 
 --- Prefer TotalTimer (time to harvest / full completion); fall back to stage timer.
@@ -2563,7 +2779,7 @@ local function FormatPlotTimerStatus(stage, plot)
     if totalOn ~= false and total > 0 then
         local text = FormatSeconds(total, false)
         if text ~= L"" then
-            return status .. L" - " .. text .. L" left"
+            return T("grow.tip.timer_left", { status = status, time = text })
         end
     end
     local stageT = tonumber(plot.stageTimer) or 0
@@ -2571,7 +2787,7 @@ local function FormatPlotTimerStatus(stage, plot)
     if stageOn ~= false and stageT > 0 then
         local text = FormatSeconds(stageT, true)
         if text ~= L"" then
-            return status .. L" (" .. text .. L")"
+            return T("grow.tip.timer_stage", { status = status, time = text })
         end
     end
     return status
@@ -2602,7 +2818,7 @@ end
 
 local function PlantDisplayName(plot, plotNum)
     if type(plot) ~= "table" then
-        return L"Plot " .. towstring(tostring(plotNum or "?"))
+        return T("grow.tip.plot_n", { n = tostring(plotNum or "?") })
     end
     if plot.seedName ~= nil and plot.seedName ~= L"" then
         return plot.seedName
@@ -2613,9 +2829,9 @@ local function PlantDisplayName(plot, plotNum)
     end
     local uid = tonumber(plot.seedUid) or 0
     if uid > 0 then
-        return L"Seed " .. towstring(tostring(uid))
+        return T("grow.tip.seed_uid", { uid = tostring(uid) })
     end
-    return L"Plot " .. towstring(tostring(plotNum or "?"))
+    return T("grow.tip.plot_n", { n = tostring(plotNum or "?") })
 end
 
 local function SeedIconNum(plot)
@@ -2658,9 +2874,9 @@ local function FormatPlotTooltipAdditiveLines(plot)
     end
     local types = (GameData and GameData.CultivationTypes) or {}
     local order = {
-        { tonumber(types.SOIL) or 2, L"Soil" },
-        { tonumber(types.WATERCAN) or 3, L"Water" },
-        { tonumber(types.NUTRIENT) or 4, L"Nutrient" },
+        { tonumber(types.SOIL) or 2, T("grow.tip.soil") },
+        { tonumber(types.WATERCAN) or 3, T("grow.tip.water") },
+        { tonumber(types.NUTRIENT) or 4, T("grow.tip.nutrient") },
     }
     for i = 1, #order do
         local slot = plot.additives[order[i][1]]
@@ -2678,9 +2894,9 @@ local function FormatPlotTooltipAdditiveLines(plot)
                 name = order[i][2]
             end
             if icon ~= L"" then
-                lines[#lines + 1] = icon .. L" " .. name
+                lines[#lines + 1] = T("grow.tip.icon_name", { icon = icon, name = name })
             else
-                lines[#lines + 1] = order[i][2] .. L" " .. name
+                lines[#lines + 1] = T("grow.tip.additive", { kind = order[i][2], name = name })
             end
         end
     end
@@ -2781,10 +2997,10 @@ function Grow.GetPlotTooltipEntries()
                 local name = PlantDisplayName(plot, plotNum)
                 local seedText = name
                 if icon ~= L"" then
-                    seedText = icon .. L" " .. name
+                    seedText = T("grow.tip.icon_name", { icon = icon, name = name })
                 end
                 local entry = {
-                    title = { text = L"Plot " .. towstring(tostring(plotNum)) },
+                    title = { text = T("grow.tip.plot_n", { n = tostring(plotNum) }) },
                     seed = {
                         text = seedText,
                         color = ItemRarityColor(seedData),
@@ -2802,7 +3018,7 @@ function Grow.GetPlotTooltipEntries()
     if not anyGrowing then
         entries[#entries + 1] = {
             noPlants = true,
-            text = L"No plants growing.",
+            text = T("grow.tip.no_plants"),
         }
     end
     return entries
@@ -2814,7 +3030,7 @@ local function ApplyPlotTooltipRow(row, entry)
         return row + 1
     end
     if entry.noPlants == true then
-        applyTooltipTextRow(row, entry.text or L"No plants growing.")
+        applyTooltipTextRow(row, entry.text or T("grow.tip.no_plants"))
         return row + 1
     end
     if entry.title and entry.title.text and entry.title.text ~= L"" then
@@ -2850,11 +3066,11 @@ function Grow.ApplyPlotTooltipRows(startRow)
     startRow = tonumber(startRow) or 1
     local entries = Grow.GetPlotTooltipEntries()
     if #entries == 0 or (entries[1] and entries[1].noPlants == true) then
-        Tooltips.SetTooltipText(startRow, 1, L"No plants growing.", false)
+        Tooltips.SetTooltipText(startRow, 1, T("grow.tip.no_plants"), false)
         setTooltipBodyColor(startRow, 1)
         return startRow + 1
     end
-    Tooltips.SetTooltipText(startRow, 1, L"Growing:", false)
+    Tooltips.SetTooltipText(startRow, 1, T("grow.tip.growing_header"), false)
     setTooltipBodyColor(startRow, 1)
     startRow = startRow + 1
     for i = 1, #entries do
@@ -2879,9 +3095,9 @@ function Grow.ShowHarvestTooltip(anchorWindow, anchor, liveRefresh)
     Tooltips.CreateTextOnlyTooltip(anchorWindow)
     local titleIcon = FormatTooltipIcon(HARVEST_TOOLTIP_ICON)
     if titleIcon ~= L"" then
-        Tooltips.SetTooltipText(1, 1, titleIcon .. L" StockPiler2 Harvest")
+        Tooltips.SetTooltipText(1, 1, T("grow.tip.title_icon", { icon = titleIcon }))
     else
-        Tooltips.SetTooltipText(1, 1, L"StockPiler2 Harvest")
+        Tooltips.SetTooltipText(1, 1, T("grow.tip.title"))
     end
     local heading = (Tooltips and Tooltips.COLOR_HEADING) or { r = 255, g = 204, b = 102 }
     setTooltipRowColor(1, 1, heading)
@@ -2889,13 +3105,10 @@ function Grow.ShowHarvestTooltip(anchorWindow, anchor, liveRefresh)
     local Caps = StockPiler2.TradeSkillCaps
     local hasCult = Caps and Caps.HasCultivation and Caps.HasCultivation() == true
     if not hasCult then
-        local text = L"Harvest requires Cultivation."
+        local text = T("grow.tip.need_cult")
         local gather = Caps and Caps.GatheringLabel and Caps.GatheringLabel()
-        if gather ~= nil and gather ~= L"Cultivation" then
-            text = text
-                .. L" This character gathers via "
-                .. gather
-                .. L" — plant mats must be bought or grown on a Cultivator."
+        if gather ~= nil and gather ~= T("plan.fallback.cultivation") then
+            text = text .. T("grow.tip.gathers_via", { gather = gather })
         end
         Tooltips.SetTooltipText(2, 1, text)
         local warn = (Tooltips and Tooltips.COLOR_WARNING) or { r = 220, g = 120, b = 120 }
@@ -2914,20 +3127,57 @@ function Grow.ShowHarvestTooltip(anchorWindow, anchor, liveRefresh)
         and StockPiler2.Brew.BlocksHarvest
         and StockPiler2.Brew.BlocksHarvest() == true
     if brewBlocks then
-        Tooltips.SetTooltipText(2, 1, L"Held: Brew is loaded or crafting.")
+        Tooltips.SetTooltipText(2, 1, T("grow.tip.held_brew"))
     else
-        local ready = (tonumber(readyN) or 0) > 0 and L"ready" or L"not ready"
-        Tooltips.SetTooltipText(2, 1, L"Click: harvest next grown plot (" .. ready .. L").")
+        local ready = (tonumber(readyN) or 0) > 0 and T("grow.tip.ready") or T("grow.tip.not_ready")
+        Tooltips.SetTooltipText(2, 1, T("grow.tip.click_harvest", { ready = ready }))
     end
     setTooltipBodyColor(2, 1)
 
     local agOn = Grow.IsEnabled and Grow.IsEnabled() == true
-    local ag = agOn and L"on" or L"off"
+    local ag = agOn and T("grow.tip.autogrow_on") or T("grow.tip.autogrow_off")
     local agIcon = agOn and L"<icon00057>" or L"<icon00058>"
-    Tooltips.SetTooltipText(3, 1, agIcon .. L" AutoGrow is " .. ag .. L".")
+    Tooltips.SetTooltipText(3, 1, T("grow.tip.autogrow_state", { icon = agIcon, state = ag }))
     setTooltipBodyColor(3, 1)
 
-    Grow.ApplyPlotTooltipRows(4)
+    local nextRow = 4
+    local SM = StockPiler2.SeedMap
+    if SM and SM.FormatHarvestTooltipRateLines then
+        local seen = {}
+        local CA = StockPiler2.CultivatorAdapter
+        local n = CA and CA.NumPlots and CA.NumPlots() or 4
+        local tipPlots = Grow._liveHarvestTip and Grow._liveHarvestTip.plots
+        for plotNum = 1, n do
+            local plot = type(tipPlots) == "table" and tipPlots[plotNum] or nil
+            if type(plot) ~= "table" and CA and CA.ReadPlot then
+                plot = CA.ReadPlot(plotNum)
+            end
+            local seedUid = 0
+            local plantUid = 0
+            if type(plot) == "table" then
+                seedUid = tonumber(plot.seedUid) or 0
+                plantUid = tonumber(plot.plantUid) or 0
+                if seedUid <= 0 and type(plot.seed) == "table" then
+                    seedUid = tonumber(plot.seed.uniqueID) or 0
+                end
+            end
+            if seedUid > 0 and seen[seedUid] ~= true then
+                seen[seedUid] = true
+                local rateLines = SM.FormatHarvestTooltipRateLines(seedUid, plantUid)
+                if type(rateLines) == "table" then
+                    for ri = 1, #rateLines do
+                        if rateLines[ri] and rateLines[ri] ~= "" then
+                            Tooltips.SetTooltipText(nextRow, 1, towstring(rateLines[ri]), false)
+                            setTooltipBodyColor(nextRow, 1)
+                            nextRow = nextRow + 1
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    Grow.ApplyPlotTooltipRows(nextRow)
     Tooltips.Finalize()
     Tooltips.AnchorTooltip(anchor or Tooltips.ANCHOR_WINDOW_TOP)
 
@@ -3004,6 +3254,7 @@ function Grow.HarvestTooltipFingerprint()
     local CA = StockPiler2.CultivatorAdapter
     local n = CA and CA.NumPlots and CA.NumPlots() or 4
     local tipPlots = Grow._liveHarvestTip and Grow._liveHarvestTip.plots
+    local seedParts = {}
     for plotNum = 1, n do
         local plot = type(tipPlots) == "table" and tipPlots[plotNum] or nil
         if type(plot) ~= "table" and CA and CA.ReadPlot then
@@ -3012,10 +3263,27 @@ function Grow.HarvestTooltipFingerprint()
         if type(plot) == "table" then
             local stage = Grow.NormalizeStage(plot.stage)
             if stage ~= Grow.StageEmpty() then
+                local seedUid = tonumber(plot.seedUid) or 0
                 parts[#parts + 1] = plotNum .. ":"
                     .. tostring(stage) .. ":"
                     .. tostring(math.floor(tonumber(plot.totalTimer) or 0)) .. ":"
-                    .. tostring(math.floor(tonumber(plot.stageTimer) or 0))
+                    .. tostring(math.floor(tonumber(plot.stageTimer) or 0)) .. ":"
+                    .. tostring(seedUid)
+                if seedUid > 0 then
+                    local hits = 0
+                    local attempts = 0
+                    local SM = StockPiler2.SeedMap
+                    if SM and SM.CultSkillUpRate then
+                        local rate, h, a = SM.CultSkillUpRate(seedUid)
+                        hits = tonumber(h) or 0
+                        attempts = tonumber(a) or 0
+                        if rate == nil and SM.FormatHarvestRateLine then
+                            -- Still fingerprint harvest attempts via rate line presence.
+                            attempts = attempts
+                        end
+                    end
+                    seedParts[#seedParts + 1] = tostring(seedUid) .. ":" .. tostring(hits) .. ":" .. tostring(attempts)
+                end
             end
         end
     end
@@ -3029,6 +3297,9 @@ function Grow.HarvestTooltipFingerprint()
         and StockPiler2.Brew.BlocksHarvest
         and StockPiler2.Brew.BlocksHarvest() == true
     parts[#parts + 1] = brewBlocks and "brewHold" or "brewOk"
+    if #seedParts > 0 then
+        parts[#parts + 1] = "seeds=" .. table.concat(seedParts, ",")
+    end
     return table.concat(parts, "|")
 end
 

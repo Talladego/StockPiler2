@@ -5,6 +5,13 @@
 StockPiler2.Brew = StockPiler2.Brew or {}
 local Brew = StockPiler2.Brew
 
+local function T(key, tokens)
+    if StockPiler2.T then
+        return StockPiler2.T(key, tokens)
+    end
+    return L"[" .. towstring(tostring(key or "")) .. L"]"
+end
+
 local TICK_INTERVAL_SEC = 0.05
 local OPEN_WAIT_TICKS = 60
 local STEP_WAIT_TICKS = 60
@@ -306,16 +313,30 @@ function Brew.PickReadyWatch()
     return best
 end
 
---- Print once when footer Brew is actually actionable (same gate as the button).
+--- Print once when footer Brew becomes actionable; chime only on that edge.
+--- Do not clear the once-key during op-lock / perform / load job (avoids re-chime every craft).
 function Brew.MaybeNotifyBrewReady()
     local function clearReady()
         if StockPiler2.Debug and StockPiler2.Debug.ClearNotifyOnce then
             StockPiler2.Debug.ClearNotifyOnce("brew-ready")
         end
     end
+    -- Ready-only: never notify for a manual row Load session.
+    if Brew._loadSource == "manual" then
+        clearReady()
+        return
+    end
+    -- Transient busy: keep once-key so leaving op-lock does not re-announce.
+    if Brew.IsBusy and Brew.IsBusy() == true then
+        return
+    end
     if not (Brew.CanBrewNow and Brew.CanBrewNow() == true) then
         clearReady()
         return
+    end
+    -- Light macros/footer before chat/sound so they stay in sync (even if window closed).
+    if StockPiler2Window and StockPiler2Window.SyncActionReadiness then
+        StockPiler2Window.SyncActionReadiness({ immediate = true })
     end
     local row = Brew.PickReadyWatch()
     if type(row) ~= "table" then
@@ -330,13 +351,13 @@ function Brew.MaybeNotifyBrewReady()
         name = session and session.name
     end
     if name == nil or name == L"" then
-        name = L"potion"
+        name = T("brew.potion_fallback")
     end
     local printed = false
     if StockPiler2.Debug and StockPiler2.Debug.NotifyOnce then
-        printed = StockPiler2.Debug.NotifyOnce("brew-ready", L"Brew ready: " .. name .. L".") == true
+        printed = StockPiler2.Debug.NotifyOnce("brew-ready", T("brew.ready", { name = name })) == true
     else
-        Notify(L"Brew ready: " .. name .. L".")
+        Notify(T("brew.ready", { name = name }))
         printed = true
     end
     if printed then
@@ -354,13 +375,20 @@ function Brew.HasReadyToCraft()
         return true
     end
     local session = GetSession()
+    -- Manual row loads do not count as Ready for footer/macro.
+    if Brew._loadSource == "manual" then
+        return false
+    end
     if session.phase == "loading" then
         return true
     end
     if session.phase == "loaded" then
+        local row = FindSessionRow()
+        if RowIsReadyToCraft(row) then
+            return true
+        end
         return (tonumber(session.potionDeficit) or 0) > 0
-            or session.potionKey ~= nil
-            or session.rowId ~= nil
+            and (tonumber(session.craftable) or 0) > 0
     end
     return false
 end
@@ -398,18 +426,18 @@ function Brew.CanStartBrewLoad()
     if StockPiler2.Orchestrator and StockPiler2.Orchestrator.IsHarvestActive
         and StockPiler2.Orchestrator.IsHarvestActive() == true
     then
-        return Hold("harvest", L"Brew held: harvest in progress.")
+        return Hold("harvest", T("brew.held_harvest"))
     end
     if pendingPlant then
-        return Hold("pendingPlant", L"Brew held: AutoGrow is planting.")
+        return Hold("pendingPlant", T("brew.held_planting"))
     end
     -- Seed buffer still filling: refine/plant can consume brew mats.
     if Grow and Grow.IsSeedBufferSatisfied and Grow.IsSeedBufferSatisfied() ~= true then
-        return Hold("seedBuffer", L"Brew held: seed buffer still filling.")
+        return Hold("seedBuffer", T("brew.held_seed_buffer"))
     end
     -- refineWaitTicks is orch anti-spam only; do not gate Brew on it.
     if outstanding then
-        return Hold("outstanding", L"Brew held: seed refine outstanding.")
+        return Hold("outstanding", T("brew.held_refine"))
     end
     Brew._lastHoldReason = nil
     return true
@@ -445,26 +473,17 @@ function Brew.CanBrewNow()
     if phase == "loading" then
         return finish(false)
     end
+    -- Manual row Load: footer/macro stay grey; perform only via row Brew.
+    if phase == "loaded" and Brew._loadSource == "manual" then
+        return finish(false)
+    end
     if phase == "loaded" then
         local deficit = tonumber(session.potionDeficit) or 0
-        local craftable = tonumber(session.craftable) or 0
-        -- Main-kept board: continue without a plan row while deficit/craftable hold
-        -- (plan may be invalidated + rebuild pending after brew).
-        if deficit > 0 and craftable > 0
+        local row = FindSessionRow()
+        -- Auto Ready continue only while the plan row stays green Ready (uncontested).
+        if RowIsReadyToCraft(row) and deficit > 0
             and Brew.ValidateApothecaryPerform
             and Brew.ValidateApothecaryPerform() == true
-        then
-            return finish(true)
-        end
-        local row = FindSessionRow()
-        -- Second click: craft only green Ready with deficit (footer contract).
-        if RowIsReadyToCraft(row) and deficit > 0 then
-            return finish(true)
-        end
-        -- Premature/manual load on board: enable only if another Ready can be started.
-        if Brew.PickReadyWatch() ~= nil
-            and Brew.CanStartBrewLoad
-            and Brew.CanStartBrewLoad() == true
         then
             return finish(true)
         end
@@ -818,10 +837,10 @@ local function ValidateAgainstLastLoad()
         local step = last.steps[i]
         if type(step) == "table" and step.craftingSlot ~= nil then
             if SlotHasWrongItem(step) then
-                return false, L"Apothecary slot has the wrong material."
+                return false, T("brew.wrong_slot")
             end
             if not SlotHasItem(step) then
-                return false, L"Apothecary is missing a loaded material."
+                return false, T("brew.missing_loaded")
             end
         end
     end
@@ -888,28 +907,26 @@ end
 ----------------------------------------------------------------
 
 local function RefreshBrewUi()
-    if Brew.MaybeNotifyBrewReady then
-        Brew.MaybeNotifyBrewReady()
-    end
     Brew.InvalidateCanBrewCache()
     if StockPiler2.Perf and StockPiler2.Perf.Begin then
         StockPiler2.Perf.Begin("BrewUi")
     end
-    -- Coalesce footer to once per UPDATE_PROCESSED (craft-slot storms).
+    -- Perf: dirty-only paint — do not sync UpdateRows / MaybeNotifyBrewReady here.
+    -- Craft-slot loot storms used to run full BrewUi×N + footer notify per slot.
+    -- Footer/brew-ready coalesce via RequestFooterRefresh → FlushPendingFooterRefresh.
+    -- EngineEventBridge coalesces OnCraftingUpdated to once per UPDATE_PROCESSED
+    -- (_brewUiDue) and holds during harvest storm (unless Brew._job active).
     if StockPiler2Window and StockPiler2Window.RequestFooterRefresh then
         StockPiler2Window.RequestFooterRefresh()
     elseif StockPiler2Window and StockPiler2Window.RefreshFooterButtons then
         StockPiler2Window.RefreshFooterButtons()
     end
-    -- While a load job is active, skip immediate UpdateRows (repaint after session settles).
-    if type(Brew._job) ~= "table"
-        and StockPiler2Window
-        and StockPiler2Window.SelectedTab == StockPiler2Window.TABS_WATCH
-        and StockPiler2TabWatch
-        and StockPiler2TabWatch.UpdateRows
-        and DoesWindowExist("SP2TabWatchList")
-    then
-        StockPiler2TabWatch.UpdateRows()
+    -- Dirty-only: do not sync UpdateRows on every craft slot (login/refine storms).
+    if StockPiler2TabWatch and StockPiler2TabWatch.InvalidateBrewChrome then
+        StockPiler2TabWatch.InvalidateBrewChrome()
+    end
+    if StockPiler2.Ui and StockPiler2.Ui.MarkWatchUiDirty then
+        StockPiler2.Ui.MarkWatchUiDirty()
     end
     if StockPiler2Window and StockPiler2Window.RequestListRepopulate then
         StockPiler2Window.RequestListRepopulate()
@@ -1007,7 +1024,7 @@ local function InvalidateOwnedBoard(reason, opts)
     Brew._lastLoad = nil
     ClearSession()
     if opts.notify ~= false then
-        Notify(L"Apothecary changed. Click Brew to reload.")
+        Notify(T("brew.apo_changed"))
     end
     RefreshBrewUi()
     if Brew.MaybeRefreshBrewTooltip then
@@ -1130,6 +1147,22 @@ local function CompleteJob(message)
         end
         LogBrew("loaded name=" .. ToNarrow(session.name)
             .. " key=" .. tostring(session.potionKey or ""))
+        -- One chat line per new recipe/watch load (not every same-key reload).
+        local loadKey = tostring(session.potionKey or "")
+        if loadKey == "" then
+            local uid = tonumber(session.potionUid) or 0
+            if uid > 0 then
+                loadKey = "uid:" .. tostring(uid)
+            end
+        end
+        if loadKey ~= "" and loadKey ~= tostring(Brew._lastAnnouncedLoadKey or "") then
+            Brew._lastAnnouncedLoadKey = loadKey
+            local loadName = session.name
+            if loadName == nil or loadName == L"" then
+                loadName = T("brew.potion_fallback")
+            end
+            Notify(T("brew.load_recipe", { name = loadName }))
+        end
         -- Avoid false board-drift right after our own load settles.
         Brew.ArmBrewOpLock(1.25)
     end
@@ -1143,7 +1176,8 @@ local function CompleteJob(message)
 end
 
 local function FinishLoadSuccess()
-    CompleteJob(L"Materials loaded. Click Brew to craft.")
+    -- Recipe-change chat is emitted in CompleteJob (brew.load_recipe).
+    CompleteJob(nil)
     return true
 end
 
@@ -1396,7 +1430,7 @@ function Brew.Tick()
         end
         if not step.loadIssued then
             if SlotHasWrongItem(step) then
-                FailJob(L"Apothecary slot has the wrong material.")
+                FailJob(T("brew.wrong_slot"))
                 if Perf and Perf.End then
                     Perf.End("Brew.Tick")
                 end
@@ -1416,7 +1450,7 @@ function Brew.Tick()
             return
         end
         if SlotHasWrongItem(step) then
-            FailJob(L"Apothecary slot has the wrong material.")
+            FailJob(T("brew.wrong_slot"))
             if Perf and Perf.End then
                 Perf.End("Brew.Tick")
             end
@@ -1440,13 +1474,11 @@ function Brew.OnUpdate(timeElapsed)
             Brew.Tick()
         end
     end
-    -- CanBrewNow greys during op-lock; re-enable footer when the lock expires.
+    -- CanBrewNow greys during op-lock; re-enable footer + row chrome when lock expires.
     local lockUntil = tonumber(Brew._brewOpLockUntil) or 0
     if lockUntil > 0 and NowSec() >= lockUntil then
         Brew._brewOpLockUntil = 0
-        if StockPiler2Window and StockPiler2Window.RefreshFooterButtons then
-            StockPiler2Window.RefreshFooterButtons()
-        end
+        RefreshBrewUi()
     end
     local session = GetSession()
     if session.phase == "loaded" then
@@ -1461,6 +1493,11 @@ function Brew.OnUpdate(timeElapsed)
     if Brew._pendingIdleClose and Brew.IsBusy() ~= true then
         local pendingReason = Brew._pendingIdleClose
         Brew.MaybeCloseBrewSessionIfIdle(pendingReason)
+    end
+    if Brew._pendingCannotContinueClear and Brew.IsBusy() ~= true then
+        local pendingReason = Brew._pendingCannotContinueClear
+        Brew._pendingCannotContinueClear = nil
+        Brew.MaybeClearLoadedIfCannotContinue(pendingReason)
     end
 end
 
@@ -1634,19 +1671,24 @@ function Brew.BeginForRow(row, opts)
     end
     local a = AA()
     if a and a.IsApothecary and not a.IsApothecary() then
-        Notify(L"Load is only available to Apothecaries.")
+        Notify(T("brew.load_apo_only"))
         return done(false)
     end
-    local ok, msg = Brew.CanStartBrewLoad()
-    if ok ~= true then
-        Notify(msg or L"Brew held: AutoGrow is busy.")
-        return done(false)
+    -- Footer/auto Ready flow respects grow holds; manual row Load does not.
+    if source ~= "manual" then
+        local ok, msg = Brew.CanStartBrewLoad()
+        if ok ~= true then
+            Notify(msg or T("brew.held_autogrow_busy"))
+            return done(false)
+        end
     end
     -- Block only real load/perform work — not post-load op-lock (allows switch Load).
     if type(Brew._job) == "table" then
+        Notify(T("brew.already_loading"))
         return done(false)
     end
     if IsPerformingState() then
+        Notify(T("brew.held_crafting"))
         return done(false)
     end
     if type(row) ~= "table" then
@@ -1654,18 +1696,19 @@ function Brew.BeginForRow(row, opts)
     end
     local recipe = RowRecipe(row)
     if type(recipe) ~= "table" then
-        Notify(L"No learned recipe for this potion.")
+        Notify(T("brew.no_recipe"))
         return done(false)
     end
     if (tonumber(row.craftable) or 0) <= 0 and row.canLoad ~= true then
+        Notify(T("brew.nothing_craftable"))
         return done(false)
     end
     if not Brew.MaterialsReadyInCraftingBag(recipe) then
         local missing = Brew.DescribeMissingInCraftingBag(recipe)
         if missing ~= nil and missing ~= L"" then
-            Notify(L"Load blocked: missing " .. missing .. L" in the crafting bag.")
+            Notify(T("brew.load_missing", { name = missing }))
         else
-            Notify(L"Move all recipe materials into the crafting bag first.")
+            Notify(T("brew.move_mats"))
         end
         Brew._lastLoad = nil
         ClearSession()
@@ -1674,7 +1717,7 @@ function Brew.BeginForRow(row, opts)
     end
     local steps = BuildLoadSteps(recipe)
     if #steps == 0 then
-        Notify(L"Could not build brew steps for this recipe.")
+        Notify(T("brew.no_steps"))
         return done(false)
     end
     local session = GetSession()
@@ -1733,21 +1776,43 @@ end
 function Brew.OnRowCraftClick(row)
     local a = AA()
     if a and a.IsApothecary and not a.IsApothecary() then
-        Notify(L"Load is only available to Apothecaries.")
+        Notify(T("brew.load_apo_only"))
         return false
     end
     if type(row) ~= "table" then
         return false
     end
-    if Brew.IsBusy() then
-        LogBrew("row click blocked reason=busy")
+    local state = Brew.GetRowCraftUiState(row)
+    if state == "loading" then
+        Notify(T("brew.is_loading"))
+        LogBrew("row click blocked reason=loading")
         return false
     end
-    local state = Brew.GetRowCraftUiState(row)
     if state == "load" then
+        if type(Brew._job) == "table" then
+            Notify(T("brew.already_loading"))
+            return false
+        end
+        if IsPerformingState() then
+            Notify(T("brew.held_crafting"))
+            return false
+        end
+        -- Op-lock after a prior load must not block switch-Load / new Load.
         return Brew.BeginForRow(row, { source = "manual" }) == true
     end
     if state == "loaded" then
+        if type(Brew._job) == "table" then
+            Notify(T("brew.already_loading"))
+            return false
+        end
+        if IsPerformingState() then
+            Notify(T("brew.held_crafting"))
+            return false
+        end
+        -- Post-load op-lock is for board-drift only; row Brew must respond immediately.
+        if Brew.ClearBrewOpLock then
+            Brew.ClearBrewOpLock()
+        end
         local ok = Brew.ValidateApothecaryPerform()
         if ok == true then
             LogBrew("row click phase=loaded result=go name=" .. ToNarrow(row.name)
@@ -1756,9 +1821,10 @@ function Brew.OnRowCraftClick(row)
             return "go"
         end
         LogBrew("row validate fail; not performing")
-        Notify(L"Recipe is not ready to brew.")
+        Notify(T("brew.not_ready"))
         return false
     end
+    Notify(T("brew.nothing_row"))
     return false
 end
 
@@ -1781,7 +1847,10 @@ function Brew.OnRowCraftRightClick(row)
 end
 
 --- Cancel load job and tear down owned apo session (footer R-click).
-function Brew.ClearLoadedSession()
+--- opts.notifyMsg: optional wstring instead of brew.load_cleared
+--- opts.silent: skip chat notify
+function Brew.ClearLoadedSession(opts)
+    opts = type(opts) == "table" and opts or nil
     local hadJob = type(Brew._job) == "table"
     local session = GetSession()
     local hadSession = session.phase == "loading" or session.phase == "loaded"
@@ -1791,11 +1860,14 @@ function Brew.ClearLoadedSession()
     Brew._updateAccum = 0
     Brew._lastLoad = nil
     Brew._loadSource = nil
+    Brew._pendingCannotContinueClear = nil
     Brew.ClearBrewOpLock()
     ClearSession()
     if hadSession or hadJob then
         CloseOwnedSession()
-        Notify(L"Brew load cleared.")
+        if not (opts and opts.silent == true) then
+            Notify((opts and opts.notifyMsg) or T("brew.load_cleared"))
+        end
         LogBrew("clear-loaded-session")
     end
     RefreshBrewUi()
@@ -1803,6 +1875,83 @@ function Brew.ClearLoadedSession()
         Brew.MaybeRefreshBrewTooltip(true)
     end
     return true
+end
+
+--- Auto footer load: clear when the session cannot continue brewing.
+--- Do not treat a missing plan row right after invalidate as "not Ready"
+--- (0.4.104 false-cleared every brew). Re-check on PLAN_UPDATED.
+function Brew.MaybeClearLoadedIfCannotContinue(reason)
+    reason = tostring(reason or "")
+    local session = GetSession()
+    if session.phase ~= "loaded" then
+        Brew._pendingCannotContinueClear = nil
+        return false
+    end
+    if Brew._loadSource == "manual" then
+        return false
+    end
+    if type(Brew._job) == "table" or IsPerformingState() then
+        Brew._pendingCannotContinueClear = (reason ~= "" and reason) or "busy"
+        return false
+    end
+    local lockUntil = tonumber(Brew._brewOpLockUntil) or 0
+    if lockUntil > 0 and NowSec() < lockUntil then
+        Brew._pendingCannotContinueClear = (reason ~= "" and reason) or "op-lock"
+        return false
+    end
+    local deficit = tonumber(session.potionDeficit) or 0
+    local craftLeft = tonumber(session.craftable) or 0
+    if deficit <= 0 or craftLeft <= 0 then
+        Brew._pendingCannotContinueClear = nil
+        LogBrew("clear cannot-continue reason=" .. reason
+            .. " deficit=" .. tostring(deficit)
+            .. " craftable=" .. tostring(craftLeft))
+        Brew.ClearLoadedSession()
+        return true
+    end
+    local row = FindSessionRow()
+    if type(row) ~= "table" then
+        -- Stale/empty plan after invalidate — wait for rebuild unless this
+        -- is already a fresh PLAN_UPDATED (orphaned session).
+        if reason == "plan-updated" then
+            Brew._pendingCannotContinueClear = nil
+            LogBrew("clear cannot-continue reason=plan-updated orphan-row")
+            Brew.ClearLoadedSession()
+            return true
+        end
+        Brew._pendingCannotContinueClear = (reason ~= "" and reason) or "await-plan-row"
+        return false
+    end
+    Brew._pendingCannotContinueClear = nil
+    if RowIsReadyToCraft(row) == true then
+        local boardOk = Brew.ValidateApothecaryPerform and Brew.ValidateApothecaryPerform() == true
+        if boardOk then
+            return false
+        end
+        LogBrew("clear cannot-continue reason=" .. reason
+            .. " boardOk=false status=" .. tostring(row.statusKey))
+    else
+        LogBrew("clear cannot-continue reason=" .. reason
+            .. " planReady=false status=" .. tostring(row.statusKey)
+            .. " rowCraftable=" .. tostring(row.craftable))
+    end
+    Brew.ClearLoadedSession()
+    return true
+end
+
+function Brew.RegisterEventHandlers()
+    if Brew._eventsRegistered == true then
+        return
+    end
+    local B = StockPiler2.EventBus
+    local E = StockPiler2.Events
+    if not B or not E or not E.PLAN_UPDATED then
+        return
+    end
+    B.Subscribe(E.PLAN_UPDATED, function()
+        Brew.MaybeClearLoadedIfCannotContinue("plan-updated")
+    end)
+    Brew._eventsRegistered = true
 end
 
 function Brew.MaybeCloseBrewSessionIfIdle(reason)
@@ -1841,6 +1990,10 @@ function Brew.MaybeCloseBrewSessionIfIdle(reason)
     end
 end
 
+--- After a successful brew: advance session counters (every brew is assumed to
+--- progress the target; Potent/crit rates are not modeled). When nothing is
+--- left to brew but phase would stay loaded, clear the apo load so AutoGrow
+--- is not blocked (footer R-click equivalent).
 function Brew.RefreshSessionAfterBrew()
     local session = GetSession()
     if session.phase ~= "loaded" then
@@ -1889,14 +2042,16 @@ function Brew.RefreshSessionAfterBrew()
     LogBrew("after-brew deficit=" .. tostring(after.potionDeficit)
         .. " craftable=" .. tostring(after.craftable)
         .. " phase=" .. tostring(after.phase or "idle"))
-    -- Only close when not still craftable on a loaded board (avoids false
-    -- "close deferred busy reason=after brew nothing ready" after main-kept brew).
-    local stillContinuing = after.phase == "loaded"
-        and (tonumber(after.potionDeficit) or 0) > 0
-        and (tonumber(after.craftable) or 0) > 0
-    if not stillContinuing then
-        Brew.MaybeCloseBrewSessionIfIdle("after brew nothing ready")
+    if after.phase == "loaded" or after.phase == "loading" then
+        -- Prefer plan-ready + board validity over session craftable alone.
+        -- Plan may still be stale here; PLAN_UPDATED re-checks.
+        if Brew.MaybeClearLoadedIfCannotContinue("after-brew") then
+            return
+        end
+        RefreshBrewUi()
+        return
     end
+    Brew.MaybeCloseBrewSessionIfIdle("after brew nothing ready")
     RefreshBrewUi()
 end
 
@@ -1906,7 +2061,7 @@ function Brew.TryBrewClick()
     local phase = tostring(session.phase or "idle")
     local a = AA()
     if a and a.IsApothecary and not a.IsApothecary() then
-        Notify(L"Brew is only available to Apothecaries.")
+        Notify(T("brew.apo_only"))
         LogBrew("click phase=" .. phase .. " result=blocked reason=not-apo")
         return "blocked"
     end
@@ -1916,11 +2071,15 @@ function Brew.TryBrewClick()
     end
 
     if session.phase == "loaded" then
+        -- Manual row sessions: footer must not perform; use row Brew.
+        if Brew._loadSource == "manual" then
+            Notify(T("brew.use_row_button"))
+            LogBrew("click phase=" .. phase .. " result=blocked reason=manual-session")
+            return "blocked"
+        end
         local deficit = (tonumber(session.potionDeficit) or 0) > 0
-        local craftable = (tonumber(session.craftable) or 0) > 0
         local row = FindSessionRow()
-        local sessionContinue = deficit and craftable
-        local ready = sessionContinue or (RowIsReadyToCraft(row) and deficit)
+        local ready = RowIsReadyToCraft(row) and deficit
         if ready then
             local ok = Brew.ValidateApothecaryPerform()
             if ok == true then
@@ -1938,7 +2097,14 @@ function Brew.TryBrewClick()
                 .. ToNarrow((row and row.name) or session.name)
                 .. " deficit=" .. tostring(session.potionDeficit)
                 .. " craftable=" .. tostring(session.craftable)
+                .. " shared=" .. tostring(row and row.craftableShared == true)
+                .. " status=" .. tostring(row and row.statusKey)
                 .. " source=" .. tostring(Brew._loadSource or ""))
+            -- Greying out without a click left sessions stuck; clear when we
+            -- know the loaded watch is no longer Ready.
+            if Brew.MaybeClearLoadedIfCannotContinue("loaded-not-ready") then
+                return "blocked"
+            end
         end
     end
 
@@ -1968,7 +2134,7 @@ function Brew.TryBrewClick()
             CloseOwnedSession()
         end
     end
-    Notify(L"No watches ready to craft.")
+    Notify(T("brew.none_ready"))
     LogBrew("click phase=" .. phase .. " result=blocked reason=none-ready")
     RefreshBrewUi()
     return "blocked"
@@ -2091,16 +2257,22 @@ local function AppendPotionLine(body, prefix, row, session)
     local icon = FormatTooltipIcon(PotionIconNum(row, session))
     local line
     if name ~= nil and name ~= L"" and have ~= nil and target ~= nil then
-        line = prefix .. name .. L" ("
-            .. towstring(tostring(have)) .. L"/"
-            .. towstring(tostring(target)) .. L")."
+        line = T("brew.tip.potion_have_target", {
+            prefix = prefix or L"",
+            name = name,
+            have = tostring(have),
+            target = tostring(target),
+        })
     elseif name ~= nil and name ~= L"" then
-        line = prefix .. name .. L"."
+        line = T("brew.tip.potion_name_dot", {
+            prefix = prefix or L"",
+            name = name,
+        })
     else
         line = prefix
     end
     if icon ~= L"" then
-        body(icon .. L" " .. line)
+        body(T("grow.tip.icon_name", { icon = icon, name = line }))
     else
         body(line)
     end
@@ -2130,7 +2302,55 @@ local function IngredientStockDigest(recipe)
     return table.concat(parts, ",")
 end
 
+--- Success / yield / Apo skill-up lines for brew tooltips.
+local function AppendBrewRateLines(body, recipe, potionUid)
+    if type(body) ~= "function" or type(recipe) ~= "table" then
+        return
+    end
+    local RS = StockPiler2.RecipeSpec
+    potionUid = tonumber(potionUid) or tonumber(recipe.outputUid) or tonumber(recipe.activeOutcomeUid) or 0
+    local attempts = tonumber(recipe.brewAttempts) or 0
+    if attempts > 0 then
+        local rate = nil
+        local successes = tonumber(recipe.brewSuccesses) or 0
+        if RS and RS.OutcomeSuccessRate then
+            local r, ok, att = RS.OutcomeSuccessRate(recipe, potionUid)
+            rate = r
+            if ok ~= nil then
+                successes = ok
+            end
+            if att and att > 0 then
+                attempts = att
+            end
+        elseif RS and RS.RecipeSuccessRate then
+            rate = RS.RecipeSuccessRate(recipe)
+        end
+        local pct = math.floor((rate or (successes / math.max(1, attempts))) * 100 + 0.5)
+        local yield = 0
+        if RS and RS.RecipeOutputYield then
+            yield = tonumber(RS.RecipeOutputYield(recipe, potionUid)) or 0
+        end
+        local line = T("brew.tip.success", {
+            pct = tostring(pct),
+            ok = tostring(successes),
+            att = tostring(attempts),
+        })
+        if yield > 0 then
+            local rounded = math.floor(yield * 10 + 0.5) / 10
+            line = line .. T("brew.tip.yield", { yield = string.format("%.1f", rounded) })
+        end
+        body(line)
+    end
+    if RS and RS.FormatApoSkillUpLine then
+        local apoLine = RS.FormatApoSkillUpLine(recipe)
+        if apoLine and apoLine ~= L"" then
+            body(apoLine)
+        end
+    end
+end
+
 local function AppendIngredientStockLines(body, recipe)
+    AppendBrewRateLines(body, recipe)
     if type(recipe) ~= "table" or type(recipe.slots) ~= "table" or #recipe.slots == 0 then
         return
     end
@@ -2166,9 +2386,12 @@ local function AppendIngredientStockLines(body, recipe)
                 have = tonumber(RS.CountItemsMatchingSpec(slot.spec)) or 0
             end
             local icon = FormatTooltipIcon(iconNum)
-            local text = name .. L" (" .. towstring(tostring(have)) .. L")"
+            local text = T("brew.tip.stock_count", {
+                name = name,
+                have = tostring(have),
+            })
             if icon ~= L"" then
-                text = icon .. L" " .. text
+                text = T("grow.tip.icon_name", { icon = icon, name = text })
             end
             body(text)
         end
@@ -2244,10 +2467,10 @@ end
 local function DescribeLoadSource()
     local src = tostring(Brew._loadSource or "")
     if src == "manual" then
-        return L"Load: manual (watch button)."
+        return T("brew.tip.load_manual")
     end
     if src == "auto" then
-        return L"Load: auto (Ready pick)."
+        return T("brew.tip.load_auto")
     end
     return nil
 end
@@ -2321,11 +2544,16 @@ end
 local function FooterBrewActionLine(body)
     if Brew.CanBrewNow and Brew.CanBrewNow() == true then
         local session = GetSession()
-        if session.phase == "loaded" then
-            body(L"Click to brew this Ready watch. R-click clears the load.")
+        if session.phase == "loaded" and Brew._loadSource ~= "manual" then
+            body(T("brew.tip.click_brew_ready"))
         else
-            body(L"Only green Ready watches. Click to load. R-click clears the load.")
+            body(T("brew.tip.click_load_ready"))
         end
+        return
+    end
+    local session = GetSession()
+    if session.phase == "loaded" and Brew._loadSource == "manual" then
+        body(T("brew.tip.manual_on_board"))
         return
     end
     local canStart, holdMsg = true, nil
@@ -2333,15 +2561,15 @@ local function FooterBrewActionLine(body)
         canStart, holdMsg = Brew.CanStartBrewLoad()
     end
     if canStart ~= true then
-        body(holdMsg or L"Brew held: AutoGrow is busy.")
+        body(holdMsg or T("brew.held_autogrow_busy"))
     elseif Brew.IsBusy() then
         if IsPerformingState() then
-            body(L"Brew held: crafting in progress.")
+            body(T("brew.held_crafting"))
         else
-            body(L"Brew held: busy.")
+            body(T("brew.held_busy"))
         end
     else
-        body(L"Brew not ready.")
+        body(T("brew.not_ready_short"))
     end
 end
 
@@ -2357,7 +2585,7 @@ function Brew.ShowBrewTooltip(anchorWindow, anchor, liveRefresh)
     end
     Tooltips.CreateTextOnlyTooltip(anchorWindow)
     local heading = (Tooltips and Tooltips.COLOR_HEADING) or { r = 255, g = 204, b = 102 }
-    Tooltips.SetTooltipText(1, 1, L"<icon10985> StockPiler2 Brew")
+    Tooltips.SetTooltipText(1, 1, T("brew.tip.title"))
     if Tooltips.SetTooltipColor then
         Tooltips.SetTooltipColor(1, 1, heading.r or 255, heading.g or 204, heading.b or 102)
     end
@@ -2377,7 +2605,7 @@ function Brew.ShowBrewTooltip(anchorWindow, anchor, liveRefresh)
     local Caps = StockPiler2.TradeSkillCaps
     local canBrew = Caps and Caps.CanBrewPotions and Caps.CanBrewPotions() == true
     if not canBrew then
-        warnBody(L"Brew requires Apothecary.")
+        warnBody(T("brew.requires_apo"))
         Tooltips.Finalize()
         Tooltips.AnchorTooltip(anchor or Tooltips.ANCHOR_WINDOW_TOP)
         local tip = Brew._liveBrewTip
@@ -2397,20 +2625,23 @@ function Brew.ShowBrewTooltip(anchorWindow, anchor, liveRefresh)
                 local have = row and tonumber(row.potionHave) or tonumber(session.potionHave)
                 local target = row and (tonumber(row.potionMin) or tonumber(row.target))
                     or tonumber(session.potionMin)
-                local lineText = L"Loading " .. name
+                local lineText
                 if have ~= nil and target ~= nil then
-                    lineText = lineText .. L" ("
-                        .. towstring(tostring(have)) .. L"/"
-                        .. towstring(tostring(target)) .. L")"
+                    lineText = T("brew.tip.loading_named_stock", {
+                        name = name,
+                        have = tostring(have),
+                        target = tostring(target),
+                    })
+                else
+                    lineText = T("brew.tip.loading_named", { name = name })
                 end
-                lineText = lineText .. L" into the Apothecary."
                 if icon ~= L"" then
-                    body(icon .. L" " .. lineText)
+                    body(T("grow.tip.icon_name", { icon = icon, name = lineText }))
                 else
                     body(lineText)
                 end
             else
-                body(L"Loading materials into the Apothecary.")
+                body(T("brew.tip.loading_generic"))
             end
             local srcLine = DescribeLoadSource()
             if srcLine then
@@ -2419,16 +2650,16 @@ function Brew.ShowBrewTooltip(anchorWindow, anchor, liveRefresh)
             AppendIngredientStockLines(body, RecipeForTooltip(row, session))
         else
             if IsPerformingState() then
-                body(L"Brew held: crafting in progress.")
+                body(T("brew.held_crafting"))
             else
-                body(L"Brew held: busy.")
+                body(T("brew.held_busy"))
             end
             local nextRow = Brew.PickReadyWatch()
             if type(nextRow) == "table" then
-                AppendPotionLine(body, L"Next (auto): ", nextRow, nil)
+                AppendPotionLine(body, T("brew.tip.prefix_next_auto"), nextRow, nil)
                 AppendIngredientStockLines(body, RecipeForTooltip(nextRow, nil))
             elseif type(row) == "table" then
-                AppendPotionLine(body, L"Ready: ", row, session)
+                AppendPotionLine(body, T("brew.tip.prefix_ready"), row, session)
                 AppendIngredientStockLines(body, RecipeForTooltip(row, session))
             end
         end
@@ -2448,9 +2679,9 @@ function Brew.ShowBrewTooltip(anchorWindow, anchor, liveRefresh)
             local row = FindSessionRow()
             local name = (row and row.name) or session.name
             if name ~= nil and name ~= L"" then
-                AppendPotionLine(body, L"Ready: ", row, session)
+                AppendPotionLine(body, T("brew.tip.prefix_ready"), row, session)
             else
-                body(L"Recipe loaded.")
+                body(T("brew.tip.recipe_loaded"))
             end
             local srcLine = DescribeLoadSource()
             if srcLine then
@@ -2461,17 +2692,17 @@ function Brew.ShowBrewTooltip(anchorWindow, anchor, liveRefresh)
         else
             local loadedRow = session.phase == "loaded" and FindSessionRow() or nil
             if type(loadedRow) == "table" then
-                AppendPotionLine(body, L"Board (not auto): ", loadedRow, session)
-                body(L"Footer only brews green Ready watches. Use the row Brew button for this load.")
+                AppendPotionLine(body, T("brew.tip.prefix_board"), loadedRow, session)
+                body(T("brew.tip.footer_ready_only"))
             end
             local nextRow = Brew.PickReadyWatch()
             if type(nextRow) == "table" then
-                AppendPotionLine(body, L"Next (auto): ", nextRow, nil)
+                AppendPotionLine(body, T("brew.tip.prefix_next_auto"), nextRow, nil)
                 FooterBrewActionLine(body)
                 AppendIngredientStockLines(body, RecipeForTooltip(nextRow, nil))
             else
-                body(L"No watches ready to craft.")
-                body(L"Row Load/Brew can still overstock. R-click clears any leftover load.")
+                body(T("brew.none_ready"))
+                body(T("brew.tip.row_overstock_note"))
             end
         end
     end
@@ -2496,7 +2727,7 @@ function Brew.ShowRowBrewTooltip(anchorWindow, row, anchor, liveRefresh)
     end
     Tooltips.CreateTextOnlyTooltip(anchorWindow)
     local heading = (Tooltips and Tooltips.COLOR_HEADING) or { r = 255, g = 204, b = 102 }
-    Tooltips.SetTooltipText(1, 1, L"<icon10985> StockPiler2 Brew")
+    Tooltips.SetTooltipText(1, 1, T("brew.tip.title"))
     if Tooltips.SetTooltipColor then
         Tooltips.SetTooltipColor(1, 1, heading.r or 255, heading.g or 204, heading.b or 102)
     end
@@ -2516,7 +2747,7 @@ function Brew.ShowRowBrewTooltip(anchorWindow, row, anchor, liveRefresh)
     local Caps = StockPiler2.TradeSkillCaps
     local canBrew = Caps and Caps.CanBrewPotions and Caps.CanBrewPotions() == true
     if not canBrew then
-        warnBody(L"Brew requires Apothecary.")
+        warnBody(T("brew.requires_apo"))
         Tooltips.Finalize()
         Tooltips.AnchorTooltip(anchor or Tooltips.ANCHOR_WINDOW_TOP)
         local tip = Brew._liveBrewTip
@@ -2526,7 +2757,7 @@ function Brew.ShowRowBrewTooltip(anchorWindow, row, anchor, liveRefresh)
         return
     end
     if type(row) ~= "table" then
-        body(L"No watch selected.")
+        body(T("brew.tip.no_watch"))
     else
         local session = GetSession()
         local state = Brew.GetRowCraftUiState(row)
@@ -2537,69 +2768,64 @@ function Brew.ShowRowBrewTooltip(anchorWindow, row, anchor, liveRefresh)
             if name ~= nil and name ~= L"" then
                 local have = tonumber(row.potionHave) or tonumber(session.potionHave)
                 local target = tonumber(row.potionMin) or tonumber(row.target) or tonumber(session.potionMin)
-                local lineText = L"Loading " .. name
+                local lineText
                 if have ~= nil and target ~= nil then
-                    lineText = lineText .. L" ("
-                        .. towstring(tostring(have)) .. L"/"
-                        .. towstring(tostring(target)) .. L")"
+                    lineText = T("brew.tip.loading_named_stock", {
+                        name = name,
+                        have = tostring(have),
+                        target = tostring(target),
+                    })
+                else
+                    lineText = T("brew.tip.loading_named", { name = name })
                 end
-                lineText = lineText .. L" into the Apothecary."
                 if icon ~= L"" then
-                    body(icon .. L" " .. lineText)
+                    body(T("grow.tip.icon_name", { icon = icon, name = lineText }))
                 else
                     body(lineText)
                 end
             else
-                body(L"Loading materials into the Apothecary.")
+                body(T("brew.tip.loading_generic"))
             end
             AppendIngredientStockLines(body, RecipeForTooltip(row, session))
         elseif Brew.IsBusy() and type(Brew._job) ~= "table" then
             if IsPerformingState() then
-                body(L"Brew held: crafting in progress.")
+                body(T("brew.held_crafting"))
             else
-                body(L"Brew held: busy.")
+                body(T("brew.held_busy"))
             end
             AppendPotionLine(body, L"", row, nil)
             AppendIngredientStockLines(body, RecipeForTooltip(row, session))
         elseif matches and session.phase == "loaded" then
-            AppendPotionLine(body, L"Loaded: ", row, session)
+            AppendPotionLine(body, T("brew.tip.prefix_loaded"), row, session)
             local srcLine = DescribeLoadSource()
             if srcLine then
                 body(srcLine)
             end
-            body(L"L-click brews this watch. R-click unloads.")
+            body(T("brew.tip.lclick_brew"))
             AppendIngredientStockLines(body, RecipeForTooltip(row, session))
         elseif state == "loading" then
-            AppendPotionLine(body, L"Loading: ", row, session)
-            body(L"Materials are being loaded into the Apothecary.")
+            AppendPotionLine(body, T("brew.tip.prefix_loading"), row, session)
+            body(T("brew.tip.materials_loading"))
             AppendIngredientStockLines(body, RecipeForTooltip(row, session))
         elseif state == "loaded" then
-            AppendPotionLine(body, L"Loaded: ", row, session)
-            body(L"L-click brews this watch. R-click unloads.")
+            AppendPotionLine(body, T("brew.tip.prefix_loaded"), row, session)
+            body(T("brew.tip.lclick_brew"))
             AppendIngredientStockLines(body, RecipeForTooltip(row, session))
         elseif state == "load" then
-            AppendPotionLine(body, L"Load: ", row, nil)
+            AppendPotionLine(body, T("brew.tip.prefix_load"), row, nil)
             if (tonumber(row.potionDeficit) or 0) <= 0 then
-                body(L"Overstock: target met; Load still allowed.")
+                body(T("brew.tip.overstock"))
             elseif row.craftableShared == true or row.statusKey == "ready_to_craft_shared" then
-                body(L"Yellow craftable: premature Load allowed for this watch.")
+                body(T("brew.tip.yellow_craftable"))
             end
-            local canStart, holdMsg = true, nil
-            if Brew.CanStartBrewLoad then
-                canStart, holdMsg = Brew.CanStartBrewLoad()
-            end
-            if canStart == true then
-                body(L"L-click loads into the Apothecary. Footer Brew only auto-picks green Ready.")
-            else
-                body(holdMsg or L"Brew held: AutoGrow is busy.")
-            end
+            body(T("brew.tip.lclick_load"))
             AppendIngredientStockLines(body, RecipeForTooltip(row, nil))
         else
             AppendPotionLine(body, L"", row, nil)
             if (tonumber(row.craftable) or 0) <= 0 and row.canLoad ~= true then
-                body(L"Idle - needs Craftable > 0.")
+                body(T("brew.tip.idle_need_craftable"))
             else
-                body(L"Idle - nothing ready to craft for this watch.")
+                body(T("brew.tip.idle_nothing"))
             end
             AppendIngredientStockLines(body, RecipeForTooltip(row, nil))
         end

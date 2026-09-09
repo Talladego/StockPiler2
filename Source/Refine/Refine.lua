@@ -1,11 +1,13 @@
 ----------------------------------------------------------------
--- StockPiler2 Refine — plant→seed conversion for buffer + plant need
+-- StockPiler2 Refine — plant→seed for buffer, plant-need, and resin convert
 ----------------------------------------------------------------
 
 StockPiler2.Refine = StockPiler2.Refine or {}
 local Refine = StockPiler2.Refine
 
 Refine._pendingByPlant = Refine._pendingByPlant or {}
+-- plantUid -> seedUid that last bumped pending (for orphan clear without SeedMap walk).
+Refine._pendingSeedByPlant = Refine._pendingSeedByPlant or {}
 Refine._lastLiveBySeed = Refine._lastLiveBySeed or {}
 Refine._issuedSeedThisTick = nil
 Refine._intentCacheKey = nil
@@ -52,6 +54,25 @@ end
 
 --- Drop pending throttle when outstanding was wiped without a successful
 --- MaybeCompletePendingRefine (stuck expire / force reconcile).
+local function ClearPendingForPlant(plantUid, seedUid, reason)
+    plantUid = tonumber(plantUid) or 0
+    if plantUid <= 0 then
+        return false
+    end
+    local pending = tonumber(Refine._pendingByPlant[plantUid]) or 0
+    if pending <= 0 then
+        Refine._pendingSeedByPlant[plantUid] = nil
+        return false
+    end
+    Refine._pendingByPlant[plantUid] = nil
+    Refine._pendingSeedByPlant[plantUid] = nil
+    LogRefine(string.format(
+        "clear pending plantUid=%d seedUid=%d was=%d reason=%s",
+        plantUid, tonumber(seedUid) or 0, pending, tostring(reason or "expire")
+    ))
+    return true
+end
+
 local function ClearPendingForSeed(seedUid, reason)
     seedUid = tonumber(seedUid) or 0
     if seedUid <= 0 then
@@ -60,18 +81,112 @@ local function ClearPendingForSeed(seedUid, reason)
     local SM = StockPiler2.SeedMap
     local plantUid = SM and SM.GetPlantUidForSeed and (tonumber(SM.GetPlantUidForSeed(seedUid)) or 0) or 0
     if plantUid <= 0 then
+        -- Fall back to reverse map from IssueOne.
+        local mappedPlant = nil
+        for pUid, sUid in pairs(Refine._pendingSeedByPlant) do
+            if tonumber(sUid) == seedUid then
+                mappedPlant = tonumber(pUid) or 0
+                break
+            end
+        end
+        plantUid = mappedPlant or 0
+    end
+    if plantUid <= 0 then
         return false
+    end
+    return ClearPendingForPlant(plantUid, seedUid, reason)
+end
+
+local function ActivePendingRefinePlantUid()
+    local SM = StockPiler2.SeedMap
+    local pending = SM and SM._pendingRefine
+    if type(pending) ~= "table" then
+        return 0
+    end
+    return tonumber(pending.plantUid) or 0
+end
+
+local function OutstandingForPlant(plantUid, preferredSeedUid)
+    plantUid = tonumber(plantUid) or 0
+    preferredSeedUid = tonumber(preferredSeedUid) or 0
+    local RP = StockPiler2.RefinePipeline
+    if not RP or not RP.GetOutstanding then
+        return 0
+    end
+    if preferredSeedUid > 0 then
+        return tonumber(RP.GetOutstanding(preferredSeedUid)) or 0
+    end
+    local SM = StockPiler2.SeedMap
+    local total = 0
+    if SM and SM.GetSeedUidsForPlant then
+        local uids = SM.GetSeedUidsForPlant(plantUid)
+        if type(uids) == "table" then
+            local i
+            for i = 1, #uids do
+                local seedUid = tonumber(uids[i]) or 0
+                if seedUid > 0 then
+                    total = total + (tonumber(RP.GetOutstanding(seedUid)) or 0)
+                end
+            end
+        end
+    end
+    return total
+end
+
+--- Clear pending counters that outlived the outstanding ledger (AutoGrow deadlock).
+--- Does not clear while outstanding > 0 or SeedMap still has an active pending refine.
+local function ClearOrphanPending(reason)
+    reason = tostring(reason or "orphan")
+    local activePlant = ActivePendingRefinePlantUid()
+    local cleared = false
+    local plantUid, pending
+    for plantUid, pending in pairs(Refine._pendingByPlant) do
+        plantUid = tonumber(plantUid) or 0
+        pending = tonumber(pending) or 0
+        if plantUid > 0 and pending > 0 and plantUid ~= activePlant then
+            local seedUid = tonumber(Refine._pendingSeedByPlant[plantUid]) or 0
+            local outstanding = OutstandingForPlant(plantUid, seedUid)
+            if outstanding <= 0 then
+                if ClearPendingForPlant(plantUid, seedUid, reason) then
+                    cleared = true
+                end
+            end
+        end
+    end
+    return cleared
+end
+
+local function ReducePendingForSeed(seedUid, delivered)
+    seedUid = tonumber(seedUid) or 0
+    delivered = tonumber(delivered) or 0
+    if seedUid <= 0 or delivered <= 0 then
+        return
+    end
+    local SM = StockPiler2.SeedMap
+    local plantUid = SM and SM.GetPlantUidForSeed and (tonumber(SM.GetPlantUidForSeed(seedUid)) or 0) or 0
+    if plantUid <= 0 then
+        for pUid, sUid in pairs(Refine._pendingSeedByPlant) do
+            if tonumber(sUid) == seedUid then
+                plantUid = tonumber(pUid) or 0
+                break
+            end
+        end
+    end
+    if plantUid <= 0 then
+        return
     end
     local pending = tonumber(Refine._pendingByPlant[plantUid]) or 0
     if pending <= 0 then
-        return false
+        Refine._pendingSeedByPlant[plantUid] = nil
+        return
     end
-    Refine._pendingByPlant[plantUid] = nil
-    LogRefine(string.format(
-        "clear pending plantUid=%d seedUid=%d was=%d reason=%s",
-        plantUid, seedUid, pending, tostring(reason or "expire")
-    ))
-    return true
+    pending = pending - delivered
+    if pending <= 0 then
+        Refine._pendingByPlant[plantUid] = nil
+        Refine._pendingSeedByPlant[plantUid] = nil
+    else
+        Refine._pendingByPlant[plantUid] = pending
+    end
 end
 
 local function CraftingBackpackType()
@@ -125,11 +240,22 @@ local function IntentCacheKey()
     local Watch = StockPiler2.Watch
     local RP = StockPiler2.RefinePipeline
     local Garden = StockPiler2.Garden
+    -- Perf: use planGen (plant/empty/lock), not stage-tick Garden.GetGen — otherwise
+    -- growth-stage updates invalidate CollectIntents under Tick (~60s). Matches
+    -- BufferFlags / seed-line / plant-job keys. Do not revert to GetGen().
+    local gardenGen = 0
+    if Garden then
+        if Garden.GetPlanGen then
+            gardenGen = tonumber(Garden.GetPlanGen()) or 0
+        elseif Garden.GetGen then
+            gardenGen = tonumber(Garden.GetGen()) or 0
+        end
+    end
     return table.concat({
         tostring(Inv and Inv.GetSnapGen and Inv.GetSnapGen() or 0),
         tostring(Watch and Watch.GetGen and Watch.GetGen() or 0),
         tostring(RP and RP.GetGen and RP.GetGen() or 0),
-        tostring(Garden and Garden.GetGen and Garden.GetGen() or 0),
+        tostring(gardenGen),
     }, ":")
 end
 
@@ -192,25 +318,25 @@ function Refine.ShouldAllowRefineNow()
     if empty and Grow then
         local plantable = false
         local plantReason = nil
+        local peekReason = nil
         if Grow.PeekSeedsForNextPlant then
-            local ok, job = Grow.PeekSeedsForNextPlant()
+            local ok, jobOrReason = Grow.PeekSeedsForNextPlant()
             if ok == true then
                 plantable = true
-                if type(job) == "table" then
-                    plantReason = tostring(job.plantReason or "")
+                if type(jobOrReason) == "table" then
+                    plantReason = tostring(jobOrReason.plantReason or "")
                 end
+            else
+                peekReason = tostring(jobOrReason or "")
             end
         end
-        if not plantable and Grow.HasSeedsForNextPlant then
-            plantable = Grow.HasSeedsForNextPlant() == true
-            if plantable then
-                local job = Grow._cachedPlantJob
-                if type(job) ~= "table" and Grow.GetPlantJob then
-                    job = Grow.GetPlantJob()
-                end
-                if type(job) == "table" then
-                    plantReason = tostring(job.plantReason or "")
-                end
+        -- Perf: PeekSeeds only — never HasSeeds/GetPlantJob from the refine gate.
+        -- Rebuilding PickPlantCandidate here stacked under Tick+CollectIntents.
+        -- Orch probes at tick top. plant-probe-pending: wait unless fill-blocked
+        -- (then allow buffer refine). Do not call HasSeedsForNextPlant here.
+        if not plantable and (peekReason == "dirty" or peekReason == "unprobed") then
+            if not (Grow.IsFillBlocked and Grow.IsFillBlocked() == true) then
+                return false, "plant-probe-pending"
             end
         end
         if plantable then
@@ -232,6 +358,10 @@ function Refine.ShouldAllowRefineNow()
     end
     if empty then
         return true, "pre-plant"
+    end
+    -- Full plots + stocked seeds: still convert surplus plants for Arboreal Resin.
+    if Refine.HasActiveResinNeed and Refine.HasActiveResinNeed() == true then
+        return true, "resin-need"
     end
     return false, "idle-grow"
 end
@@ -406,6 +536,22 @@ function Refine.CountRefinablePlantsForSpec(spec)
             total = total + e.stack
         end
     end
+    -- PlantUid fallback when ProductMatches misses EFFECT-less cult plants.
+    local SM = StockPiler2.SeedMap
+    local plantUid = 0
+    if type(SM) == "table" then
+        if SM.FindPlantUidForHave then
+            plantUid = tonumber(SM.FindPlantUidForHave(spec)) or 0
+        elseif SM.CachedPlantUidForSpec then
+            plantUid = tonumber(SM.CachedPlantUidForSpec(spec)) or 0
+        end
+    end
+    if plantUid > 0 then
+        local byUid = Refine.CountRefinablePlants(plantUid)
+        if byUid > total then
+            total = byUid
+        end
+    end
     return total
 end
 
@@ -420,6 +566,281 @@ function Refine.CountRefinablePlants(plantUid, spec)
     local index = Refine.EnsureBagIndex()
     local row = index.byPlantUid[plantUid]
     return type(row) == "table" and (tonumber(row.count) or 0) or 0
+end
+
+--- Surplus plants held above brew-only need (extras grown/kept for resin convert).
+local function DemandRowSurplus(row)
+    if type(row) ~= "table" then
+        return 0
+    end
+    local have = tonumber(row.have) or 0
+    local brew = tonumber(row.brewAbsolute)
+    if brew == nil then
+        brew = tonumber(row.absolute) or 0
+    end
+    local surplus = have - brew
+    if surplus < 0 then
+        return 0
+    end
+    return surplus
+end
+
+local function GetSpecDemand()
+    local RS = StockPiler2.RecipeSpec
+    if type(RS) ~= "table" or not RS.BuildBalancedSpecDemand then
+        return nil
+    end
+    return RS.BuildBalancedSpecDemand()
+end
+
+--- Highest-stack refinable slot matching spec (resin-need prefers richest feedstock).
+function Refine.FindRefinablePlantSlotHighestForSpec(spec)
+    if type(spec) ~= "table" then
+        return 0, nil, CraftingBackpackType()
+    end
+    local index = Refine.EnsureBagIndex()
+    local bestSlot = 0
+    local bestItem = nil
+    local bestBagKey = nil
+    local bestStack = -1
+    for i = 1, #index.entries do
+        local e = index.entries[i]
+        if CanRefineItem(e.item, 0, spec) and e.stack > bestStack then
+            bestStack = e.stack
+            bestSlot = e.slot
+            bestItem = e.item
+            bestBagKey = e.bagKey
+        end
+    end
+    if bestSlot > 0 then
+        return bestSlot, bestItem, BackpackTypeForBagKey(bestBagKey)
+    end
+    return 0, nil, CraftingBackpackType()
+end
+
+local function ResolveSeedPlantForSpec(spec, SM)
+    local seedUid = 0
+    local plantUid = 0
+    if type(spec) ~= "table" or type(SM) ~= "table" then
+        return seedUid, plantUid
+    end
+    local seed = SM.ResolveSeedForSpec and SM.ResolveSeedForSpec(spec)
+    if type(seed) == "table" then
+        seedUid = tonumber(seed.uniqueID) or 0
+        if seedUid <= 0 and type(seed.itemData) == "table" then
+            seedUid = tonumber(seed.itemData.uniqueID) or 0
+        end
+        plantUid = tonumber(seed.plantUid) or 0
+    end
+    if plantUid <= 0 and SM.FindPlantUidForSpec then
+        plantUid = tonumber(SM.FindPlantUidForSpec(spec)) or 0
+    end
+    if seedUid <= 0 and plantUid > 0 and SM.PickBestSeedUid then
+        local seedUids = SM.GetSeedUidsForPlant and SM.GetSeedUidsForPlant(plantUid) or {}
+        seedUid = tonumber(SM.PickBestSeedUid(plantUid, seedUids, spec)) or 0
+    end
+    return seedUid, plantUid
+end
+
+local function PotionKeySetFromRow(row)
+    local keys = {}
+    if type(row) ~= "table" or type(row.watchDetails) ~= "table" then
+        return keys
+    end
+    for i = 1, #row.watchDetails do
+        local detail = row.watchDetails[i]
+        if type(detail) == "table" and detail.potionKey ~= nil then
+            keys[detail.potionKey] = true
+        end
+    end
+    return keys
+end
+
+local function RowSharesPotionKeys(row, potionKeys)
+    if type(row) ~= "table" or type(potionKeys) ~= "table" or type(row.watchDetails) ~= "table" then
+        return false
+    end
+    for i = 1, #row.watchDetails do
+        local detail = row.watchDetails[i]
+        if type(detail) == "table" and detail.potionKey ~= nil and potionKeys[detail.potionKey] == true then
+            return true
+        end
+    end
+    return false
+end
+
+local function CandidateFromDemandRow(row, SM, tier, resinSkillLevel)
+    if type(row) ~= "table" or type(row.spec) ~= "table" then
+        return nil
+    end
+    if not (SM and SM.IsGrowableSpec and SM.IsGrowableSpec(row.spec)) then
+        return nil
+    end
+    resinSkillLevel = tonumber(resinSkillLevel)
+    if resinSkillLevel ~= nil then
+        local plantLv = tonumber(row.spec.skillLevel) or 0
+        if plantLv ~= resinSkillLevel then
+            return nil
+        end
+    end
+    local surplus = DemandRowSurplus(row)
+    if surplus <= 0 then
+        return nil
+    end
+    local seedUid, plantUid = ResolveSeedPlantForSpec(row.spec, SM)
+    local refinable = Refine.CountRefinablePlants(plantUid, row.spec)
+    if refinable <= 0 then
+        return nil
+    end
+    local slot, item, bagType = Refine.FindRefinablePlantSlotHighestForSpec(row.spec)
+    if slot <= 0 or type(item) ~= "table" then
+        return nil
+    end
+    if plantUid <= 0 then
+        plantUid = tonumber(item.uniqueID) or 0
+    end
+    -- Bag item must also match resin tier (Special Moment / wrong-tier stacks).
+    if resinSkillLevel ~= nil then
+        local itemLv = tonumber(item.craftingSkillRequirement)
+            or tonumber(item.skillLevel)
+            or tonumber(row.spec.skillLevel)
+            or 0
+        if itemLv ~= resinSkillLevel then
+            return nil
+        end
+    end
+    return {
+        tier = tier,
+        spec = row.spec,
+        specKey = row.specKey,
+        seedUid = seedUid,
+        plantUid = plantUid,
+        surplus = surplus,
+        refinable = refinable,
+        slot = slot,
+        item = item,
+        bagType = bagType,
+        score = refinable,
+    }
+end
+
+--- Pick plant to convert for Arboreal Resin: same-tier recipe surplus, then same-tier demand surplus.
+--- Refine is 1:1 (plant → same-tier seed + same-tier resin); never burn orphans / wrong skill level.
+--- @return table|nil pick with slot/item/plantUid/surplus/refinable
+function Refine.PickPlantForResinConvert(resinSpec, resinDeficit, preferredPotionKeys)
+    if type(resinSpec) ~= "table" then
+        -- Compat: old call signature (deficit, preferredKeys) — refuse without resin tier.
+        return nil
+    end
+    resinDeficit = tonumber(resinDeficit) or 0
+    if resinDeficit <= 0 then
+        return nil
+    end
+    local resinSkillLevel = tonumber(resinSpec.skillLevel) or 0
+    if resinSkillLevel <= 0 then
+        return nil
+    end
+    local SM = StockPiler2.SeedMap
+    local demand = GetSpecDemand()
+    if type(demand) ~= "table" then
+        return nil
+    end
+    preferredPotionKeys = type(preferredPotionKeys) == "table" and preferredPotionKeys or {}
+
+    local best = nil
+    local function consider(cand)
+        if type(cand) ~= "table" then
+            return
+        end
+        if best == nil
+            or cand.tier < best.tier
+            or (cand.tier == best.tier and cand.score > best.score)
+            or (cand.tier == best.tier and cand.score == best.score
+                and (tonumber(cand.plantUid) or 0) < (tonumber(best.plantUid) or 0))
+        then
+            best = cand
+        end
+    end
+
+    for _, row in pairs(demand) do
+        local preferred = RowSharesPotionKeys(row, preferredPotionKeys)
+            or (tonumber(row.byproductConvertExtra) or 0) > 0
+        local tier = preferred and 1 or 2
+        consider(CandidateFromDemandRow(row, SM, tier, resinSkillLevel))
+    end
+
+    if best ~= nil and type(SM) == "table" and best.seedUid <= 0 and best.plantUid > 0
+        and SM.ResolveSeedForPlantUid
+    then
+        local resolved = SM.ResolveSeedForPlantUid(best.plantUid, best.spec)
+        if type(resolved) == "table" then
+            best.seedUid = tonumber(resolved.uniqueID) or 0
+        end
+    end
+    return best
+end
+
+--- True when same-tier plant surplus can feed a resin convert (no orphan / wrong-level burns).
+--- Optional resinSpec: check feedstock for that tier only; else any short byproduct row.
+function Refine.HasResinConvertFeedstock(resinSpec)
+    local SM = StockPiler2.SeedMap
+    local demand = GetSpecDemand()
+    if type(demand) ~= "table" or not SM then
+        return false
+    end
+    if type(resinSpec) == "table" then
+        local lv = tonumber(resinSpec.skillLevel) or 0
+        if lv <= 0 then
+            return false
+        end
+        for _, row in pairs(demand) do
+            if CandidateFromDemandRow(row, SM, 2, lv) ~= nil then
+                return true
+            end
+        end
+        return false
+    end
+    for _, row in pairs(demand) do
+        if type(row) == "table" and type(row.spec) == "table"
+            and SM.IsHarvestByproduct and SM.IsHarvestByproduct(row.spec) == true
+            and (tonumber(row.deficit) or 0) > 0
+        then
+            local lv = tonumber(row.spec.skillLevel) or 0
+            if lv > 0 then
+                for _, growRow in pairs(demand) do
+                    if CandidateFromDemandRow(growRow, SM, 2, lv) ~= nil then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+--- Total convert-byproduct deficit across balanced demand (Arboreal Resin etc.).
+function Refine.TotalResinDeficit()
+    local SM = StockPiler2.SeedMap
+    local demand = GetSpecDemand()
+    if type(demand) ~= "table" or not SM or not SM.IsHarvestByproduct then
+        return 0
+    end
+    local total = 0
+    for _, row in pairs(demand) do
+        if type(row) == "table" and type(row.spec) == "table"
+            and SM.IsHarvestByproduct(row.spec) == true
+        then
+            local d = tonumber(row.deficit) or 0
+            if d > total then
+                total = d
+            end
+        end
+    end
+    return total
+end
+
+function Refine.HasActiveResinNeed()
+    return Refine.TotalResinDeficit() > 0 and Refine.HasResinConvertFeedstock() == true
 end
 
 function Refine.LiveSeedCountForSpec(spec)
@@ -533,6 +954,7 @@ function Refine.ReconcileAll()
     -- No in-flight refine ledger: skip LiveSeedCount walk (was ReconcileAll xN trails
     -- while outstanding was empty or only one seed needed checking).
     if not (RP.HasOutstanding and RP.HasOutstanding() == true) then
+        ClearOrphanPending("reconcile-idle")
         return false
     end
     -- At most one full walk per UPDATE_PROCESSED frame (TryTick + OnInv + Expire used to stack).
@@ -573,6 +995,7 @@ function Refine.ReconcileAll()
             if live > lastLive then
                 local delivered = live - lastLive
                 RP.Reconcile(seedUid, delivered)
+                ReducePendingForSeed(seedUid, delivered)
                 deliveredAny = true
                 LogRefine(string.format(
                     "delivered seedUid=%d live %d->%d outstanding=%d",
@@ -581,11 +1004,13 @@ function Refine.ReconcileAll()
                 if (RP.GetOutstanding(seedUid) or 0) <= 0 then
                     Refine._outstandingAt[seedUid] = nil
                     Refine._expireFlushTried[seedUid] = nil
+                    ClearPendingForSeed(seedUid, "reconcile-zero")
                 end
             end
             Refine._lastLiveBySeed[seedUid] = live
         end
     end
+    ClearOrphanPending("reconcile-orphan")
     Refine._reconcileAllSnapGen = snapGen
     Refine._reconcileAllDoneForSnap = true
     Refine._reconcileAllLastResult = deliveredAny
@@ -600,6 +1025,7 @@ end
 
 --- Drop or repair ledger rows that never saw a live-seed increase.
 function Refine.ExpireStuckOutstanding()
+    ClearOrphanPending("expire-orphan")
     local RP = StockPiler2.RefinePipeline
     if not RP or not RP.Snapshot then
         return
@@ -657,13 +1083,7 @@ function Refine.CollectDemandLines()
     if type(RS) ~= "table" or type(SM) ~= "table" or not RS.BuildBalancedSpecDemand then
         return lines
     end
-    if StockPiler2.Perf and StockPiler2.Perf.Begin then
-        StockPiler2.Perf.Begin("BuildBalancedSpecDemand")
-    end
     local demand = RS.BuildBalancedSpecDemand()
-    if StockPiler2.Perf and StockPiler2.Perf.End then
-        StockPiler2.Perf.End("BuildBalancedSpecDemand")
-    end
     for _, row in pairs(demand) do
         if type(row) == "table" and type(row.spec) == "table"
             and SM.IsGrowableSpec and SM.IsGrowableSpec(row.spec)
@@ -789,13 +1209,7 @@ function Refine.CollectIntents()
     local appendedBuffer = {}
 
     if bufferOn and RS and RS.CollectAutoGrowSeedLines then
-        if StockPiler2.Perf and StockPiler2.Perf.Begin then
-            StockPiler2.Perf.Begin("CollectAutoGrowSeedLines")
-        end
         local bufferLines = RS.CollectAutoGrowSeedLines()
-        if StockPiler2.Perf and StockPiler2.Perf.End then
-            StockPiler2.Perf.End("CollectAutoGrowSeedLines")
-        end
         for i = 1, #bufferLines do
             local line = bufferLines[i]
             local spec = line.spec
@@ -869,9 +1283,62 @@ function Refine.CollectIntents()
             end
         end
     end
+
+    -- Convert surplus plants for Arboreal Resin (and other harvest byproducts).
+    if SM and SM.IsHarvestByproduct and RS and RS.BuildBalancedSpecDemand then
+        local demand = RS.BuildBalancedSpecDemand()
+        if type(demand) == "table" then
+            local resinSeen = {}
+            for _, row in pairs(demand) do
+                if type(row) == "table" and type(row.spec) == "table"
+                    and SM.IsHarvestByproduct(row.spec) == true
+                then
+                    local deficit = tonumber(row.deficit) or 0
+                    local resinKey = tostring(row.specKey or "")
+                    if deficit > 0 and resinKey ~= "" and resinSeen[resinKey] ~= true then
+                        resinSeen[resinKey] = true
+                        local preferredKeys = PotionKeySetFromRow(row)
+                        local pick = Refine.PickPlantForResinConvert(row.spec, deficit, preferredKeys)
+                        if type(pick) == "table" and (tonumber(pick.slot) or 0) > 0 then
+                            local uses = math.min(
+                                deficit,
+                                tonumber(pick.surplus) or 0,
+                                tonumber(pick.refinable) or 0,
+                                5
+                            )
+                            if uses > 0 then
+                                intents[#intents + 1] = {
+                                    reason = "resin-need",
+                                    spec = pick.spec,
+                                    seedUid = tonumber(pick.seedUid) or 0,
+                                    plantUid = tonumber(pick.plantUid) or 0,
+                                    uses = uses,
+                                    headroom = 0,
+                                    slot = pick.slot,
+                                    item = pick.item,
+                                    bagType = pick.bagType,
+                                    emergencyPlant = false,
+                                }
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local function ReasonPriority(reason)
+        if reason == "plant-need" then
+            return 0
+        end
+        if reason == "resin-need" then
+            return 1
+        end
+        return 2
+    end
     table.sort(intents, function(a, b)
-        local pa = a.reason == "plant-need" and 0 or 1
-        local pb = b.reason == "plant-need" and 0 or 1
+        local pa = ReasonPriority(a.reason)
+        local pb = ReasonPriority(b.reason)
         if pa ~= pb then
             return pa < pb
         end
@@ -929,13 +1396,16 @@ function Refine.IssueOne(intent, opId)
     local reason = tostring(intent.reason or "refine")
     local pending = tonumber(Refine._pendingByPlant[plantUid]) or 0
     local stack = tonumber(item.stackCount) or tonumber(item.StackCount) or 1
-    local maxUses = (reason == "seed-buffer") and 5 or 1
+    local maxUses = (reason == "seed-buffer" or reason == "resin-need") and 5 or 1
     uses = math.min(uses, stack, MAX_PENDING_PER_PLANT - pending, maxUses)
     -- Fresh uid budget: never issue more than remaining seed-buffer headroom
     -- (plant-need used to ignore ground credit and overshoot buffer).
+    -- resin-need ignores buffer headroom (must convert when buffer is full).
     local bufferOn = StockPiler2.Watch and StockPiler2.Watch.IsSeedBufferEnabled
         and StockPiler2.Watch.IsSeedBufferEnabled() == true
-    if seedUid > 0 and (reason == "seed-buffer" or (reason == "plant-need" and bufferOn)) then
+    if seedUid > 0 and reason ~= "resin-need"
+        and (reason == "seed-buffer" or (reason == "plant-need" and bufferOn))
+    then
         local budget = Refine.GetSeedBudget(seedUid)
         local headroom = tonumber(budget and budget.headroom) or 0
         if reason == "plant-need" and intent.emergencyPlant == true then
@@ -984,6 +1454,9 @@ function Refine.IssueOne(intent, opId)
     end
 
     Refine._pendingByPlant[plantUid] = pending + sent
+    if plantUid > 0 and seedUid > 0 then
+        Refine._pendingSeedByPlant[plantUid] = seedUid
+    end
     Refine._issuedSeedThisTick = seedUid
     -- Force reconcile on next snap advance (Issue bumps via bag flush / L0).
     Refine._reconcileSnapGen = -1
@@ -1024,6 +1497,8 @@ function Refine.TryTick(opId)
     if Refine.RefineCheckDue() ~= true then
         return false
     end
+    -- Unblock AutoGrow when pending outlived outstanding (no bag snap required).
+    ClearOrphanPending("trytick-orphan")
     local cacheKey = IntentCacheKey()
     local bufferOn = StockPiler2.Watch and StockPiler2.Watch.IsSeedBufferEnabled
         and StockPiler2.Watch.IsSeedBufferEnabled() == true
@@ -1150,6 +1625,7 @@ function Refine.OnInventoryUpdated()
                     Refine._pendingByPlant[plantUid] = pending - 1
                 else
                     Refine._pendingByPlant[plantUid] = nil
+                    Refine._pendingSeedByPlant[plantUid] = nil
                 end
             end
             if seedUid > 0 then
@@ -1196,11 +1672,18 @@ function Refine.OnUpdateProcessed()
         return
     end
 
+    local hadOutstanding = RP and RP.HasOutstanding and RP.HasOutstanding() == true
+    local SM = StockPiler2.SeedMap
+    local hadSeedPending = SM and type(SM._pendingRefine) == "table"
     Refine.ExpireStuckOutstanding()
 
     local Inv = StockPiler2.Inventory
     local snapGen = Inv and Inv.GetSnapGen and Inv.GetSnapGen() or 0
     if snapGen == (tonumber(Refine._reconcileSnapGen) or -1) then
+        -- No new bag snap: still clear orphan pending so AutoGrow cannot wedge.
+        if hadOutstanding ~= true and hadSeedPending ~= true then
+            ClearOrphanPending("update-orphan")
+        end
         return
     end
     Refine._reconcileSnapGen = snapGen

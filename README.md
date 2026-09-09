@@ -2,15 +2,16 @@
 
 Greenfield rewrite of StockPiler using an **Orchestrator + Stores + Planner + Executors** architecture. Runs as a **separate addon** alongside v1 — does not modify the original StockPiler folder.
 
-**Version:** 0.4.62
+**Version:** 0.4.114
 
 Repository: [Talladego/StockPiler2](https://github.com/Talladego/StockPiler2)
 
 ## Install
 
 1. Ensure the `StockPiler2` folder is under `Interface/AddOns/`.
-2. Enable **StockPiler2** in the addon list (v1 can stay enabled for parallel testing).
-3. `/reloadui`
+2. (Optional) Enable **LibPerf** for hitch logs via `/libperf StockPiler2 on`.
+3. Enable **StockPiler2** in the addon list (v1 can stay enabled for parallel testing).
+4. `/reloadui`
 
 On first load, StockPiler2 creates ActionBar macros **StockPiler2 Harvest** and **StockPiler2 Brew** (if an empty macro slot exists). Drag them to a hotbar for click + keybind harvest/brew. Leftover v1 macros (`StockPiler Harvest` / `StockPiler Brew`) are ignored.
 
@@ -26,16 +27,17 @@ On first load, StockPiler2 creates ActionBar macros **StockPiler2 Harvest** and 
 | `/sp2 watchplan` | Watch-row status / stock / craftable / shared dump |
 | `/sp2 state` | Orchestrator phase + store generations |
 | `/sp2 growplan` | Garden / grow / refine diagnostics |
+| `/sp2 stats` | Craft-cycle stats (plant/harvest/crit/SM, refine, brew rates) |
 | `/sp2 brewplan` | Brew session + ready watches dump |
 | `/sp2 buyplan` | Buy job dump |
 | `/sp2 bags` / `bags force` | Bag snapshot dump |
 | `/sp2 events` / `on` / `off` / `dump` | Internal event bus trace |
-| `/sp2 perf` / `on` / `off` / `summary` | Frametime hitch logger (trail breadcrumbs in uilog) |
-| `/sp2 perf on [ms]` / `baseline [ms]` | Hitch threshold (persisted) / baseline |
+| `/libperf StockPiler2 …` | Frametime hitch logger (optional **LibPerf**; see `/libperf help`) |
 | `/sp2 audit` | Saved variables health |
+| `/sp2 mem` | Live table key counts only (safe footprint triage; do **not** `d(StockPiler2)`) |
 | `/sp2 harvest` | Prepare next ready plot (macro/CMD path) |
 
-Perf tip: spikes with `trail=(none)` / high `emptyTrail%` on baseline are usually **engine** stalls (native craft/UI, DXVK, other addons, zone load)—not missing Lua sites. Empty trail means SP2 did not `Begin` recently; leave those alone. Empty-trail spike **uilog lines are rate-limited** (summary still counts every hitch). Threshold from `/sp2 perf on [ms]` is saved in settings.
+Perf tip: enable the **LibPerf** addon (optional dependency). Use `/libperf StockPiler2 on 100` (settings persist in LibPerf). Spikes with `trail=(none)` / high `emptyTrail%` on baseline are usually **engine** stalls (native craft/UI, DXVK, other addons, zone load)—not missing Lua sites. Empty trail means SP2 did not `Begin` recently; leave those alone. Empty-trail spike lines are rate-limited (summary still counts every hitch). Logs: `logs/libperf_StockPiler2.log`. Use `/libperf scopes` to list paths.
 
 ## UI
 
@@ -56,7 +58,7 @@ Perf tip: spikes with `trail=(none)` / high `emptyTrail%` on baseline are usuall
 
 ## Brew behavior
 
-- Footer Brew only loads/performs watches that are **Ready to craft** (deficit > 0, uncontested craftable).
+- Footer Brew only loads/performs watches that are **Ready to brew** (deficit > 0, uncontested craftable).
 - After an **auto** brew hits the watch target, the session clears so the next footer click can pick another Ready watch.
 - **Manual** row Load/Brew can overstock (target already met or yellow shared craftable).
 - Shared-materials contention uses crafts **needed for deficit**, not max crafts possible from bags.
@@ -94,6 +96,24 @@ StockPiler2 starts with **empty** learned data. Relearn recipes in-game (brew on
 | `StockPiler2.Account` | Global | Learned knowledge |
 
 Separate from v1 `StockPiler.*` saved variables.
+
+## Localization
+
+English catalog lives in `Source/Locale/enUS.lua`. User chat and on-screen UI go through `StockPiler2.T(key, tokens)`.
+
+- Templates are `L"..."` wstrings; for chat use ASCII punctuation only (`-`, `|`, `...`) — no UTF-8 fancy dashes/ellipsis in narrow strings (see RoR-Interface `docs/api/lua-chat-strings.md`).
+- Tokens are named `{name}`, `{count}`, etc.; values are coerced with `towstring`.
+- `settings.language = 0` follows the game language; only enUS ships today (other packs fall back per key).
+- Phase 2 covers Window/Potions/Watch chrome, recipe/watch tips, Planner Status column, Harvest/Brew tooltips, and MaterialSpec tip meta.
+- Phase 3 (secondary languages) is deferred. Macro identity names stay English for slot lookup stability.
+
+## Profiling (LibPerf)
+
+Install and enable **LibPerf** alongside StockPiler2. Then `/libperf StockPiler2 on 100` writes hitch breadcrumbs to `logs/libperf_StockPiler2.log`. All enable/threshold/summary/baseline (global and per-scope) is via `/libperf` only; StockPiler2 registers the `StockPiler2` scope at load.
+
+## Memory / introspection
+
+Use `/sp2 mem` for safe key counts (`Inventory._specParseCache`, Account maps, plan rows, RecipeSpec caches). **Do not** `d(StockPiler2)` — EA debug walks full bag item tables and can freeze/disconnect the client.
 
 ## Future considerations
 
@@ -135,6 +155,109 @@ On each user-facing ship, bump together:
 | **Major** (`N+1.0.0`) | Breaking saved-var / architecture break (rare in 0.x) |
 
 ## Changelog
+
+**0.4.114:** AutoGrow — plant-hold for ready harvest only when the garden is a uniform ready/mid-batch wave (Grown + empty, no mid-grow). Staggered timers still allow planting empties.
+
+**0.4.113:** AutoGrow — do not plant into empty plots while any plot is still Grown/ready to harvest (avoids mid-batch harvest lockout). Refine/additives still run; replant resumes when the ready batch is cleared.
+
+**0.4.112:** Watch tip — Have/Need red vs yellow follows AutoGrow-progressable (growable), not planner `kind=buy` when seed credit is 0; Buy seeds/plants notes stay yellow to match `need_seeds`; true buy (flasks/butchered) stay red with Buy* notes; AutoGrow off / Needs cult stay red.
+
+**0.4.111:** Chat — replace Unicode em dashes in locale with ASCII ` - ` (mojibake-safe).
+
+**0.4.110:** Chat — `Harvest:` / `Brew:` prefixes with capitalized action; plot lines as `Harvest: Plot N harvested/planted…`.
+
+**0.4.109:** Chat — normalize plot/brew user messages (`Plot N: Harvested/Planted…`, `Harvest: ready…`, `Brew: ready/load/Brewed…`).
+
+**0.4.108:** Harvest — outcome chat / primary plant pick skip non-growables (via `IsEligibleHarvestProductUid`), not resin-only.
+
+**0.4.107:** Harvest — outcome chat ignores Arboreal Resin (refine/convert loot); report the main plant only.
+
+**0.4.106:** Harvest — button/macro enable only when all planted plots are ready (empty ignored); keep mid-batch lit without re-chime; per-plot chat for main harvest / crit-fail. Brew — ready chime/chat only on real edge into Ready (not between crafts); chat `Brew load: {name}` when the loaded recipe/watch key changes; keep per-brew outcome lines.
+
+**0.4.105:** Brew — do not clear apo load when FindSessionRow is nil right after plan invalidate (0.4.104 false-cleared every brew); clear on plan-updated only when row is missing/not Ready or board invalid, or when session counters are exhausted.
+
+**0.4.104:** Brew — clear stuck auto apo load when the watch is no longer green Ready (session craftable alone used to keep phase=loaded while the footer greys and AutoGrow is blocked); re-check on plan rebuild after brew.
+
+**0.4.103:** Brew — when a session cannot continue (materials / craftable exhausted) but phase stayed `loaded`, clear the apo load like footer R-click so AutoGrow is not blocked. Potent/byproduct outcomes still continue the session when mats remain; every brew still counts as target progress (crit rates not modeled).
+
+**0.4.102:** Brew — incorrect interim: aborted session on non-watched (Potent) output. Replaced by 0.4.103.
+
+**0.4.101:** Perf — skip snapGen/INVENTORY_SNAPSHOT on no-op L0 bag rearranges; no BrewUi on idle craft-bag slot events; post-storm SkipPlanThisFrame + defer BrewUi one frame so WarmHave/WatchRows do not stack with first AutoGrow replant Tick (harvest hitch unchanged).
+
+**0.4.100:** Watch — red Buy flasks/materials for Shared contest only when every contested key is non-growable; if plants/buffer are still contested, stay yellow Shared materials.
+
+**0.4.99:** Watch — contested shared containers show red Buy flasks (not yellow Shared materials); tip Have/Need for those flasks paints red.
+
+**0.4.98:** Watch — stocked AutoGrow watches show yellow Seed buffer when recipe seed lines are below buffer (was green Potions stocked while Brew still held); Ready to craft label → Ready to brew.
+
+**0.4.97:** AutoGrow — defer `seed_buffer`/`surplus` plant when potion_stock is seed-starved but refinable plants remain, so Orch refines first and can close Shared/yellow watches without waiting a full buffer grow cycle.
+
+**0.4.96:** Perf — split Harvest.Complete from PlanRebuild (SkipPlanThisFrame); keep lootDirty on failed complete; align plant quiet to storm + Orch storm early-return; seed-line cache drops snapGen; skip MarkPlantJobDirty mid-storm; IntentCacheKey uses planGen; why-comments on new + existing harvest/plan/Tick guards.
+
+**0.4.95:** Perf — cut harvest/replant hitch: WakeAfterHarvest no sync Pick; defer harvest learn ≥1 frame; harvest-storm defers bag/plan + BrewUi; plan deadline stretches (nudge + 6s cap); Orch skips plant during quiet (no fill-block); Watch UiFlush held through storm/quiet/didHeavy.
+
+**0.4.94:** Perf — seed-line/buffer/plant-job caches key on garden planGen (not stage ticks); BrewUi dirty-only + frame-coalesced brew-ready notify; plan coalesce keeps 3s while AutoGrow awake even with window open + PLAN_MIN_GAP_SEC; CollectAutoGrowFocus cached; refine gate Peek-only; suppress window defers snap bumps; footer early-out.
+
+**0.4.93:** Perf — plantUid Have uses Cached/Items (no nested bag ProductMatches); FindPlantUidForSpec tries learned data before bags; ClearPlanCaches before WarmHave; idle AutoGrow backs off when empty plots have no plant job; nested LibPerf trails for demand/pick.
+
+**0.4.92:** Fix — suppress false "Need Apo/Cult" chat at login until trade skills are populated (`TRADE_SKILL_UPDATED`); then rebuild plan.
+
+**0.4.91:** Fix — Main Have still 0 for Heaving Spumepetal (20 in bag): parse `CraftItemInfo` map, prefer Items stamp for thin bag mains, and fall back Have/refinable to `CountByUid(plantUid)`.
+
+**0.4.90:** Fix — cultivated Main plants that omit EFFECT (e.g. Heaving Spumepetal) now match recipe Have/Craftable via description or skill/stab/power (was stuck at Have 0).
+
+**0.4.89:** Watch — overlay live bag Stock/Craftable on coalesced plan rows; status tip Have + plot notes refresh from bags/garden; 1s UI flush while plan pending; faster plan rebuild while window open.
+
+**0.4.88:** Watch — bypass 5s UI flush on planGen; skip stale snap paints that burned the interval; tip caches keyed with planGen (Status/Stock/Craftable catch up with plan rebuild).
+
+**0.4.87:** Fix — clear orphan refine `_pendingByPlant` when outstanding is already 0 (and sync pending on seed delivery) so AutoGrow cannot stall empty plots behind `pending-throttle`.
+
+**0.4.86:** Fix — MaterialSpec parse cache keyed by uid (not item table identity) and cleared on inventory snap; stops unbounded `_specParseCache` growth. Add `/sp2 mem` for safe footprint counts (never `d(StockPiler2)`).
+
+**0.4.85:** Perf — remove `/sp2 perf*`; all hitch settings via `/libperf` (LibPerf 1.2 persists enable/threshold). Help points at `/libperf StockPiler2`.
+
+**0.4.84:** Perf — optional LibPerf dependency; hitch trails go to `logs/libperf_StockPiler2.log` (no built-in frame pump). `/sp2 perf` no-ops with a message if LibPerf is missing.
+
+**0.4.83:** Localization Phase 2 — Window/Potions/Watch chrome, recipe and Watch tips, Planner Status column, Harvest/Brew tooltips, and MaterialSpec tip meta via `StockPiler2.T` (enUS only).
+
+**0.4.82:** Localization — Locale scaffold + enUS catalog; user chat (`Notify`/`Print`/`/sp2 help`, macros, perf summary) via `StockPiler2.T`; mojibake-safe ASCII chat punctuation.
+
+**0.4.81:** Brew — RecipeIsStable requires stability total > 0 (match engine HIGH); Effective*PerCraft also tops up at total == 0; LogCauldronStability logs OmeterValue beside SuccessChance.
+
+**0.4.80:** Watch — Craftable green only when safe to brew (uncontested vs other watches and seed-buffer plant headroom); footer/macro Brew continue requires green Ready; tooltips updated.
+
+**0.4.79:** Potions — paint on learn without waiting on Watch 5s flush (knowledgeGen bypasses interval); Relink potion recipeKeys after each StoreLearnedRecipeSpec so alternate/potent fingerprints appear without `/reload`.
+
+**0.4.78:** Brew — harden Watch-row Load→Brew (no op-lock swallow, paint while loading, Notify on rejects); manual row Load skips AutoGrow holds; footer Brew + macro Ready-only (ignore manual load sessions).
+
+**0.4.77:** UI — Watch Target chips and Potions Watch toggle update instantly (optimistic row paint); Forget / Watch catch-up via coalesced plan + dirty flush (no sync cross-tab RefreshWatch); WatchContentKey includes watchGen.
+
+**0.4.76:** Fix — `GrowsBucketStats` local-order crash in `CultSkillUpRate` (OnUpdateProcessed).
+
+**0.4.75:** Potions — live list refresh when a new recipe fingerprint is learned (UI content key includes knowledgeGen); rarity-colored names; sortable Lvl column (fits by shrinking Name, window width unchanged).
+
+**0.4.74:** Brew — cauldron stability diagnostics (`sp2Total` / `sp2Stable` vs engine `SuccessChance`) on pending, fail, and VALID_RECIPE (for calibrating RecipeIsStable vs mixed-tier loads).
+
+**0.4.73:** Refine resin-need — only convert plants whose skill level matches the needed Arboreal Resin (1:1 same-tier seed+resin); drop orphan/wrong-tier burns (e.g. Special Moment plants).
+
+**0.4.72:** Tooltip craft-cycle rates — Status tip harvest rates under plant slots; Harvest/Brew footer tips show survive/yield/SM and brew success/yield; empirical Cult/Apo skill-up % when skill below 200 (n≥5) via TRADE_SKILL_UPDATED attribution.
+
+**0.4.71:** Craft-cycle stats — Special Moment chat cue; plantAttempts / specialMomentHits / refineAttempts+seedOut; harvest survive/SM/yield helpers + `SeedsNeededForPlants`; `/sp2 stats` dump; Watch Status harvest rate line.
+
+**0.4.70:** AutoGrow — shorter post-harvest replant quiet (1.2s→0.75s) and harvest op-lock (1.5s→1.0s); multi-plot force debounce unchanged.
+
+**0.4.69:** Fix — Brew/Harvest ready chat+sound sync with button/macro lighting (macros update even when SP2 window closed; harvest notify also requires CanHarvestNow).
+
+**0.4.68:** Refine — `resin-need` converts surplus recipe plants (highest stock) for Arboreal Resin when stabilizer is short; ignores seed-buffer headroom; Watch shows Refine for resin / red only with no feedstock.
+
+**0.4.67:** SeedMap — plot-watched harvest trusts bag-delta plants without name match (vendor Seed Packet → Musty/Swaying + Special Moment); packets excluded from PickBestSeedUid / refine `seedUid`; ForgetUnrelated keeps packet→plant grows.
+
+**0.4.66:** AutoGrow — respect Cultivation plot unlocks (1/2/3/4 at skill 1/50/100/150); skip `Locked` plots from `GetCultivationInfo` so low-skill chars no longer spam plant on P2–P4 (`Illegal Plot Number`).
+**0.4.65:** Watch — red `need_skill` when recipe material skillLevels exceed character Cultivation/Apothecary (e.g. lv200 Draught on skill 1 no longer looks like a buy shortage).
+
+**0.4.64:** Fix — Watch/Potions ListBox: hide unused `visiblerows` slots (empty Watch was 11 opaque white bars with ghost AutoGrow checkboxes; tint only covered PopulatorIndices).
+
+**0.4.63:** Fix — Watch list white bars: always re-apply SetListRowTint; set paintKey only after a full paint; clear paint cache on window show (ListBox recreate was skipping tint).
 
 **0.4.62:** Fix — Brew ready chat/sound and footer Brew tooltip follow `CanBrewNow` (no “Click to load” / chime while button is grey from op-lock or crafting-in-progress).
 

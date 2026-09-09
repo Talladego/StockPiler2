@@ -222,6 +222,28 @@ local function IsBagSeedOrSpore(itemData)
     return cultType == CultivationSeedType() or cultType == CultivationSporeType()
 end
 
+--- Vendor "Seed Packet" / "Spore Packet" consumables (buyable feedstock, like armor scales).
+--- They grow the standard plant line; refine never yields the packet back.
+function StockPiler2.SeedMap.IsSeedPacketItem(itemData)
+    if type(itemData) ~= "table" then
+        return false
+    end
+    local name = string.lower(ToNarrow(itemData.name or itemData.nameNarrow))
+    if name == "" then
+        return false
+    end
+    return string.find(name, "seed packet", 1, true) ~= nil
+        or string.find(name, "spore packet", 1, true) ~= nil
+end
+
+function StockPiler2.SeedMap.IsSeedPacketUid(uid)
+    uid = tonumber(uid) or 0
+    if uid <= 0 then
+        return false
+    end
+    return StockPiler2.SeedMap.IsSeedPacketItem(BagItemSample(uid)) == true
+end
+
 --- Forward declaration; defined after GetPlantUidForSpec helpers.
 local SeedMatchesGrowSpec
 
@@ -436,6 +458,8 @@ end
 
 --- Safe to attribute plantUid as a harvest product of seedUid?
 --- opts.expectedPlantUid / opts.chatPlantUids / opts.relatedToPlantUid / opts.allowExisting
+--- opts.plotTrusted — plot-watched harvest: allow eligible plants without name match
+---   (vendor packets → Musty/Swaying; also records Special Moment co-yields).
 local function HarvestPairAllowed(seedUid, plantUid, opts)
     seedUid = tonumber(seedUid) or 0
     plantUid = tonumber(plantUid) or 0
@@ -445,6 +469,9 @@ local function HarvestPairAllowed(seedUid, plantUid, opts)
     end
     if not IsEligibleHarvestProductUid(plantUid, seedUid) then
         return false
+    end
+    if opts.plotTrusted == true then
+        return true
     end
     if plantUid == (tonumber(opts.expectedPlantUid) or 0) then
         return true
@@ -581,6 +608,9 @@ function StockPiler2.SeedMap.PickBestSeedUid(plantUid, seedUids, spec)
         end
         local uid = tonumber(item.uniqueID) or 0
         if uid <= 0 or seen[uid] == true then
+            return
+        end
+        if StockPiler2.SeedMap.IsSeedPacketUid(uid) then
             return
         end
         local count = 0
@@ -729,11 +759,13 @@ end
 --- @param trusted boolean|nil When true, allow count updates for existing grows pairs and
 ---   treat opts.expectedPlantUid as authoritative (chat / pending primary). Never blank-accept.
 --- @param expectedPlantUid number|nil Optional expected plant from chat or pending harvest.
-function StockPiler2.SeedMap.LearnMapping(plantUid, seedUid, source, trusted, expectedPlantUid)
+--- @param plotTrusted boolean|nil Plot-watched harvest: learn eligible plants without name match.
+function StockPiler2.SeedMap.LearnMapping(plantUid, seedUid, source, trusted, expectedPlantUid, plotTrusted)
     plantUid = tonumber(plantUid) or 0
     seedUid = tonumber(seedUid) or 0
     trusted = trusted == true
     expectedPlantUid = tonumber(expectedPlantUid) or 0
+    plotTrusted = plotTrusted == true
     if plantUid <= 0 or seedUid <= 0 then
         return false
     end
@@ -750,6 +782,7 @@ function StockPiler2.SeedMap.LearnMapping(plantUid, seedUid, source, trusted, ex
         expectedPlantUid = expectedPlantUid,
         relatedToPlantUid = expectedPlantUid,
         allowExisting = trusted,
+        plotTrusted = plotTrusted,
     }) then
         if StockPiler2.SeedMap.PairLooksLikePlantAndSeed then
             StockPiler2.SeedMap.PairLooksLikePlantAndSeed(plantUid, seedUid)
@@ -762,7 +795,7 @@ function StockPiler2.SeedMap.LearnMapping(plantUid, seedUid, source, trusted, ex
         local grows = AccountTable("grows")
         local bucket = grows[tostring(seedUid)]
         already = type(bucket) == "table" and type(bucket[tostring(plantUid)]) == "table"
-        StockPiler2.SeedMap.NoteKnownHarvestPair(seedUid, plantUid, trusted)
+        StockPiler2.SeedMap.NoteKnownHarvestPair(seedUid, plantUid, trusted, plotTrusted)
     else
         -- refine / learned: prefer refine pair when plant is refinable; else harvest-only.
         local plantData = BagItemSample(plantUid)
@@ -782,7 +815,7 @@ function StockPiler2.SeedMap.LearnMapping(plantUid, seedUid, source, trusted, ex
             local grows = AccountTable("grows")
             local bucket = grows[tostring(seedUid)]
             already = type(bucket) == "table" and type(bucket[tostring(plantUid)]) == "table"
-            StockPiler2.SeedMap.NoteKnownHarvestPair(seedUid, plantUid, trusted)
+            StockPiler2.SeedMap.NoteKnownHarvestPair(seedUid, plantUid, trusted, plotTrusted)
         end
     end
 
@@ -950,6 +983,20 @@ local function EnsureGrowsBucket(seedUid)
     return bucket
 end
 
+--- Read-only grows bucket (must be above CultSkillUpRate / harvest rate helpers).
+local function GrowsBucketStats(seedUid)
+    seedUid = tonumber(seedUid) or 0
+    if seedUid <= 0 then
+        return nil
+    end
+    local grows = AccountTable("grows")
+    local bucket = grows[tostring(seedUid)]
+    if type(bucket) ~= "table" then
+        return nil
+    end
+    return bucket
+end
+
 local function EnsureRefineEntry(plantUid)
     plantUid = tonumber(plantUid) or 0
     if plantUid <= 0 then
@@ -997,10 +1044,12 @@ end
 --- Seed/spore -> plants gained when that plot is harvested.
 --- @param forceRelated boolean|nil When true, also allow count updates for pairs already in grows
 ---   (crit-tier). Never records arbitrary crafting mats from a co-timed bag pulse.
-function StockPiler2.SeedMap.ObserveHarvest(seedUid, products, sampled, forceRelated, expectedPlantUid)
+--- @param plotTrusted boolean|nil Plot-watched harvest: record eligible plants without name match.
+function StockPiler2.SeedMap.ObserveHarvest(seedUid, products, sampled, forceRelated, expectedPlantUid, plotTrusted)
     seedUid = tonumber(seedUid) or 0
     forceRelated = forceRelated == true
     expectedPlantUid = tonumber(expectedPlantUid) or 0
+    plotTrusted = plotTrusted == true
     if seedUid <= 0 or type(products) ~= "table" then
         return false
     end
@@ -1028,6 +1077,7 @@ function StockPiler2.SeedMap.ObserveHarvest(seedUid, products, sampled, forceRel
                         expectedPlantUid = expectedPlantUid,
                         relatedToPlantUid = expectedPlantUid,
                         allowExisting = forceRelated,
+                        plotTrusted = plotTrusted,
                     }) then
                         D("SeedMap ObserveHarvest skip unrelated plantUid=" .. tostring(uid)
                             .. " seedUid=" .. tostring(seedUid)
@@ -1046,23 +1096,27 @@ function StockPiler2.SeedMap.ObserveHarvest(seedUid, products, sampled, forceRel
     return changed
 end
 
---- Record Crafting-chat Critical Success / Failure against a seed grow bucket.
---- Does not change AutoGrow; used for seed-buffer insight later.
+--- Record Crafting-chat Critical Success / Failure / Special Moment against a seed grow bucket.
+--- Does not change AutoGrow; used for seed-buffer / leveling insight.
+--- Returns critOk, critFail, specialMoment.
 function StockPiler2.SeedMap.RecordHarvestChatCues(seedUid, cues, pending)
     seedUid = tonumber(seedUid) or 0
     if seedUid <= 0 then
-        return false, false
+        return false, false, false
     end
     local bucket = EnsureGrowsBucket(seedUid)
     if type(bucket) ~= "table" then
-        return false, false
+        return false, false, false
     end
     bucket.harvestAttempts = (tonumber(bucket.harvestAttempts) or 0) + 1
+    StockPiler2.SeedMap.ArmCultSkillPending(seedUid, "harvest")
     local critOk = false
     local critFail = false
+    local specialMoment = false
     if type(pending) == "table" then
         critOk = pending.chatCriticalSuccess == true
         critFail = pending.chatCriticalFailure == true
+        specialMoment = pending.chatSpecialMoment == true
     end
     if type(cues) == "table" then
         if cues.criticalSuccess == true then
@@ -1071,6 +1125,9 @@ function StockPiler2.SeedMap.RecordHarvestChatCues(seedUid, cues, pending)
         if cues.criticalFailure == true then
             critFail = true
         end
+        if cues.specialMoment == true then
+            specialMoment = true
+        end
     end
     if critOk then
         bucket.chatCriticalSuccess = (tonumber(bucket.chatCriticalSuccess) or 0) + 1
@@ -1078,11 +1135,161 @@ function StockPiler2.SeedMap.RecordHarvestChatCues(seedUid, cues, pending)
     if critFail then
         bucket.chatCriticalFailure = (tonumber(bucket.chatCriticalFailure) or 0) + 1
     end
+    if specialMoment then
+        bucket.specialMomentHits = (tonumber(bucket.specialMomentHits) or 0) + 1
+    end
     D("SeedMap harvest chat seedUid=" .. tostring(seedUid)
         .. " attempts=" .. tostring(bucket.harvestAttempts)
         .. " critOk=" .. tostring(critOk)
-        .. " critFail=" .. tostring(critFail))
-    return critOk, critFail
+        .. " critFail=" .. tostring(critFail)
+        .. " specialMoment=" .. tostring(specialMoment))
+    return critOk, critFail, specialMoment
+end
+
+--- Count a Special Moment once when chat missed but a non-primary plant was gained.
+function StockPiler2.SeedMap.NoteSpecialMomentHit(seedUid)
+    seedUid = tonumber(seedUid) or 0
+    if seedUid <= 0 then
+        return false
+    end
+    local bucket = EnsureGrowsBucket(seedUid)
+    if type(bucket) ~= "table" then
+        return false
+    end
+    bucket.specialMomentHits = (tonumber(bucket.specialMomentHits) or 0) + 1
+    return true
+end
+
+function StockPiler2.SeedMap.NotePlantAttempt(seedUid)
+    seedUid = tonumber(seedUid) or 0
+    if seedUid <= 0 then
+        return false
+    end
+    local bucket = EnsureGrowsBucket(seedUid)
+    if type(bucket) ~= "table" then
+        return false
+    end
+    bucket.plantAttempts = (tonumber(bucket.plantAttempts) or 0) + 1
+    return true
+end
+
+local SKILL_PENDING_TTL_SEC = 8
+local SKILL_RATE_MIN_ATTEMPTS = 5
+
+--- Arm Cult skill-up attribution for the next TRADE_SKILL_UPDATED (+Cult).
+function StockPiler2.SeedMap.ArmCultSkillPending(seedUid, reason)
+    seedUid = tonumber(seedUid) or 0
+    if seedUid <= 0 then
+        return false
+    end
+    local now = NowSec()
+    StockPiler2.SeedMap._pendingCultSkill = {
+        seedUid = seedUid,
+        reason = tostring(reason or "arm"),
+        untilTime = now + SKILL_PENDING_TTL_SEC,
+    }
+    return true
+end
+
+--- Flowering complete: arm each planted plot's seed (Cult skill often fires here).
+function StockPiler2.SeedMap.ArmCultSkillPendingFromPlots(reason)
+    local CA = StockPiler2.CultivatorAdapter
+    local n = CA and CA.NumPlots and CA.NumPlots() or 4
+    local armed = 0
+    local lastUid = 0
+    for plotNum = 1, n do
+        local plot = CA and CA.ReadPlot and CA.ReadPlot(plotNum) or nil
+        if type(plot) ~= "table" and StockPiler2.Grow and StockPiler2.Grow.CachedPlot then
+            plot = StockPiler2.Grow.CachedPlot(plotNum)
+        end
+        local seedUid = 0
+        if type(plot) == "table" then
+            seedUid = tonumber(plot.seedUid) or 0
+            if seedUid <= 0 and type(plot.seed) == "table" then
+                seedUid = tonumber(plot.seed.uniqueID) or 0
+            end
+        end
+        if seedUid > 0 then
+            lastUid = seedUid
+            armed = armed + 1
+        end
+    end
+    if lastUid > 0 then
+        -- Prefer a single pending seed (last non-empty plot); multi-plot ambiguity is rare.
+        StockPiler2.SeedMap.ArmCultSkillPending(lastUid, reason or "flowering")
+    end
+    return armed > 0
+end
+
+function StockPiler2.SeedMap.NoteCultSkillHit(seedUid)
+    seedUid = tonumber(seedUid) or 0
+    if seedUid <= 0 then
+        return false
+    end
+    local bucket = EnsureGrowsBucket(seedUid)
+    if type(bucket) ~= "table" then
+        return false
+    end
+    bucket.cultSkillHits = (tonumber(bucket.cultSkillHits) or 0) + 1
+    return true
+end
+
+--- Empirical Cult +1 rate per harvest attempt. nil rate if too few samples.
+function StockPiler2.SeedMap.CultSkillUpRate(seedUid)
+    local bucket = GrowsBucketStats(seedUid)
+    if type(bucket) ~= "table" then
+        return nil
+    end
+    local attempts = tonumber(bucket.harvestAttempts) or 0
+    local hits = tonumber(bucket.cultSkillHits) or 0
+    if attempts < SKILL_RATE_MIN_ATTEMPTS then
+        return nil, hits, attempts
+    end
+    return hits / attempts, hits, attempts
+end
+
+function StockPiler2.SeedMap.FormatCultSkillUpLine(seedUid)
+    seedUid = tonumber(seedUid) or 0
+    if seedUid <= 0 then
+        return nil
+    end
+    local Caps = StockPiler2.TradeSkillCaps
+    local level = Caps and Caps.CultivationLevel and Caps.CultivationLevel() or 0
+    if level <= 0 or level >= 200 then
+        return nil
+    end
+    local rate, hits, attempts = StockPiler2.SeedMap.CultSkillUpRate(seedUid)
+    if rate == nil then
+        return nil
+    end
+    return string.format(
+        "Cult skill-up ~%.0f%% (n=%d)",
+        rate * 100,
+        attempts
+    )
+end
+
+--- Consume pending Cult arm if TRADE_SKILL reported a small positive Cult delta.
+function StockPiler2.SeedMap.OnCultSkillDelta(deltaCult)
+    deltaCult = tonumber(deltaCult) or 0
+    if deltaCult <= 0 or deltaCult > 3 then
+        return false
+    end
+    local pending = StockPiler2.SeedMap._pendingCultSkill
+    if type(pending) ~= "table" then
+        return false
+    end
+    local now = NowSec()
+    if (tonumber(pending.untilTime) or 0) < now then
+        StockPiler2.SeedMap._pendingCultSkill = nil
+        return false
+    end
+    local seedUid = tonumber(pending.seedUid) or 0
+    StockPiler2.SeedMap._pendingCultSkill = nil
+    if seedUid <= 0 then
+        return false
+    end
+    return StockPiler2.SeedMap.NoteCultSkillHit(seedUid)
 end
 
 --- Critical Failure with no bag gain: clear locked harvest watch and record seed lost.
@@ -1109,6 +1316,9 @@ function StockPiler2.SeedMap.CompletePendingHarvestFromChat(cues)
     if StockPiler2.AutoGrow and StockPiler2.AutoGrow.MaybeNotifySeedLineLost then
         StockPiler2.AutoGrow.MaybeNotifySeedLineLost(seedUid, "critical_failure", plotNum)
     end
+    if StockPiler2.Grow and StockPiler2.Grow.NotifyHarvestOutcome then
+        StockPiler2.Grow.NotifyHarvestOutcome(plotNum, { critFail = true })
+    end
     return true
 end
 
@@ -1122,6 +1332,13 @@ function StockPiler2.SeedMap.ObserveRefine(plantUid, products, sampled)
     if type(entry) ~= "table" then
         return false
     end
+    entry.refineAttempts = (tonumber(entry.refineAttempts) or 0)
+    if sampled ~= false then
+        entry.refineAttempts = entry.refineAttempts + 1
+    end
+    if type(entry.seedOut) ~= "table" then
+        entry.seedOut = {}
+    end
     local plantData = LookupItemData(plantUid)
     if type(plantData) == "table" then
         UpsertItem(plantData, "mat")
@@ -1134,13 +1351,15 @@ function StockPiler2.SeedMap.ObserveRefine(plantUid, products, sampled)
             local item = LookupItemData(uid)
             local kind = ProductKindForItem(item)
             if kind == "seed" or kind == "spore" then
-                local seedName = string.lower(ToNarrow(item and item.name))
-                if string.find(seedName, "packet", 1, true) then
-                    -- Vendor packets are not convert output.
+                if StockPiler2.SeedMap.IsSeedPacketItem(item) then
+                    -- Vendor packets are not convert output / refine seedUid.
                 elseif StockPiler2.SeedMap.PairLooksLikePlantAndSeed(plantUid, uid) then
                     entry.seedUid = uid
                     entry.seedKind = kind
                     changed = true
+                    if RecordStat(entry.seedOut, uid, count, sampled ~= false) then
+                        changed = true
+                    end
                     if type(item) == "table" then
                         UpsertItem(item, kind)
                     end
@@ -1173,7 +1392,7 @@ function StockPiler2.SeedMap.ObserveRefine(plantUid, products, sampled)
     return changed
 end
 
-function StockPiler2.SeedMap.NoteKnownHarvestPair(seedUid, plantUid, forceRelated)
+function StockPiler2.SeedMap.NoteKnownHarvestPair(seedUid, plantUid, forceRelated, plotTrusted)
     seedUid = tonumber(seedUid) or 0
     plantUid = tonumber(plantUid) or 0
     if seedUid <= 0 or plantUid <= 0 then
@@ -1185,7 +1404,8 @@ function StockPiler2.SeedMap.NoteKnownHarvestPair(seedUid, plantUid, forceRelate
         { [plantUid] = 0 },
         false,
         forceRelated == true,
-        0
+        0,
+        plotTrusted == true
     )
 end
 
@@ -1264,6 +1484,158 @@ function StockPiler2.SeedMap.ExpectedHarvestYield(seedUid, plantUid)
         return bestAvg, bestSamples
     end
     return 1, 0
+end
+
+--- Fraction of harvests that did not Critical-Fail (seed survived). nil if no samples.
+function StockPiler2.SeedMap.HarvestSurviveRate(seedUid)
+    local bucket = GrowsBucketStats(seedUid)
+    if type(bucket) ~= "table" then
+        return nil
+    end
+    local attempts = tonumber(bucket.harvestAttempts) or 0
+    if attempts <= 0 then
+        return nil
+    end
+    local fails = tonumber(bucket.chatCriticalFailure) or 0
+    if fails < 0 then
+        fails = 0
+    end
+    if fails > attempts then
+        fails = attempts
+    end
+    return (attempts - fails) / attempts
+end
+
+function StockPiler2.SeedMap.HarvestCritSuccessRate(seedUid)
+    local bucket = GrowsBucketStats(seedUid)
+    if type(bucket) ~= "table" then
+        return nil
+    end
+    local attempts = tonumber(bucket.harvestAttempts) or 0
+    if attempts <= 0 then
+        return nil
+    end
+    local hits = tonumber(bucket.chatCriticalSuccess) or 0
+    return hits / attempts
+end
+
+function StockPiler2.SeedMap.SpecialMomentRate(seedUid)
+    local bucket = GrowsBucketStats(seedUid)
+    if type(bucket) ~= "table" then
+        return nil
+    end
+    local attempts = tonumber(bucket.harvestAttempts) or 0
+    if attempts <= 0 then
+        return nil
+    end
+    local hits = tonumber(bucket.specialMomentHits) or 0
+    return hits / attempts
+end
+
+--- Seeds to buy/plant so expected surviving harvests yield plantsNeeded of plantUid.
+--- Uses ObservedHarvestYield × survive rate; defaults yield=1, survive=1 when unknown.
+function StockPiler2.SeedMap.SeedsNeededForPlants(seedUid, plantUid, plantsNeeded)
+    seedUid = tonumber(seedUid) or 0
+    plantUid = tonumber(plantUid) or 0
+    plantsNeeded = tonumber(plantsNeeded) or 0
+    if seedUid <= 0 or plantsNeeded <= 0 then
+        return 0
+    end
+    local yield = 1
+    if StockPiler2.SeedMap.ExpectedHarvestYield then
+        -- ExpectedHarvestYield returns (avg, samples); only take the first value.
+        local yieldAvg = StockPiler2.SeedMap.ExpectedHarvestYield(seedUid, plantUid)
+        yield = tonumber(yieldAvg) or 1
+    end
+    if yield < 0.01 then
+        yield = 0.01
+    end
+    local survive = StockPiler2.SeedMap.HarvestSurviveRate(seedUid)
+    if survive == nil then
+        survive = 1
+    elseif survive < 0.01 then
+        survive = 0.01
+    end
+    local perSeed = yield * survive
+    if perSeed < 0.01 then
+        perSeed = 0.01
+    end
+    return math.ceil(plantsNeeded / perSeed)
+end
+
+function StockPiler2.SeedMap.RefineSeedAvg(plantUid)
+    plantUid = tonumber(plantUid) or 0
+    if plantUid <= 0 then
+        return 0, 0
+    end
+    local refines = AccountTable("refines")
+    local entry = refines[tostring(plantUid)]
+    if type(entry) ~= "table" or type(entry.seedOut) ~= "table" then
+        return 0, 0
+    end
+    local seedUid = tonumber(entry.seedUid) or 0
+    local row = seedUid > 0 and entry.seedOut[tostring(seedUid)] or nil
+    if type(row) ~= "table" then
+        for _, r in pairs(entry.seedOut) do
+            if type(r) == "table" then
+                row = r
+                break
+            end
+        end
+    end
+    if type(row) ~= "table" then
+        return 0, 0
+    end
+    local samples = tonumber(row.samples) or 0
+    if samples <= 0 then
+        return 0, 0
+    end
+    return (tonumber(row.countSum) or 0) / samples, samples
+end
+
+function StockPiler2.SeedMap.FormatHarvestRateLine(seedUid, plantUid)
+    seedUid = tonumber(seedUid) or 0
+    if seedUid <= 0 then
+        return nil
+    end
+    local bucket = GrowsBucketStats(seedUid)
+    if type(bucket) ~= "table" then
+        return nil
+    end
+    local attempts = tonumber(bucket.harvestAttempts) or 0
+    if attempts <= 0 then
+        return nil
+    end
+    local survive = StockPiler2.SeedMap.HarvestSurviveRate(seedUid) or 1
+    local sm = StockPiler2.SeedMap.SpecialMomentRate(seedUid) or 0
+    local yield = 1
+    if StockPiler2.SeedMap.ExpectedHarvestYield then
+        -- ExpectedHarvestYield returns (avg, samples); only take the first value.
+        local yieldAvg = StockPiler2.SeedMap.ExpectedHarvestYield(seedUid, plantUid)
+        yield = tonumber(yieldAvg) or 1
+    end
+    return string.format(
+        "Harvest: %.0f%% survive, yield %.1f, SM %.0f%% (n=%d)",
+        survive * 100,
+        yield,
+        sm * 100,
+        attempts
+    )
+end
+
+--- Narrow-string harvest + optional Cult skill-up lines for tooltips.
+--- Returns list of strings (may be empty).
+function StockPiler2.SeedMap.FormatHarvestTooltipRateLines(seedUid, plantUid)
+    local lines = {}
+    local harvest = StockPiler2.SeedMap.FormatHarvestRateLine(seedUid, plantUid)
+    if type(harvest) == "string" and harvest ~= "" then
+        lines[#lines + 1] = harvest
+    end
+    local cult = StockPiler2.SeedMap.FormatCultSkillUpLine(seedUid)
+    if type(cult) == "string" and cult ~= "" then
+        lines[#lines + 1] = cult
+    end
+    return lines
 end
 
 function StockPiler2.SeedMap.RefineProducts(plantUid)
@@ -2507,8 +2879,19 @@ function StockPiler2.SeedMap.TryCompletePendingHarvest(force)
     end
     local now = NowSec()
     pending.lastCompleteAttempt = now
-    pending.lootDirty = false
-    return StockPiler2.SeedMap.MaybeCompletePendingHarvest()
+    -- Perf: do NOT clear lootDirty before MaybeComplete. Early force=true often
+    -- returns false (loot still arriving); clearing dirty forced a wait for another
+    -- inventory event and pushed successful Complete onto the PlanRebuild fire frame
+    -- (LearnBridge+WarmHave fusion). Keep dirty so throttle can retry. Only clear
+    -- after a successful complete. Do not revert to clear-before-MaybeComplete.
+    local ok = StockPiler2.SeedMap.MaybeCompletePendingHarvest() == true
+    if ok then
+        pending = StockPiler2.SeedMap._pendingHarvest
+        if type(pending) == "table" then
+            pending.lootDirty = false
+        end
+    end
+    return ok
 end
 
 function StockPiler2.SeedMap.MaybeCompletePendingHarvest()
@@ -2563,7 +2946,9 @@ function StockPiler2.SeedMap.MaybeCompletePendingHarvest()
     local bestRefinableDelta = 0
     for uid, change in pairs(deltas) do
         local item = LookupItemData(uid)
-        if not IsSeedOrSporeItem(item) then
+        if not IsSeedOrSporeItem(item)
+            and IsEligibleHarvestProductUid(uid, seedUid)
+        then
             local linked = false
             if seedUid > 0 then
                 local seedUids = StockPiler2.SeedMap.GetSeedUidsForPlant(uid)
@@ -2678,7 +3063,43 @@ function StockPiler2.SeedMap.MaybeCompletePendingHarvest()
         if StockPiler2.CraftChat and StockPiler2.CraftChat.TakeCues then
             chatCues = StockPiler2.CraftChat.TakeCues()
         end
-        local critOk, critFail = StockPiler2.SeedMap.RecordHarvestChatCues(seedUid, chatCues, pending)
+        local critOk, critFail, specialMoment = StockPiler2.SeedMap.RecordHarvestChatCues(
+            seedUid,
+            chatCues,
+            pending
+        )
+        -- Main growable plant only (skip resin / vials / other non-growables).
+        if StockPiler2.Grow and StockPiler2.Grow.NotifyHarvestOutcome then
+            local outName = nil
+            local outCount = 0
+            if type(chatCues) == "table" and chatCues.harvestedName ~= nil then
+                local chatUid = 0
+                if StockPiler2.SeedMap.FindPlantUidByHarvestName then
+                    chatUid = tonumber(StockPiler2.SeedMap.FindPlantUidByHarvestName(chatCues.harvestedName)) or 0
+                end
+                -- Use chat name when unresolved, or when the resolved uid is growable.
+                if chatUid <= 0 or IsEligibleHarvestProductUid(chatUid, seedUid) then
+                    outName = chatCues.harvestedName
+                    outCount = tonumber(chatCues.harvestedCount) or 0
+                end
+            end
+            if (outName == nil or outName == L"" or outName == "")
+                and primaryUid > 0
+                and IsEligibleHarvestProductUid(primaryUid, seedUid)
+            then
+                local primaryItem = LookupItemData(primaryUid)
+                outName = primaryItem and primaryItem.name or nil
+                outCount = primaryDelta
+            end
+            if critFail == true then
+                StockPiler2.Grow.NotifyHarvestOutcome(plotNum, { critFail = true })
+            elseif outName ~= nil and outName ~= L"" and outName ~= "" then
+                StockPiler2.Grow.NotifyHarvestOutcome(plotNum, {
+                    name = outName,
+                    count = outCount,
+                })
+            end
+        end
         local chatPlantUids = {}
         if type(chatCues) == "table" and chatCues.harvestedName then
             local chatUid = StockPiler2.SeedMap.FindPlantUidByHarvestName(chatCues.harvestedName)
@@ -2694,6 +3115,7 @@ function StockPiler2.SeedMap.MaybeCompletePendingHarvest()
                 relatedToPlantUid = primaryUid,
                 chatPlantUids = chatPlantUids,
                 allowExisting = true,
+                plotTrusted = trusted == true,
             }) then
                 allowedProducts[uid] = change
             else
@@ -2703,9 +3125,20 @@ function StockPiler2.SeedMap.MaybeCompletePendingHarvest()
                     .. " plant=" .. ToNarrow(item and item.name or uid))
             end
         end
+        -- Chat missed Special Moment but a non-primary plant still arrived.
+        if specialMoment ~= true and primaryUid > 0 then
+            for uid, _ in pairs(allowedProducts) do
+                uid = tonumber(uid) or 0
+                if uid > 0 and uid ~= primaryUid then
+                    StockPiler2.SeedMap.NoteSpecialMomentHit(seedUid)
+                    specialMoment = true
+                    break
+                end
+            end
+        end
         if trusted then
-            -- Plot seed is known; still only record gated cultivation products.
-            StockPiler2.SeedMap.ObserveHarvest(seedUid, allowedProducts, true, true, primaryUid)
+            -- Plot seed is known; record all eligible crafting plants (base + Special Moment).
+            StockPiler2.SeedMap.ObserveHarvest(seedUid, allowedProducts, true, true, primaryUid, true)
             local learnedAny = false
             for uid, _ in pairs(allowedProducts) do
                 uid = tonumber(uid) or 0
@@ -2718,7 +3151,8 @@ function StockPiler2.SeedMap.MaybeCompletePendingHarvest()
                         seedUid,
                         "harvest",
                         true,
-                        primaryUid
+                        primaryUid,
+                        true
                     )
                     if learned then
                         learnedAny = true
@@ -3005,26 +3439,11 @@ function StockPiler2.SeedMap.FindPlantUidForSpec(spec)
     end
     local bestUid = 0
 
-    -- Bags may also hold butcher substitutes with the same spec (e.g. Zoic Gore
-    -- vs Goldweed). Prefer refinable plants; also accept Liniment harvest products.
-    if StockPiler2.Inventory and StockPiler2.Inventory.ForEachItem and MS.ProductMatches then
-        StockPiler2.Inventory.ForEachItem(function(item)
-            if type(item) == "table" and MS.ProductMatches(item, spec) and IsGrowProducerItemForSpec(item) then
-                local uid = tonumber(item.uniqueID) or 0
-                if uid > 0 then
-                    bestUid = uid
-                end
-            end
-        end)
-        if bestUid > 0 then
-            PlanCacheSet("plantUid", cacheKey, bestUid)
-            return bestUid
-        end
-    end
-
-    local cached = StockPiler2.SeedMap.CachedPlantUidForSpec and StockPiler2.SeedMap.CachedPlantUidForSpec(spec) or 0
-    if cached > 0 then
-        return cached
+    -- Cheap paths first: grows/Items ProductKey (EFFECT-less bag plants fail ProductMatches).
+    local fromCache = StockPiler2.SeedMap.CachedPlantUidForSpec and StockPiler2.SeedMap.CachedPlantUidForSpec(spec) or 0
+    if fromCache > 0 then
+        PlanCacheSet("plantUid", cacheKey, fromCache)
+        return fromCache
     end
 
     local function considerUid(uid, role)
@@ -3116,8 +3535,60 @@ function StockPiler2.SeedMap.FindPlantUidForSpec(spec)
             end
         end
     end
+    if bestUid > 0 then
+        PlanCacheSet("plantUid", cacheKey, bestUid)
+        return bestUid
+    end
+
+    -- Bag walk last: live refinable plant vs butcher substitute when learned data is empty.
+    if StockPiler2.Inventory and StockPiler2.Inventory.ForEachItem and MS.ProductMatches then
+        StockPiler2.Inventory.ForEachItem(function(item)
+            if type(item) == "table" and MS.ProductMatches(item, spec) and IsGrowProducerItemForSpec(item) then
+                local uid = tonumber(item.uniqueID) or 0
+                if uid > 0 then
+                    bestUid = uid
+                end
+            end
+        end)
+    end
     PlanCacheSet("plantUid", cacheKey, bestUid)
     return bestUid
+end
+
+--- Have/WarmHave only: Cached + Items ProductKey. Never bag-walks (see FindPlantUidForSpec).
+function StockPiler2.SeedMap.FindPlantUidForHave(spec)
+    if type(spec) ~= "table" or not StockPiler2.MaterialSpec then
+        return 0
+    end
+    local MS = StockPiler2.MaterialSpec
+    if StockPiler2.SeedMap.CachedPlantUidForSpec then
+        local cached = tonumber(StockPiler2.SeedMap.CachedPlantUidForSpec(spec)) or 0
+        if cached > 0 then
+            return cached
+        end
+    end
+    local specKey = (MS.ProductKey and MS.ProductKey(spec)) or (MS.Key and MS.Key(spec)) or ""
+    if specKey == "" or not StockPiler2.Items or not StockPiler2.Items.ToSpec then
+        return 0
+    end
+    local items = AccountTable("items")
+    for uidKey, row in pairs(items) do
+        if type(row) == "table" and row.kind ~= "seed" and row.kind ~= "spore" and row.kind ~= "resin" then
+            local uid = tonumber(row.uniqueID) or tonumber(uidKey) or 0
+            if uid > 0 then
+                local itemSpec = StockPiler2.Items.ToSpec(uid)
+                if type(itemSpec) == "table" then
+                    local itemKey = (MS.ProductKey and MS.ProductKey(itemSpec)) or MS.Key(itemSpec)
+                    if itemKey == specKey
+                        and IsGrowProducerItemForSpec(StockPiler2.Items.AsItemData(uid) or row)
+                    then
+                        return uid
+                    end
+                end
+            end
+        end
+    end
+    return 0
 end
 
 function StockPiler2.SeedMap.ResolveSeedForPlantUid(plantUid, spec)
@@ -3905,6 +4376,7 @@ function StockPiler2.SeedMap.ForgetUnrelatedLearnedMaps()
                 dropped = dropped + 1
                 D("SeedMap forgot resin grow seedUid=" .. tostring(seedUid))
             else
+                local seedIsPacket = StockPiler2.SeedMap.IsSeedPacketUid(seedUid)
                 for plantKey, row in pairs(plants) do
                     if type(row) == "table" then
                         local plantUid = tonumber(plantKey) or 0
@@ -3912,7 +4384,9 @@ function StockPiler2.SeedMap.ForgetUnrelatedLearnedMaps()
                         local resinPlant = StockPiler2.SeedMap.IsResinUid and StockPiler2.SeedMap.IsResinUid(plantUid)
                         local eligible = IsEligibleHarvestProductUid(plantUid, seedUid)
                         local drop = resinPlant or not eligible
+                        -- Packet→standard plant (Bitter→Musty) is name-unrelated by design; keep.
                         if not drop
+                            and not seedIsPacket
                             and type(plantData) == "table"
                             and type(seedData) == "table"
                             and not SeedPlantPairRelated(seedData, plantData)
@@ -3951,6 +4425,13 @@ function StockPiler2.SeedMap.ForgetUnrelatedLearnedMaps()
                     dropped = dropped + 1
                     D("SeedMap forgot unrelated refine plantUid=" .. tostring(plantUid)
                         .. " seedUid=" .. tostring(seedUid))
+                elseif StockPiler2.SeedMap.IsSeedPacketUid(seedUid) then
+                    -- Packets are never convert output; clear if somehow stored as seedUid.
+                    entry.seedUid = 0
+                    entry.seedKind = nil
+                    dropped = dropped + 1
+                    D("SeedMap forgot packet refine seedUid=" .. tostring(seedUid)
+                        .. " plantUid=" .. tostring(plantUid))
                 elseif type(plantData) == "table" and type(seedData) == "table"
                     and not SeedPlantPairRelated(seedData, plantData)
                 then
@@ -4106,6 +4587,164 @@ local function DumpRefinesToChat(chatMax)
             .. L" more written to uilog.log")
     end
     return #rows
+end
+
+function StockPiler2.SeedMap.DumpCraftCycleStats(emit)
+    emit = type(emit) == "function" and emit or function(msg)
+        if StockPiler2.Debug and StockPiler2.Debug.Print then
+            StockPiler2.Debug.Print(msg)
+        elseif StockPiler2.D then
+            StockPiler2.D(tostring(msg))
+        end
+    end
+    emit("=== StockPiler2 craft-cycle stats ===")
+
+    local grows = AccountTable("grows")
+    local growRows = {}
+    for seedKey, bucket in pairs(grows) do
+        if type(bucket) == "table" then
+            local seedUid = tonumber(seedKey) or 0
+            local attempts = tonumber(bucket.harvestAttempts) or 0
+            local plants = tonumber(bucket.plantAttempts) or 0
+            if attempts > 0 or plants > 0 then
+                growRows[#growRows + 1] = {
+                    seedUid = seedUid,
+                    name = OutcomeItemName(seedUid),
+                    plantAttempts = plants,
+                    harvestAttempts = attempts,
+                    critOk = tonumber(bucket.chatCriticalSuccess) or 0,
+                    critFail = tonumber(bucket.chatCriticalFailure) or 0,
+                    sm = tonumber(bucket.specialMomentHits) or 0,
+                    cultHits = tonumber(bucket.cultSkillHits) or 0,
+                    survive = StockPiler2.SeedMap.HarvestSurviveRate(seedUid),
+                    smRate = StockPiler2.SeedMap.SpecialMomentRate(seedUid),
+                    cultRate = StockPiler2.SeedMap.CultSkillUpRate(seedUid),
+                    yield = select(1, StockPiler2.SeedMap.ExpectedHarvestYield(seedUid, 0)),
+                }
+            end
+        end
+    end
+    table.sort(growRows, function(a, b)
+        if (a.harvestAttempts or 0) ~= (b.harvestAttempts or 0) then
+            return (a.harvestAttempts or 0) > (b.harvestAttempts or 0)
+        end
+        return tostring(a.name) < tostring(b.name)
+    end)
+    emit("--- grows (seed) ---")
+    if #growRows == 0 then
+        emit("  (none with plant/harvest attempts)")
+    end
+    local growMax = math.min(#growRows, 40)
+    for i = 1, growMax do
+        local r = growRows[i]
+        emit(string.format(
+            "  %s uid=%d plant=%d harvest=%d survive=%.0f%% critOk=%d critFail=%d SM=%.0f%% cult=%.0f%% yield=%.2f",
+            tostring(r.name),
+            r.seedUid,
+            r.plantAttempts,
+            r.harvestAttempts,
+            (r.survive or 1) * 100,
+            r.critOk,
+            r.critFail,
+            (r.smRate or 0) * 100,
+            (r.cultRate or 0) * 100,
+            tonumber(r.yield) or 1
+        ))
+    end
+    if #growRows > growMax then
+        emit("  ... +" .. tostring(#growRows - growMax) .. " more")
+    end
+
+    local refines = AccountTable("refines")
+    local refineRows = {}
+    for plantKey, entry in pairs(refines) do
+        if type(entry) == "table" then
+            local plantUid = tonumber(plantKey) or 0
+            local attempts = tonumber(entry.refineAttempts) or 0
+            if attempts > 0 or (tonumber(entry.seedUid) or 0) > 0 then
+                local seedAvg, seedSamples = StockPiler2.SeedMap.RefineSeedAvg(plantUid)
+                refineRows[#refineRows + 1] = {
+                    plantUid = plantUid,
+                    name = OutcomeItemName(plantUid),
+                    attempts = attempts,
+                    seedUid = tonumber(entry.seedUid) or 0,
+                    seedAvg = seedAvg,
+                    seedSamples = seedSamples,
+                }
+            end
+        end
+    end
+    table.sort(refineRows, function(a, b)
+        if (a.attempts or 0) ~= (b.attempts or 0) then
+            return (a.attempts or 0) > (b.attempts or 0)
+        end
+        return tostring(a.name) < tostring(b.name)
+    end)
+    emit("--- refines (plant) ---")
+    if #refineRows == 0 then
+        emit("  (none)")
+    end
+    local refineMax = math.min(#refineRows, 40)
+    for i = 1, refineMax do
+        local r = refineRows[i]
+        emit(string.format(
+            "  %s uid=%d attempts=%d seedUid=%d seedAvg=%.2f (n=%d)",
+            tostring(r.name),
+            r.plantUid,
+            r.attempts,
+            r.seedUid,
+            tonumber(r.seedAvg) or 0,
+            tonumber(r.seedSamples) or 0
+        ))
+    end
+
+    local RS = StockPiler2.RecipeSpec
+    local recipes = AccountTable("recipes")
+    local brewRows = {}
+    if type(recipes) == "table" then
+        for key, recipe in pairs(recipes) do
+            if type(recipe) == "table" then
+                local attempts = tonumber(recipe.brewAttempts) or 0
+                if attempts > 0 then
+                    local rate = RS and RS.RecipeSuccessRate and RS.RecipeSuccessRate(recipe)
+                    local apoRate = RS and RS.ApoSkillUpRate and RS.ApoSkillUpRate(recipe)
+                    brewRows[#brewRows + 1] = {
+                        key = tostring(key),
+                        attempts = attempts,
+                        ok = tonumber(recipe.brewSuccesses) or 0,
+                        fail = tonumber(recipe.brewFailures) or 0,
+                        crit = tonumber(recipe.brewCrits) or 0,
+                        potent = tonumber(recipe.brewSuperCrits) or 0,
+                        apoHits = tonumber(recipe.apoSkillHits) or 0,
+                        rate = rate,
+                        apoRate = apoRate,
+                    }
+                end
+            end
+        end
+    end
+    table.sort(brewRows, function(a, b)
+        return (a.attempts or 0) > (b.attempts or 0)
+    end)
+    emit("--- brew (recipes) ---")
+    if #brewRows == 0 then
+        emit("  (none)")
+    end
+    local brewMax = math.min(#brewRows, 25)
+    for i = 1, brewMax do
+        local r = brewRows[i]
+        emit(string.format(
+            "  %s attempts=%d ok=%d fail=%d crit=%d potent=%d rate=%.0f%% apo=%.0f%%",
+            r.key,
+            r.attempts,
+            r.ok,
+            r.fail,
+            r.crit,
+            r.potent,
+            (r.rate or 0) * 100,
+            (r.apoRate or 0) * 100
+        ))
+    end
 end
 
 function StockPiler2.SeedMap.DumpToChat()
