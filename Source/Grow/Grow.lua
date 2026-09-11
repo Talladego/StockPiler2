@@ -15,6 +15,8 @@ end
 Grow._pendingPlant = Grow._pendingPlant or {}
 Grow._pendingPlantAt = Grow._pendingPlantAt or {}
 Grow._pendingSeedUid = Grow._pendingSeedUid or {}
+Grow._pendingPlantMeta = Grow._pendingPlantMeta or {}
+Grow._plantFailCooldownUntil = Grow._plantFailCooldownUntil or {}
 Grow._pendingAdditive = Grow._pendingAdditive or {}
 Grow._pendingAdditiveAt = Grow._pendingAdditiveAt or {}
 Grow._additiveCursor = Grow._additiveCursor or 1
@@ -41,6 +43,8 @@ Grow._footerHarvestClickable = nil
 Grow._skillSkipByUid = Grow._skillSkipByUid or {}
 Grow._skillSkipSnapGen = -1
 Grow.PENDING_TTL_SEC = 10
+Grow.PENDING_EMPTY_GRACE_SEC = 1.0
+Grow.UNCONFIRMED_PLANT_COOLDOWN_SEC = 6.0
 Grow.CHAT_HARVEST_WAKE_DEBOUNCE_SEC = 1.5
 Grow.HARVEST_FORCE_DEBOUNCE_SEC = 1.5
 -- Quiet after plot-empty wake so replant does not stack on the engine harvest hitch.
@@ -164,6 +168,13 @@ local function LogOnce(key, msg)
     end
 end
 
+local function NowSec()
+    if type(GetGameTime) == "function" then
+        return tonumber(GetGameTime()) or 0
+    end
+    return 0
+end
+
 local function NotifyChat(msg)
     if StockPiler2.Debug and StockPiler2.Debug.Notify then
         StockPiler2.Debug.Notify(msg)
@@ -269,6 +280,14 @@ function Grow.IsPlotEmpty(plotNum)
     end
     if (tonumber(Grow._pendingPlant[plotNum]) or 0) > 0 then
         return false
+    end
+    local coolUntil = tonumber(Grow._plantFailCooldownUntil[plotNum]) or 0
+    if coolUntil > 0 then
+        local now = NowSec()
+        if now > 0 and now < coolUntil then
+            return false
+        end
+        Grow._plantFailCooldownUntil[plotNum] = nil
     end
     local CA = StockPiler2.CultivatorAdapter
     if CA and CA.IsPlotLocked and CA.IsPlotLocked(plotNum) then
@@ -467,14 +486,8 @@ local function AnyBufferShort(lines)
     return false
 end
 
-local function BufferFlagsCacheKey()
-    local snapGen = 0
-    if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
-        snapGen = tonumber(StockPiler2.Inventory.GetSnapGen()) or 0
-    end
-    -- Perf: planGen (plant/empty/lock) only for garden — stage-tick gardenGen used to
-    -- rebuild BufferFlags → CollectAutoGrowSeedLines under Tick every growth stage.
-    -- snapGen stays: pending/short are inventory-sensitive. Do not switch garden to GetGen().
+local function BufferFlagsStructuralKey()
+    -- garden / watch / buffer / outstanding — no snapGen (mid-refine deliveries).
     local gardenGen = 0
     if StockPiler2.Garden then
         if StockPiler2.Garden.GetPlanGen then
@@ -498,11 +511,34 @@ local function BufferFlagsCacheKey()
             end
         end
     end
-    return tostring(snapGen) .. ":" .. tostring(gardenGen) .. ":" .. tostring(watchGen)
+    return tostring(gardenGen) .. ":" .. tostring(watchGen)
         .. ":" .. tostring(buffer) .. ":" .. tostring(outstanding)
 end
 
+local function BufferFlagsCacheKey()
+    local snapGen = 0
+    if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
+        snapGen = tonumber(StockPiler2.Inventory.GetSnapGen()) or 0
+    end
+    -- Perf: planGen (plant/empty/lock) only for garden — stage-tick gardenGen used to
+    -- rebuild BufferFlags → CollectAutoGrowSeedLines under Tick every growth stage.
+    -- snapGen stays when garden has empties: pending/short are inventory-sensitive.
+    -- Do not switch garden to GetGen().
+    return tostring(snapGen) .. ":" .. BufferFlagsStructuralKey()
+end
+
 local function EnsureBufferFlagsCached()
+    -- 0.4.125: while refine outstanding and garden full, reuse flags across snapGen
+    -- bumps (seed deliveries). Rebuild when garden planGen / watch / outstanding change.
+    local RP = StockPiler2.RefinePipeline
+    local hasOut = RP and RP.HasOutstanding and RP.HasOutstanding() == true
+    local fullGarden = not (Grow.HasEmptyPlot and Grow.HasEmptyPlot() == true)
+    if hasOut and fullGarden and type(Grow._bufferFlags) == "table" then
+        local structKey = BufferFlagsStructuralKey()
+        if Grow._bufferFlagsStructKey == structKey then
+            return Grow._bufferFlags
+        end
+    end
     local key = BufferFlagsCacheKey()
     if Grow._bufferFlagsKey == key and type(Grow._bufferFlags) == "table" then
         return Grow._bufferFlags
@@ -518,6 +554,7 @@ local function EnsureBufferFlagsCached()
         short = AnyBufferShort(lines),
     }
     Grow._bufferFlagsKey = key
+    Grow._bufferFlagsStructKey = BufferFlagsStructuralKey()
     Grow._bufferFlags = flags
     if Perf and Perf.End then
         Perf.End("Grow.BufferFlags")
@@ -1070,13 +1107,52 @@ function Grow.ClearPendingPlot(plotNum, opts)
     Grow._pendingPlant[plotNum] = 0
     Grow._pendingPlantAt[plotNum] = nil
     Grow._pendingSeedUid[plotNum] = nil
+    Grow._pendingPlantMeta[plotNum] = nil
 end
 
-local function NowSec()
-    if type(GetGameTime) == "function" then
-        return tonumber(GetGameTime()) or 0
+local function ArmUnconfirmedPlantCooldown(plotNum)
+    plotNum = tonumber(plotNum) or 0
+    if plotNum <= 0 then
+        return
     end
-    return 0
+    local sec = tonumber(Grow.UNCONFIRMED_PLANT_COOLDOWN_SEC) or 6.0
+    local untilT = NowSec() + sec
+    local cur = tonumber(Grow._plantFailCooldownUntil[plotNum]) or 0
+    if untilT > cur then
+        Grow._plantFailCooldownUntil[plotNum] = untilT
+    end
+    LogOnce(
+        "plant-unconfirmed-" .. tostring(plotNum),
+        "plant-unconfirmed P" .. tostring(plotNum) .. " cooldown=" .. tostring(sec) .. "s"
+    )
+end
+
+local function NotifyPlantConfirmed(plotNum)
+    plotNum = tonumber(plotNum) or 0
+    local meta = Grow._pendingPlantMeta[plotNum]
+    if type(meta) ~= "table" then
+        return
+    end
+    -- Once per pending plant (optimistic PlantSeed chat + soil-confirm path).
+    if meta.chatted == true then
+        return
+    end
+    meta.chatted = true
+    local reasonRaw = tostring(meta.reason or "potion_stock")
+    local reasonKey = PLANT_REASON_LABEL[reasonRaw]
+    local reasonLabel = reasonKey and T(reasonKey) or towstring(reasonRaw)
+    local seedName = meta.name
+    if seedName == nil or seedName == L"" or seedName == "" then
+        seedName = T("grow.seed_fallback")
+    end
+    NotifyChat(
+        T("grow.planted", {
+            plot = tostring(plotNum),
+            name = seedName,
+            reason = reasonLabel,
+        })
+    )
+    LogGrow("plant-chat P" .. tostring(plotNum))
 end
 
 local function ApplyPendingClearForPlot(plotNum, plot)
@@ -1088,17 +1164,21 @@ local function ApplyPendingClearForPlot(plotNum, plot)
         return
     end
     if Grow.NormalizeStage(plot.stage) ~= Grow.StageEmpty() then
-        -- Plant confirmed in soil: bag already lost the seed. Release commit so
-        -- the next PickPlantCandidate does not do seedHave - committed against
-        -- an already-decremented bag (that stole plots to surplus seeds).
+        -- Plant confirmed in soil: chat once (no-op if already printed on PlantSeed),
+        -- then release commit so the next PickPlantCandidate does not do seedHave -
+        -- committed against an already-decremented bag.
+        NotifyPlantConfirmed(plotNum)
         Grow.ClearPendingPlot(plotNum, { rollbackCommit = true })
+        Grow.MaybeCompleteFillWave()
         return
     end
     -- Empty while pending: harvest/fail. Grace so post-plant empty frames don't clear.
     local at = tonumber(Grow._pendingPlantAt[plotNum]) or 0
     local now = NowSec()
-    if at > 0 and (now - at) >= 1.0 then
+    local grace = tonumber(Grow.PENDING_EMPTY_GRACE_SEC) or 1.0
+    if at > 0 and (now - at) >= grace then
         Grow.ClearPendingPlot(plotNum, { rollbackCommit = true })
+        ArmUnconfirmedPlantCooldown(plotNum)
         Grow._plantQueueDirty = true
         Grow._cachedPlantJob = nil
         Grow._jobProbed = false
@@ -1167,6 +1247,7 @@ function Grow.ExpireStalePending()
             if empty and at > 0 and (now - at) >= ttl then
                 LogGrow("pending TTL clear P" .. tostring(plotNum))
                 Grow.ClearPendingPlot(plotNum, { rollbackCommit = true })
+                ArmUnconfirmedPlantCooldown(plotNum)
                 Grow._plantQueueDirty = true
                 Grow._cachedPlantJob = nil
                 Grow._jobProbed = false
@@ -1194,6 +1275,7 @@ function Grow.InvalidatePlantQueue(opts)
         Grow._pendingPlant = {}
         Grow._pendingPlantAt = {}
         Grow._pendingSeedUid = {}
+        Grow._pendingPlantMeta = {}
         Grow._pendingAdditive = {}
         Grow._pendingAdditiveAt = {}
         Grow._additiveDirty = false
@@ -1387,11 +1469,40 @@ function Grow.GetPlantJob()
     return AdjustJobForCommitted(job)
 end
 
+--- True when a plant op is still outstanding on any plot.
+function Grow.HasPendingPlant()
+    local pending = Grow._pendingPlant
+    if type(pending) ~= "table" then
+        return false
+    end
+    for _, n in pairs(pending) do
+        if (tonumber(n) or 0) > 0 then
+            return true
+        end
+    end
+    return false
+end
+
 function Grow.OnFillWaveComplete()
-    Grow.InvalidatePlantQueue({ force = true })
+    -- 0.4.125: keep PlanSnapshot — last-plant used to InvalidatePlanCache and fuse a
+    -- PlanRebuild into the seed-buffer refine hitch. Job/commit wipe still runs.
+    Grow.InvalidatePlantQueue({ force = true, keepPlanCache = true })
     if StockPiler2.Refine and StockPiler2.Refine.ClearPostHarvestState then
         StockPiler2.Refine.ClearPostHarvestState()
     end
+end
+
+--- Wave end only when soil is full and no plant is still awaiting confirm.
+--- HasEmptyPlot treats pending as filled, so the last TryPlant must not wipe
+--- pending meta before soil confirm (that skipped Plot-N planted chat).
+function Grow.MaybeCompleteFillWave()
+    if Grow.HasEmptyPlot and Grow.HasEmptyPlot() == true then
+        return
+    end
+    if Grow.HasPendingPlant() == true then
+        return
+    end
+    Grow.OnFillWaveComplete()
 end
 
 function Grow.OnDemandChanged()
@@ -1481,20 +1592,6 @@ function Grow.MaybeNotifyHarvestReady()
     else
         ClearNotifyChatOnce("harvest-ready")
     end
-end
-
---- True when a plant op is still outstanding on any plot.
-function Grow.HasPendingPlant()
-    local pending = Grow._pendingPlant
-    if type(pending) ~= "table" then
-        return false
-    end
-    for _, n in pairs(pending) do
-        if (tonumber(n) or 0) > 0 then
-            return true
-        end
-    end
-    return false
 end
 
 --- True when any plot is planted and still mid-grow (not empty / grown / harvesting).
@@ -1811,7 +1908,13 @@ function Grow.NotifyHarvestOutcome(plotNum, opts)
     if name == nil or name == L"" or name == "" then
         return
     end
-    if type(name) == "string" then
+    local uid = tonumber(opts.uniqueID) or 0
+    if uid <= 0 and StockPiler2.SeedMap and StockPiler2.SeedMap.FindPlantUidByHarvestName then
+        uid = tonumber(StockPiler2.SeedMap.FindPlantUidByHarvestName(name)) or 0
+    end
+    if StockPiler2.ItemChatLink then
+        name = StockPiler2.ItemChatLink(uid, name)
+    elseif type(name) == "string" then
         name = towstring(name)
     end
     NotifyChat(T("grow.harvest_outcome", {
@@ -2023,6 +2126,14 @@ function Grow.TryPlantNextEmptyPlot(opId)
     if not Grow.IsEnabled() then
         return false
     end
+    local Sch = StockPiler2.Scheduler
+    if Sch and Sch.ShouldDeferAutoGrowPlant then
+        local deferPlant, deferReason = Sch.ShouldDeferAutoGrowPlant()
+        if deferPlant == true then
+            Grow.LogSkipPlant(tostring(deferReason or "scenario"))
+            return false
+        end
+    end
     local quietUntil = tonumber(Grow._plantQuietUntil) or 0
     if quietUntil > 0 then
         local now = NowSec()
@@ -2114,7 +2225,27 @@ function Grow.TryPlantNextEmptyPlot(opId)
         return false
     end
     local seedKey = job.seed.nameNarrow or ToNarrow(job.seed.name) or ToNarrow(job.seed.match)
-    local slot, item, backpackType = CA.FindSeedSlot(job.seedUid, seedKey)
+    -- Same-tick / same-job slot reuse (0.4.118): Prefer job stash when snapGen+seedUid
+    -- still match; FindSeedSlot also memoizes by snap. Do not reuse across snapGen.
+    local slot, item, backpackType = 0, nil, nil
+    if CA.TrySeedSlotFromJob then
+        slot, item, backpackType = CA.TrySeedSlotFromJob(job)
+    end
+    if slot <= 0 or type(item) ~= "table" then
+        slot, item, backpackType = CA.FindSeedSlot(job.seedUid, seedKey)
+        if slot > 0 and type(item) == "table" and CA.StashSeedSlotOnJob then
+            local Inv = StockPiler2.Inventory
+            local snapGen = Inv and Inv.GetSnapGen and Inv.GetSnapGen() or 0
+            local bagKey = nil
+            if type(CA._seedSlotCache) == "table" then
+                local cached = CA._seedSlotCache[tonumber(job.seedUid) or 0]
+                if type(cached) == "table" then
+                    bagKey = cached.bagKey
+                end
+            end
+            CA.StashSeedSlotOnJob(job, job.seedUid, slot, bagKey, snapGen)
+        end
+    end
     if slot <= 0 or type(item) ~= "table" then
         if Grow.HasEmptyPlot() and Grow._commitForceCleared ~= true then
             LogGrow("empty+no seed slot; force clear inflated seed commits")
@@ -2123,7 +2254,25 @@ function Grow.TryPlantNextEmptyPlot(opId)
             job = Grow.GetPlantJob()
             if type(job) == "table" then
                 seedKey = job.seed.nameNarrow or ToNarrow(job.seed.name) or ToNarrow(job.seed.match)
-                slot, item, backpackType = CA.FindSeedSlot(job.seedUid, seedKey)
+                slot, item, backpackType = 0, nil, nil
+                if CA.TrySeedSlotFromJob then
+                    slot, item, backpackType = CA.TrySeedSlotFromJob(job)
+                end
+                if slot <= 0 or type(item) ~= "table" then
+                    slot, item, backpackType = CA.FindSeedSlot(job.seedUid, seedKey)
+                    if slot > 0 and type(item) == "table" and CA.StashSeedSlotOnJob then
+                        local Inv = StockPiler2.Inventory
+                        local snapGen = Inv and Inv.GetSnapGen and Inv.GetSnapGen() or 0
+                        local bagKey = nil
+                        if type(CA._seedSlotCache) == "table" then
+                            local cached = CA._seedSlotCache[tonumber(job.seedUid) or 0]
+                            if type(cached) == "table" then
+                                bagKey = cached.bagKey
+                            end
+                        end
+                        CA.StashSeedSlotOnJob(job, job.seedUid, slot, bagKey, snapGen)
+                    end
+                end
             end
         end
     end
@@ -2148,6 +2297,17 @@ function Grow.TryPlantNextEmptyPlot(opId)
     Grow._pendingPlant[plotNum] = (tonumber(Grow._pendingPlant[plotNum]) or 0) + 1
     Grow._pendingPlantAt[plotNum] = NowSec()
     Grow._pendingSeedUid[plotNum] = seedUid
+    local seedName = T("grow.seed_fallback")
+    if type(item) == "table" and item.name ~= nil and item.name ~= L"" then
+        seedName = item.name
+    elseif type(job.seed) == "table" and job.seed.name ~= nil and job.seed.name ~= L"" then
+        seedName = job.seed.name
+    end
+    Grow._pendingPlantMeta[plotNum] = {
+        reason = tostring(job.plantReason or "potion_stock"),
+        name = seedName,
+        seedUid = seedUid,
+    }
     if StockPiler2.Scheduler and StockPiler2.Scheduler.SuppressInventorySideEffects then
         StockPiler2.Scheduler.SuppressInventorySideEffects(2)
     end
@@ -2187,22 +2347,9 @@ function Grow.TryPlantNextEmptyPlot(opId)
             StockPiler2.SeedMap.LearnMapping(plantUid, seedUid, "plant", true)
         end
     end
-    local reasonRaw = tostring(job.plantReason or "potion_stock")
-    local reasonKey = PLANT_REASON_LABEL[reasonRaw]
-    local reasonLabel = reasonKey and T(reasonKey) or towstring(reasonRaw)
-    local seedName = T("grow.seed_fallback")
-    if type(item) == "table" and item.name ~= nil and item.name ~= L"" then
-        seedName = item.name
-    elseif type(job.seed) == "table" and job.seed.name ~= nil and job.seed.name ~= L"" then
-        seedName = job.seed.name
-    end
-    NotifyChat(
-        T("grow.planted", {
-            plot = tostring(plotNum),
-            name = seedName,
-            reason = reasonLabel,
-        })
-    )
+    -- Chat on accepted PlantSeed (meta.chatted); soil confirm only clears pending.
+    -- Last-plot OnFillWaveComplete used to wipe meta before soil confirm — no chat.
+    NotifyPlantConfirmed(plotNum)
     LogPlant(string.format(
         "P%d %s uid=%d plantUid=%d reason=%s deficit=%d craftsShort=%d plantable=%d opId=%s",
         plotNum,
@@ -2226,6 +2373,8 @@ function Grow.TryPlantNextEmptyPlot(opId)
     elseif StockPiler2.Garden and StockPiler2.Garden.OnCultivationUpdated then
         StockPiler2.Garden.OnCultivationUpdated()
     end
+    -- SyncPlot updates Garden cache only — clear pending when soil already shows seed.
+    Grow.OnCultivationUpdated(plotNum)
     -- Re-pick next plot for craftsShort / role fairness; keep seedCommitted.
     Grow._plantQueueDirty = true
     Grow._cachedPlantJob = nil
@@ -2236,9 +2385,7 @@ function Grow.TryPlantNextEmptyPlot(opId)
         StockPiler2.Scheduler.WakeAutoGrow()
     end
     Grow.MarkAdditiveDue()
-    if not Grow.HasEmptyPlot() then
-        Grow.OnFillWaveComplete()
-    end
+    Grow.MaybeCompleteFillWave()
     if StockPiler2.Perf and StockPiler2.Perf.End then
         StockPiler2.Perf.End("Grow.TryPlant")
     end
@@ -2311,6 +2458,13 @@ function Grow.TryApplyNextAdditive(opId)
     end
     if not Grow.IsEnabled() then
         return false
+    end
+    local Sch = StockPiler2.Scheduler
+    if Sch and Sch.ShouldDeferAutoGrowPlant then
+        local deferPlant = Sch.ShouldDeferAutoGrowPlant()
+        if deferPlant == true then
+            return false
+        end
     end
     local AD = StockPiler2.Additives
     if not AD or not AD.IsEnabled or not AD.IsEnabled() then

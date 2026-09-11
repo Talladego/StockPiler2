@@ -246,6 +246,10 @@ function Bridge.OnUpdateProcessed(timeElapsed)
     if StockPiler2.Garden and StockPiler2.Garden.FlushPendingSyncAll then
         StockPiler2.Garden.FlushPendingSyncAll()
     end
+    -- SyncAll does not call Grow — confirm pending plants after coalesced flush.
+    if StockPiler2.Grow and StockPiler2.Grow.OnCultivationUpdated then
+        StockPiler2.Grow.OnCultivationUpdated(0)
+    end
     -- Publish one snapGen for all L0 AdjustUid this frame before refine/plan.
     if StockPiler2.Inventory and StockPiler2.Inventory.FlushPendingSnapGen then
         StockPiler2.Inventory.FlushPendingSnapGen()

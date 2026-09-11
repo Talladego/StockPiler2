@@ -243,6 +243,26 @@ function StockPiler2.Audit.Run(emitLog)
         Emit(emitLog, "  refines=" .. tostring(TableSize(acct.refines)))
         Emit(emitLog, "  additives=" .. tostring(TableSize(acct.additives)))
         Emit(emitLog, "  vendorItems=" .. tostring(TableSize(acct.vendorItems)))
+        local allowed = {
+            accountVersion = true,
+            items = true,
+            grows = true,
+            refines = true,
+            recipes = true,
+            potions = true,
+            additives = true,
+            vendorItems = true,
+        }
+        local extra = {}
+        for k in pairs(acct) do
+            if allowed[k] ~= true then
+                extra[#extra + 1] = tostring(k)
+            end
+        end
+        if #extra > 0 then
+            table.sort(extra)
+            Emit(emitLog, "  EXTRA Account keys (settings leak?): " .. table.concat(extra, ", "))
+        end
     end
 
     local settings = StockPiler2.Settings

@@ -236,13 +236,15 @@ function Refine.IsEnabled()
 end
 
 local function IntentCacheKey()
-    local Inv = StockPiler2.Inventory
     local Watch = StockPiler2.Watch
     local RP = StockPiler2.RefinePipeline
     local Garden = StockPiler2.Garden
     -- Perf: use planGen (plant/empty/lock), not stage-tick Garden.GetGen — otherwise
     -- growth-stage updates invalidate CollectIntents under Tick (~60s). Matches
     -- BufferFlags / seed-line / plant-job keys. Do not revert to GetGen().
+    -- 0.4.125: drop snapGen — every refine delivery used to bust CollectIntents /
+    -- BuildBalancedSpecDemand on the next Orch Tick. Issue/reconcile bump RP.GetGen
+    -- and InvalidateIntentCache already.
     local gardenGen = 0
     if Garden then
         if Garden.GetPlanGen then
@@ -252,7 +254,6 @@ local function IntentCacheKey()
         end
     end
     return table.concat({
-        tostring(Inv and Inv.GetSnapGen and Inv.GetSnapGen() or 0),
         tostring(Watch and Watch.GetGen and Watch.GetGen() or 0),
         tostring(RP and RP.GetGen and RP.GetGen() or 0),
         tostring(gardenGen),
@@ -955,6 +956,9 @@ function Refine.ReconcileAll()
     -- while outstanding was empty or only one seed needed checking).
     if not (RP.HasOutstanding and RP.HasOutstanding() == true) then
         ClearOrphanPending("reconcile-idle")
+        if StockPiler2.Scheduler and StockPiler2.Scheduler.EnqueuePlanRebuildAfterRefineClear then
+            StockPiler2.Scheduler.EnqueuePlanRebuildAfterRefineClear()
+        end
         return false
     end
     -- At most one full walk per UPDATE_PROCESSED frame (TryTick + OnInv + Expire used to stack).
@@ -1020,6 +1024,9 @@ function Refine.ReconcileAll()
     if marked and StockPiler2.Perf and StockPiler2.Perf.End then
         StockPiler2.Perf.End("ReconcileAll")
     end
+    if StockPiler2.Scheduler and StockPiler2.Scheduler.EnqueuePlanRebuildAfterRefineClear then
+        StockPiler2.Scheduler.EnqueuePlanRebuildAfterRefineClear()
+    end
     return deliveredAny
 end
 
@@ -1067,6 +1074,9 @@ function Refine.ExpireStuckOutstanding()
                 end
             end
         end
+    end
+    if StockPiler2.Scheduler and StockPiler2.Scheduler.EnqueuePlanRebuildAfterRefineClear then
+        StockPiler2.Scheduler.EnqueuePlanRebuildAfterRefineClear()
     end
 end
 
@@ -1474,7 +1484,12 @@ function Refine.IssueOne(intent, opId)
     if StockPiler2.Grow and StockPiler2.Grow.InvalidatePlantQueue then
         StockPiler2.Grow.InvalidatePlantQueue({ jobOnly = true })
     end
-    if StockPiler2.Scheduler and StockPiler2.Scheduler.EnqueueBagFlush then
+    -- Hold PlanRebuild until outstanding clears (0.4.125).
+    local Sch = StockPiler2.Scheduler
+    if Sch then
+        Sch._planHeldForRefine = true
+    end
+    if Sch and Sch.EnqueueBagFlush then
         StockPiler2.Scheduler.EnqueueBagFlush(false)
     end
     Refine.InvalidateIntentCache()
@@ -1637,6 +1652,18 @@ function Refine.OnInventoryUpdated()
             Refine._lastTryTickOnlyThrottle = false
             if StockPiler2.Grow and StockPiler2.Grow.InvalidatePlantQueue then
                 StockPiler2.Grow.InvalidatePlantQueue({ jobOnly = true })
+            end
+            -- 0.4.125: same hitch fusion as harvest Complete — move PlanRebuild /
+            -- UiFlush off ReconcileAll + ApplySlots frame.
+            local Sch = StockPiler2.Scheduler
+            if Sch and Sch.SkipPlanThisFrame then
+                Sch.SkipPlanThisFrame()
+            end
+            if Sch and Sch.SkipUiThisFrame then
+                Sch.SkipUiThisFrame()
+            end
+            if Sch and Sch.EnqueuePlanRebuildAfterRefineClear then
+                Sch.EnqueuePlanRebuildAfterRefineClear()
             end
         end
     end

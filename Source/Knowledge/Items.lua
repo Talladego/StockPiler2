@@ -199,3 +199,83 @@ function StockPiler2.Items.AsItemData(uid)
         craftingBonus = nil,
     }
 end
+
+--- Resolve best itemData table for a uniqueID (bag sample → Items → GetDatabaseItemData).
+local function ResolveItemData(uid)
+    uid = tonumber(uid) or 0
+    if uid <= 0 then
+        return nil
+    end
+    if StockPiler2.Inventory and StockPiler2.Inventory.CountByUniqueId then
+        local count, sample = StockPiler2.Inventory.CountByUniqueId(uid)
+        if (tonumber(count) or 0) > 0 and type(sample) == "table" then
+            return sample
+        end
+    end
+    if StockPiler2.Items and StockPiler2.Items.AsItemData then
+        local cached = StockPiler2.Items.AsItemData(uid)
+        if type(cached) == "table" then
+            return cached
+        end
+    end
+    if type(GetDatabaseItemData) == "function" then
+        local ok, data = StockPiler2.TryCallQuiet("GetDatabaseItemData", GetDatabaseItemData, uid)
+        if ok and type(data) == "table" then
+            return data
+        end
+    end
+    return nil
+end
+
+--- Clickable chat item link (same shape as EA_ChatWindow.InsertItemLink).
+--- Falls back to [name] text when uid/CreateHyperLink unavailable.
+function StockPiler2.ItemChatLink(uid, fallbackName)
+    uid = tonumber(uid) or 0
+    local itemData = ResolveItemData(uid)
+    local name = nil
+    if type(itemData) == "table" and itemData.name ~= nil and itemData.name ~= L"" then
+        name = itemData.name
+    elseif fallbackName ~= nil and fallbackName ~= L"" and fallbackName ~= "" then
+        if type(fallbackName) == "wstring" then
+            name = fallbackName
+        else
+            name = towstring(tostring(fallbackName))
+        end
+    else
+        name = L"item"
+    end
+    local text = L"[" .. name .. L"]"
+    if uid <= 0 or type(CreateHyperLink) ~= "function" then
+        return text
+    end
+    local r, g, b = 255, 255, 255
+    if type(itemData) == "table" and DataUtils and DataUtils.GetItemRarityColor then
+        local ok, color = StockPiler2.TryCallQuiet(
+            "DataUtils.GetItemRarityColor",
+            DataUtils.GetItemRarityColor,
+            itemData
+        )
+        if ok and type(color) == "table" then
+            r = tonumber(color.r) or r
+            g = tonumber(color.g) or g
+            b = tonumber(color.b) or b
+        end
+    end
+    -- Match EA_ChatWindow.InsertItemLink: data = L"ITEM:" .. uniqueID
+    local data = L"ITEM:" .. uid
+    local ok, link = StockPiler2.TryCallQuiet(
+        "CreateHyperLink",
+        CreateHyperLink,
+        data,
+        text,
+        { r, g, b },
+        {}
+    )
+    if ok and link ~= nil then
+        if type(link) == "wstring" then
+            return link
+        end
+        return towstring(link)
+    end
+    return text
+end

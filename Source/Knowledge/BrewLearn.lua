@@ -1188,6 +1188,9 @@ function StockPiler2.BrewLearn.CompletePendingCraftLearn(opts)
             if name == nil or name == L"" then
                 name = T("brew.potion_fallback")
             end
+            if StockPiler2.ItemChatLink then
+                name = StockPiler2.ItemChatLink(out.uniqueID, name)
+            end
             local line
             if chatCrit then
                 line = T("brew.outcome_ok_crit", { name = name, count = tostring(delta) })
@@ -1203,6 +1206,7 @@ function StockPiler2.BrewLearn.CompletePendingCraftLearn(opts)
         elseif type(chatCues) == "table" and chatCues.createdName ~= nil and chatCues.createdName ~= "" then
             failName = towstring(tostring(chatCues.createdName))
         end
+        -- Failures do not gain a potion; keep plain name (no item link required).
         NotifyBrewOutcome(T("brew.outcome_fail", { name = failName }))
     end
     StockPiler2.BrewLearn._pendingCraft = nil

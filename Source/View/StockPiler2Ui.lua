@@ -17,6 +17,7 @@ StockPiler2.Ui._watchUiFlushedAt = 0
 StockPiler2.Ui._watchUiLastKey = nil
 StockPiler2.Ui._watchUiLastKnowledgeGen = 0
 StockPiler2.Ui._watchUiLastPlanGen = 0
+StockPiler2.Ui._watchUiLastBrewKey = nil
 
 function StockPiler2.Ui.Print(msg)
     if StockPiler2.Debug and StockPiler2.Debug.Print then
@@ -57,6 +58,22 @@ local function CurrentPlanGen()
     return 0
 end
 
+--- Load/Brew row chrome fingerprint (phase + which watch). Must be in WatchContentKey
+--- or FlushWatchUiIfDirty clears dirty without paint after RefreshBrewUi (same snap/plan).
+local function BrewChromeKey()
+    local Brew = StockPiler2.Brew
+    if not Brew or not Brew.GetSession then
+        return "idle"
+    end
+    local session = Brew.GetSession()
+    if type(session) ~= "table" then
+        return "idle"
+    end
+    return tostring(session.phase or "idle")
+        .. ":" .. tostring(session.potionKey or "")
+        .. ":" .. tostring(session.rowId or "")
+end
+
 local function WatchContentKey()
     local snapGen = 0
     if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
@@ -80,6 +97,7 @@ local function WatchContentKey()
         .. ":" .. tostring(knowledgeGen)
         .. ":" .. tostring(watchGen)
         .. ":" .. tostring(autoGrowOn)
+        .. ":" .. BrewChromeKey()
 end
 
 --- True when Watch would only rebind a stale PlanSnapshot (avoid burning the 5s clock).
@@ -141,6 +159,11 @@ function StockPiler2.Ui.FlushWatchUiIfDirty()
     -- same hitch as CultivationUpdated/WakeAfterHarvest. Do not remove the hold —
     -- MarkWatchUiDirty still runs; first flush after storm/quiet picks it up.
     local Sch = StockPiler2.Scheduler
+    -- Harvest Complete frame: SkipUiThisFrame holds paint so Complete does not fuse
+    -- with UiFlush/WatchRows/Footer. Dirty stays for the next eligible flush.
+    if Sch and Sch._skipUiThisFrame == true then
+        return
+    end
     if Sch and Sch.IsHarvestStormActive and Sch.IsHarvestStormActive() == true then
         return
     end
@@ -149,6 +172,16 @@ function StockPiler2.Ui.FlushWatchUiIfDirty()
     then
         return
     end
+    -- 0.4.126: hold Watch paint during apo brew session except Load/Brew chrome flips.
+    -- INVENTORY_SNAPSHOT still MarkWatchUiDirty; dirty must survive for post-session flush.
+    -- Do not clear dirty here — Status may lag until unload; Stock/Craftable patch on next paint.
+    local Orch = StockPiler2.Orchestrator
+    if Orch and Orch.IsBrewSessionActive and Orch.IsBrewSessionActive() == true then
+        local brewKeyHold = BrewChromeKey()
+        if brewKeyHold == tostring(StockPiler2.Ui._watchUiLastBrewKey or "") then
+            return
+        end
+    end
     -- Window open: catch-up paint when plan/knowledge advances. Interval rate-limits
     -- snap noise; while plan is stale, flush at most every 1s so live Stock overlay moves.
     local knowledgeGen = 0
@@ -156,6 +189,7 @@ function StockPiler2.Ui.FlushWatchUiIfDirty()
         knowledgeGen = tonumber(StockPiler2.Knowledge.GetGen()) or 0
     end
     local planGen = CurrentPlanGen()
+    local brewKey = BrewChromeKey()
     local contentKey = WatchContentKey()
     if StockPiler2.Ui._watchUiLastKey == contentKey then
         StockPiler2.Ui._watchUiDirty = false
@@ -168,14 +202,17 @@ function StockPiler2.Ui.FlushWatchUiIfDirty()
     local last = tonumber(StockPiler2.Ui._watchUiFlushedAt) or 0
     local knowledgeChanged = knowledgeGen ~= (tonumber(StockPiler2.Ui._watchUiLastKnowledgeGen) or 0)
     local planChanged = planGen ~= (tonumber(StockPiler2.Ui._watchUiLastPlanGen) or 0)
+    -- Load→Brew / unload label must not wait on the 5s snap coalesce.
+    local brewChanged = brewKey ~= tostring(StockPiler2.Ui._watchUiLastBrewKey or "")
     -- While plan lags bags, still allow rate-limited paints: BuildVisibleList overlays
     -- live Stock/Craftable on the last plan (Status catches up on planGen).
     local interval = StockPiler2.Ui.WATCH_UI_MIN_INTERVAL_SEC
-    if not knowledgeChanged and not planChanged and IsWatchPlanStale() then
+    if not knowledgeChanged and not planChanged and not brewChanged and IsWatchPlanStale() then
         interval = math.min(interval, 1.0)
     end
     if not knowledgeChanged
         and not planChanged
+        and not brewChanged
         and last > 0
         and (now - last) < interval
     then
@@ -189,6 +226,7 @@ function StockPiler2.Ui.FlushWatchUiIfDirty()
     StockPiler2.Ui._watchUiLastKey = contentKey
     StockPiler2.Ui._watchUiLastKnowledgeGen = knowledgeGen
     StockPiler2.Ui._watchUiLastPlanGen = planGen
+    StockPiler2.Ui._watchUiLastBrewKey = brewKey
     if StockPiler2Window and StockPiler2Window.RefreshActiveTab then
         StockPiler2Window.RefreshActiveTab()
     end
@@ -230,6 +268,7 @@ function StockPiler2.Ui.RegisterEventRefresh()
             -- Scheduler owns the full open-window list refresh; keep lastKey clear here
             -- so a later dirty flush cannot no-op on a pre-login content key.
             StockPiler2.Ui._watchUiLastKey = nil
+            StockPiler2.Ui._watchUiLastBrewKey = nil
             StockPiler2.Ui._watchUiFlushedAt = 0
             StockPiler2.Ui._watchUiLastPlanGen = 0
             StockPiler2.Ui.ClearWatchTipCaches()

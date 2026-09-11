@@ -247,7 +247,8 @@ local function NotifyWatchRedBlocks(rows)
     Planner._watchBlockOnceKeys = now
 end
 
---- Once when every enabled plan row is true green; clear when any leaves.
+--- Once when every enabled plan row is true green AND at least one is ready_to_craft;
+--- clear when any leaves green (or none need craft). Pure potion_stocked is not "ready to craft".
 --- Also wait for Seed Buffer — same gate as brew-ready / AutoGrow idle.
 local function NotifyAllWatchesReady(rows)
     local D = StockPiler2.Debug
@@ -256,6 +257,7 @@ local function NotifyAllWatchesReady(rows)
     end
     local any = false
     local allGreen = true
+    local anyReadyToCraft = false
     for i = 1, #rows do
         local row = rows[i]
         if type(row) == "table" then
@@ -265,10 +267,13 @@ local function NotifyAllWatchesReady(rows)
                 allGreen = false
                 break
             end
+            if statusKey == "ready_to_craft" then
+                anyReadyToCraft = true
+            end
         end
     end
     -- Only pay CollectAutoGrowSeedLines (via IsSeedBufferSatisfied) when rows are green.
-    if any and allGreen then
+    if any and allGreen and anyReadyToCraft then
         local Grow = StockPiler2.Grow
         if Grow and Grow.IsSeedBufferSatisfied and Grow.IsSeedBufferSatisfied() ~= true then
             if D.ClearNotifyOnce then
@@ -1256,6 +1261,32 @@ local function CacheKey(ctx)
     }, ":")
 end
 
+--- Gens that force a real plan rebuild (excludes bag snapGen). Cheap — no bag/plot copies.
+local function NonSnapGensKey(ctx)
+    ctx = type(ctx) == "table" and ctx or {}
+    return table.concat({
+        tostring(ctx.gardenGen or 0),
+        tostring(ctx.refineGen or 0),
+        tostring(ctx.watchGen or 0),
+        tostring(ctx.knowledgeGen or 0),
+        tostring(ctx.settingsHash or 0),
+    }, ":")
+end
+
+function Planner.NonSnapGensKey()
+    local Garden = StockPiler2.Garden
+    local RP = StockPiler2.RefinePipeline
+    local Watch = StockPiler2.Watch
+    local Know = StockPiler2.Knowledge
+    return NonSnapGensKey({
+        gardenGen = Garden and (Garden.GetPlanGen and Garden.GetPlanGen() or Garden.GetGen and Garden.GetGen()) or 0,
+        refineGen = RP and RP.GetGen and RP.GetGen() or 0,
+        watchGen = Watch and Watch.GetGen and Watch.GetGen() or 0,
+        knowledgeGen = Know and Know.GetGen and Know.GetGen() or 0,
+        settingsHash = Planner.SettingsHash(),
+    })
+end
+
 function Planner.SettingsHash()
     local Watch = StockPiler2.Watch
     local settings = StockPiler2.Settings
@@ -1345,11 +1376,19 @@ function Planner.GetOrBuild(opts)
     -- Perf: use nudge=true so repeated polls do not stretch _planAt forever (see
     -- Scheduler.EnqueuePlanRebuild PLAN_MAX_STRETCH / nudge). Do not call
     -- EnqueuePlanRebuild() without nudge from refresh=false paths.
+    -- 0.4.122: vault/bank bag moves only bump snapGen — Stock overlay already live-patches
+    -- counts. Do not nudge a full PlanRebuild when non-snap gens still match plan.ctx.
     if opts.refresh == false then
+        local stale = PS and PS.Get and PS.Get()
+        if type(stale) == "table" and type(stale.ctx) == "table" then
+            local wantNonSnap = Planner.NonSnapGensKey and Planner.NonSnapGensKey() or nil
+            if wantNonSnap ~= nil and NonSnapGensKey(stale.ctx) == wantNonSnap then
+                return stale
+            end
+        end
         if Sch and Sch.EnqueuePlanRebuild then
             Sch.EnqueuePlanRebuild({ nudge = true })
         end
-        local stale = PS and PS.Get and PS.Get()
         if type(stale) == "table" then
             return stale
         end

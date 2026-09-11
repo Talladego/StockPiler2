@@ -2921,7 +2921,10 @@ function StockPiler2.SeedMap.MaybeCompletePendingHarvest()
         end
     end
     if not hasNonSeedGain then
-        -- Loot may still be arriving; keep watch and allow another dirty mark.
+        -- Loot may still be arriving — clear dirty so LearnBridge does not Snapshot every
+        -- throttle tick forever (vault/bank bag moves kept re-dirtying + stuck pending).
+        -- Next inventory event calls MarkHarvestLootDirty again.
+        pending.lootDirty = false
         return false
     end
 
@@ -3072,6 +3075,7 @@ function StockPiler2.SeedMap.MaybeCompletePendingHarvest()
         if StockPiler2.Grow and StockPiler2.Grow.NotifyHarvestOutcome then
             local outName = nil
             local outCount = 0
+            local outUid = 0
             if type(chatCues) == "table" and chatCues.harvestedName ~= nil then
                 local chatUid = 0
                 if StockPiler2.SeedMap.FindPlantUidByHarvestName then
@@ -3081,6 +3085,9 @@ function StockPiler2.SeedMap.MaybeCompletePendingHarvest()
                 if chatUid <= 0 or IsEligibleHarvestProductUid(chatUid, seedUid) then
                     outName = chatCues.harvestedName
                     outCount = tonumber(chatCues.harvestedCount) or 0
+                    if chatUid > 0 then
+                        outUid = chatUid
+                    end
                 end
             end
             if (outName == nil or outName == L"" or outName == "")
@@ -3090,6 +3097,7 @@ function StockPiler2.SeedMap.MaybeCompletePendingHarvest()
                 local primaryItem = LookupItemData(primaryUid)
                 outName = primaryItem and primaryItem.name or nil
                 outCount = primaryDelta
+                outUid = primaryUid
             end
             if critFail == true then
                 StockPiler2.Grow.NotifyHarvestOutcome(plotNum, { critFail = true })
@@ -3097,6 +3105,7 @@ function StockPiler2.SeedMap.MaybeCompletePendingHarvest()
                 StockPiler2.Grow.NotifyHarvestOutcome(plotNum, {
                     name = outName,
                     count = outCount,
+                    uniqueID = outUid,
                 })
             end
         end

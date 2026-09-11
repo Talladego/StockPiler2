@@ -57,6 +57,36 @@ local function NowSec()
     return 0
 end
 
+-- After ClearLoadedSession / FailJob, ClearSlots craft events arrive on later frames
+-- while the board still matches the recipe — TryAdopt would paint Brew then empty→Load.
+Brew.BOARD_ADOPT_BLOCK_AFTER_CLEAR_SEC = 1.5
+
+local function ArmBoardAdoptBlock()
+    local sec = tonumber(Brew.BOARD_ADOPT_BLOCK_AFTER_CLEAR_SEC) or 1.5
+    local untilT = NowSec() + sec
+    local cur = tonumber(Brew._blockBoardAdoptUntil) or 0
+    if untilT > cur then
+        Brew._blockBoardAdoptUntil = untilT
+    end
+end
+
+local function BoardAdoptBlocked()
+    local untilT = tonumber(Brew._blockBoardAdoptUntil) or 0
+    if untilT <= 0 then
+        return false
+    end
+    local now = NowSec()
+    if now > 0 and now < untilT then
+        return true
+    end
+    Brew._blockBoardAdoptUntil = 0
+    return false
+end
+
+local function ClearBoardAdoptBlock()
+    Brew._blockBoardAdoptUntil = 0
+end
+
 local function AA()
     return StockPiler2.ApothecaryAdapter
 end
@@ -101,6 +131,10 @@ local function ClearSession()
     SyncOrchPhase("idle")
     if Brew.InvalidateCanBrewCache then
         Brew.InvalidateCanBrewCache()
+    end
+    -- 0.4.126: one PlanRebuild after mid-brew hold (Status/tips catch up).
+    if StockPiler2.Scheduler and StockPiler2.Scheduler.EnqueuePlanRebuildAfterBrewClear then
+        StockPiler2.Scheduler.EnqueuePlanRebuildAfterBrewClear()
     end
 end
 
@@ -907,6 +941,11 @@ end
 ----------------------------------------------------------------
 
 local function RefreshBrewUi()
+    -- ClearLoadedSession / FailJob hold this so ClearSlots craft storms cannot
+    -- re-adopt + paint Brew/Idle mid-teardown (label flip before Load).
+    if Brew._suppressBrewUi == true then
+        return
+    end
     Brew.InvalidateCanBrewCache()
     if StockPiler2.Perf and StockPiler2.Perf.Begin then
         StockPiler2.Perf.Begin("BrewUi")
@@ -965,6 +1004,7 @@ local function FailJob(message)
     if message then
         Notify(message)
     end
+    Brew._suppressBrewUi = true
     Brew._job = nil
     Brew._updateAccum = 0
     ClearSession()
@@ -974,6 +1014,8 @@ local function FailJob(message)
     then
         CloseOwnedSession()
     end
+    Brew._suppressBrewUi = false
+    ArmBoardAdoptBlock()
     RefreshBrewUi()
 end
 
@@ -1505,6 +1547,11 @@ function Brew.OnCraftingUpdated()
     if Brew.InvalidateCanBrewCache then
         Brew.InvalidateCanBrewCache()
     end
+    -- Post-clear settle: ignore residual ClearSlots craft updates so we do not
+    -- re-adopt a still-matching board and flip Load→Brew→Load on the row chip.
+    if BoardAdoptBlocked() then
+        return
+    end
     if type(Brew._job) == "table" then
         Brew.ReconcileBoardIntegrity("crafting-update")
         if type(Brew._job) == "table" then
@@ -1605,6 +1652,9 @@ end
 
 --- If the Apothecary already holds a watched recipe, adopt it into the brew session.
 function Brew.TryAdoptMatchingWatchFromBoard()
+    if Brew._suppressBrewUi == true or BoardAdoptBlocked() then
+        return false
+    end
     if type(Brew._job) == "table" then
         return false
     end
@@ -1669,6 +1719,8 @@ function Brew.BeginForRow(row, opts)
     if source ~= "manual" and source ~= "auto" then
         source = "auto"
     end
+    -- Intentional load supersedes post-clear adopt settle window.
+    ClearBoardAdoptBlock()
     local a = AA()
     if a and a.IsApothecary and not a.IsApothecary() then
         Notify(T("brew.load_apo_only"))
@@ -1856,6 +1908,9 @@ function Brew.ClearLoadedSession(opts)
     local hadSession = session.phase == "loading" or session.phase == "loaded"
         or type(Brew._lastLoad) == "table"
         or BrewOwnsApoSession()
+    -- Hold RefreshBrewUi + board adopt while ClearSlots fires craft updates, so the
+    -- row chip does not flip Brew/Idle mid-teardown before settling on Load.
+    Brew._suppressBrewUi = true
     Brew._job = nil
     Brew._updateAccum = 0
     Brew._lastLoad = nil
@@ -1870,6 +1925,8 @@ function Brew.ClearLoadedSession(opts)
         end
         LogBrew("clear-loaded-session")
     end
+    Brew._suppressBrewUi = false
+    ArmBoardAdoptBlock()
     RefreshBrewUi()
     if Brew.MaybeRefreshBrewTooltip then
         Brew.MaybeRefreshBrewTooltip(true)
@@ -1995,6 +2052,14 @@ end
 --- left to brew but phase would stay loaded, clear the apo load so AutoGrow
 --- is not blocked (footer R-click equivalent).
 function Brew.RefreshSessionAfterBrew()
+    -- 0.4.126: move PlanRebuild / UiFlush off the craft Inv.ApplySlots hitch.
+    local Sch = StockPiler2.Scheduler
+    if Sch and Sch.SkipPlanThisFrame then
+        Sch.SkipPlanThisFrame()
+    end
+    if Sch and Sch.SkipUiThisFrame then
+        Sch.SkipUiThisFrame()
+    end
     local session = GetSession()
     if session.phase ~= "loaded" then
         Brew.MaybeCloseBrewSessionIfIdle("after brew (no loaded session)")
@@ -2013,9 +2078,9 @@ function Brew.RefreshSessionAfterBrew()
     if session.craftable ~= nil then
         session.craftable = math.max(0, (tonumber(session.craftable) or 0) - 1)
     end
-    if StockPiler2.PlanSnapshot and StockPiler2.PlanSnapshot.Invalidate then
-        StockPiler2.PlanSnapshot.Invalidate()
-    end
+    -- 0.4.126: do NOT wipe PlanSnapshot while session stays loaded — deferred rebuild
+    -- would leave a nil snapshot and MaybeClearLoadedIfCannotContinue could false-clear.
+    -- Arm a held rebuild so Status catches up when the session clears.
     if StockPiler2.Scheduler and StockPiler2.Scheduler.EnqueuePlanRebuild then
         StockPiler2.Scheduler.EnqueuePlanRebuild()
     end

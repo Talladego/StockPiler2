@@ -14,6 +14,27 @@ StockPiler2.DefaultAccount = {
     vendorItems = {},
 }
 
+-- Historical leak: character/settings flags were once written onto Account (see
+-- SavedVariables.lua.bak_cleanup). Strip if they reappear so they are not re-saved.
+local ACCOUNT_LEAKED_SETTINGS_KEYS = {
+    "growPlantSurplusSeeds",
+    "autoGrowAdditives",
+    "autoGrowEnabled",
+    "autoBuyEnabled",
+    "autoBuyReserveGold",
+    "autoBuyBudgetGold",
+    "growSeedBufferMin",
+    "growSeedBufferEnabled",
+    "brewMacroEnabled",
+    "brewRespectGrowReserve",
+    "watches",
+    "characters",
+    "debugEnabled",
+    "eventTrace",
+    "perfEnabled",
+    "perfThresholdMs",
+}
+
 function StockPiler2.Persistence.EnsureAccount()
     local a = StockPiler2.Account
     if type(a) ~= "table" then
@@ -28,6 +49,12 @@ function StockPiler2.Persistence.EnsureAccount()
         local k = keys[i]
         if type(a[k]) ~= "table" then
             a[k] = {}
+        end
+    end
+    for i = 1, #ACCOUNT_LEAKED_SETTINGS_KEYS do
+        local k = ACCOUNT_LEAKED_SETTINGS_KEYS[i]
+        if a[k] ~= nil then
+            a[k] = nil
         end
     end
     if StockPiler2.Knowledge and StockPiler2.Knowledge.Ensure then

@@ -662,8 +662,10 @@ local function PlayerMoneyBrass()
     return 0
 end
 
-local function NoteVisitBoughtName(name, qty)
+local function NoteVisitBoughtName(name, qty, costBrass, uniqueID)
     qty = tonumber(qty) or 0
+    costBrass = tonumber(costBrass) or 0
+    uniqueID = tonumber(uniqueID) or 0
     name = ToNarrow(name)
     if qty <= 0 or name == "" then
         return
@@ -674,6 +676,20 @@ local function NoteVisitBoughtName(name, qty)
         Buy._visitBoughtByName = map
     end
     map[name] = (tonumber(map[name]) or 0) + qty
+    local spentMap = Buy._visitSpentByName
+    if type(spentMap) ~= "table" then
+        spentMap = {}
+        Buy._visitSpentByName = spentMap
+    end
+    spentMap[name] = (tonumber(spentMap[name]) or 0) + costBrass
+    if uniqueID > 0 then
+        local uidMap = Buy._visitBoughtUidByName
+        if type(uidMap) ~= "table" then
+            uidMap = {}
+            Buy._visitBoughtUidByName = uidMap
+        end
+        uidMap[name] = uniqueID
+    end
 end
 
 local function FormatSpentGoldLabel(brass)
@@ -687,45 +703,61 @@ local function FormatSpentGoldLabel(brass)
     return string.format("%.1fg", gold)
 end
 
---- Narrow summary of visit purchases; truncates long lists.
-local function VisitBoughtListText()
-    local map = Buy._visitBoughtByName
-    if type(map) ~= "table" then
-        return "", 0
-    end
-    local entries = {}
-    for name, qty in pairs(map) do
-        qty = tonumber(qty) or 0
-        if qty > 0 and type(name) == "string" and name ~= "" then
-            entries[#entries + 1] = { name = name, qty = qty }
-        end
-    end
-    if #entries == 0 then
-        return "", 0
-    end
-    table.sort(entries, function(a, b)
-        if a.qty ~= b.qty then
-            return a.qty > b.qty
-        end
-        return a.name < b.name
-    end)
-    local maxShow = 4
-    local parts = {}
-    local shown = math.min(#entries, maxShow)
-    for i = 1, shown do
-        parts[#parts + 1] = string.format("%dx %s", entries[i].qty, entries[i].name)
-    end
-    if #entries > maxShow then
-        parts[#parts + 1] = string.format("+%d more", #entries - maxShow)
-    end
-    return table.concat(parts, ", "), #entries
-end
-
 local function ChatVisitNotify(msg)
     if StockPiler2.Ui and StockPiler2.Ui.Print then
         StockPiler2.Ui.Print(msg)
     elseif StockPiler2.Debug and StockPiler2.Debug.Notify then
         StockPiler2.Debug.Notify(msg)
+    end
+end
+
+--- One AutoBuy chat line per material type (totals for the visit so far).
+local function ChatPurchaseForName(name)
+    name = ToNarrow(name)
+    if name == "" then
+        return
+    end
+    local chatted = Buy._visitChattedByName
+    if type(chatted) ~= "table" then
+        chatted = {}
+        Buy._visitChattedByName = chatted
+    end
+    if chatted[name] == true then
+        return
+    end
+    local qty = tonumber(Buy._visitBoughtByName and Buy._visitBoughtByName[name]) or 0
+    if qty <= 0 then
+        return
+    end
+    local spent = tonumber(Buy._visitSpentByName and Buy._visitSpentByName[name]) or 0
+    local uid = tonumber(Buy._visitBoughtUidByName and Buy._visitBoughtUidByName[name]) or 0
+    local displayName = name
+    if StockPiler2.ItemChatLink then
+        displayName = StockPiler2.ItemChatLink(uid, name)
+    end
+    chatted[name] = true
+    ChatVisitNotify(T("buy.purchased", {
+        qty = qty,
+        name = displayName,
+        spent = FormatSpentGoldLabel(spent),
+    }))
+end
+
+--- Flush any types bought but not yet announced (stop / store close / mid-type gate).
+local function FlushUnchattedPurchases()
+    local map = Buy._visitBoughtByName
+    if type(map) ~= "table" then
+        return
+    end
+    local names = {}
+    for name, qty in pairs(map) do
+        if (tonumber(qty) or 0) > 0 and type(name) == "string" and name ~= "" then
+            names[#names + 1] = name
+        end
+    end
+    table.sort(names)
+    for i = 1, #names do
+        ChatPurchaseForName(names[i])
     end
 end
 
@@ -745,18 +777,14 @@ local function ChatVisitStop(reason)
         bought,
         spent
     ))
+    -- Announce any material types not flushed mid-visit (e.g. reserve mid-stack).
+    FlushUnchattedPurchases()
     -- Quiet when the visit bought nothing and left normally.
-    if reason == "nothing" then
+    if reason == "nothing" or reason == "bought" then
         return
     end
-    local listText = VisitBoughtListText()
     local msg = nil
-    if bought > 0 and listText ~= "" then
-        msg = T("buy.bought", {
-            list = listText,
-            spent = FormatSpentGoldLabel(spent),
-        })
-    elseif reason == "reserved" then
+    if reason == "reserved" then
         msg = T("buy.stopped_reserve")
     elseif reason == "budget" then
         msg = T("buy.stopped_budget")
@@ -773,6 +801,9 @@ local function ResetVisit()
     Buy._visitBought = 0
     Buy._visitPurchases = 0
     Buy._visitBoughtByName = {}
+    Buy._visitSpentByName = {}
+    Buy._visitBoughtUidByName = {}
+    Buy._visitChattedByName = {}
     Buy._visitStopReason = nil
     Buy._visitChatted = false
     Buy._visitSawMatch = false
@@ -1103,7 +1134,9 @@ function Buy.TryBuyNext()
                     Buy._visitPurchases = purchases + 1
                     Buy._visitMoneyBrass = math.max(0, money - costTotal)
                     NoteVisitAcquired(acquireKey, qty)
-                    NoteVisitBoughtName(item.name or job.name or job.label, qty)
+                    local displayName = item.name or job.name or job.label
+                    local itemUid = tonumber(item.uniqueID or item.id) or 0
+                    NoteVisitBoughtName(displayName, qty, costTotal, itemUid)
                     AfterPurchaseRefresh()
                     LogBuyOp(string.format(
                         "purchase slot=%d qty=%d cost=%d name=%s remainingWas=%d spent=%d moneyLeft=%d",
@@ -1115,6 +1148,11 @@ function Buy.TryBuyNext()
                         tonumber(Buy._visitSpentBrass) or 0,
                         tonumber(Buy._visitMoneyBrass) or 0
                     ))
+                    -- Chat when this material type's visit need is met (one line per type).
+                    local remAfter = math.max(0, bagDeficit - VisitAcquired(acquireKey))
+                    if remAfter < 1 then
+                        ChatPurchaseForName(displayName)
+                    end
                     return done(true)
                 end
             end

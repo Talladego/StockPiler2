@@ -110,6 +110,13 @@ function Sch.IsHarvestStormActive()
         if StockPiler2.Grow and StockPiler2.Grow.MarkPlantJobDirty then
             StockPiler2.Grow.MarkPlantJobDirty()
         end
+        -- Perf (0.4.118): prewarm demand on this plan-skipped frame so the following
+        -- Orch plant hits _demandCache (snapGen:watchGen) instead of cold-building
+        -- BuildBalancedSpecDemand on the plant hitch. Bag snap between here and plant
+        -- correctly misses and rebuilds.
+        if StockPiler2.RecipeSpec and StockPiler2.RecipeSpec.BuildBalancedSpecDemand then
+            StockPiler2.RecipeSpec.BuildBalancedSpecDemand()
+        end
     end
     return false
 end
@@ -200,10 +207,74 @@ function Sch.ShouldDeferBagFlush()
     return HarvestOrBrewDefer()
 end
 
+--- AutoGrow plant/additives — same combat/RvR/scenario gate as bag Flatten.
+--- Cultivation often rejects AddCraftingItem in scenarios while pcall still succeeds;
+--- without this gate Orch replants empties in a chat spam loop. Refine/AutoBuy stay up.
+function Sch.ShouldDeferAutoGrowPlant()
+    return PlayerCombatOrScenarioDefer()
+end
+
 --- Plan rebuild — NOT deferred in combat (AutoGrow + Watch need live plan).
 --- Still deferred during harvest / brew loading|busy.
+--- 0.4.125: also defer while seed-buffer refine is in flight (outstanding / pending).
+--- 0.4.126: also defer while apo brew session is loading/loaded (not bag flush).
+--- Keep _planDue armed; EnqueuePlanRebuild once when outstanding/session clears.
 function Sch.ShouldDeferPlanRebuild()
-    return HarvestOrBrewDefer()
+    local defer, reason = HarvestOrBrewDefer()
+    if defer then
+        return true, reason
+    end
+    -- Plan-only: do NOT put brew-session in HarvestOrBrewDefer (that holds bag Flatten).
+    local Orch = StockPiler2.Orchestrator
+    if Orch and Orch.IsBrewSessionActive and Orch.IsBrewSessionActive() == true then
+        Sch._planHeldForBrew = true
+        return true, "brew-session"
+    end
+    local RP = StockPiler2.RefinePipeline
+    if RP and RP.HasOutstanding and RP.HasOutstanding() == true then
+        Sch._planHeldForRefine = true
+        return true, "refine-outstanding"
+    end
+    local SM = StockPiler2.SeedMap
+    if SM and type(SM._pendingRefine) == "table" then
+        Sch._planHeldForRefine = true
+        return true, "refine-pending"
+    end
+    return false, nil
+end
+
+--- After refine outstanding/pending clears: arm one plan rebuild if we held during refine.
+function Sch.EnqueuePlanRebuildAfterRefineClear()
+    if Sch._planHeldForRefine ~= true then
+        return
+    end
+    local RP = StockPiler2.RefinePipeline
+    if RP and RP.HasOutstanding and RP.HasOutstanding() == true then
+        return
+    end
+    local SM = StockPiler2.SeedMap
+    if SM and type(SM._pendingRefine) == "table" then
+        return
+    end
+    Sch._planHeldForRefine = false
+    if Sch.EnqueuePlanRebuild then
+        Sch.EnqueuePlanRebuild()
+    end
+end
+
+--- After brew session leaves loading/loaded: arm one plan rebuild if we held mid-brew.
+function Sch.EnqueuePlanRebuildAfterBrewClear()
+    if Sch._planHeldForBrew ~= true then
+        return
+    end
+    local Orch = StockPiler2.Orchestrator
+    if Orch and Orch.IsBrewSessionActive and Orch.IsBrewSessionActive() == true then
+        return
+    end
+    Sch._planHeldForBrew = false
+    if Sch.EnqueuePlanRebuild then
+        Sch.EnqueuePlanRebuild()
+    end
 end
 
 --- Compatibility: same as bag-flush defer (combat + harvest/brew).
@@ -322,9 +393,10 @@ function Sch.ShouldWakeAutoGrowUrgent()
 end
 
 --- opts.nudge=true — hot-path (footer/Watch): arm only if not pending; never stretch.
---- Perf: stretch to max(awake 3s, min-gap) so a short first deadline (window-open 0.5s)
---- cannot stick through a harvest wave. nudge=true for GetOrBuild(refresh=false) /
---- TabWatch so polls do not push _planAt forever. PLAN_MAX_STRETCH caps the window.
+--- Perf: stretch to max(awake 3s, min-gap) so a short first deadline cannot stick
+--- through a harvest wave. nudge=true for GetOrBuild(refresh=false) / TabWatch so
+--- polls do not push _planAt forever. PLAN_MAX_STRETCH caps the window.
+--- 0.4.118: nudge also honors PLAN_MIN_GAP; Watch-open wait uses min-gap (not 0.5s).
 --- Do not stretch on nudge; do not drop the stretch for wake/garden/bag callers.
 function Sch.EnqueuePlanRebuild(opts)
     opts = type(opts) == "table" and opts or {}
@@ -357,14 +429,14 @@ function Sch.EnqueuePlanRebuild(opts)
     if awake and nudge ~= true then
         wait = tonumber(Sch.PLAN_COALESCE_WHEN_AWAKE_SEC) or 3.0
     end
-    -- Watch window open: snappy Stock/Status only when AutoGrow is idle.
-    -- During harvest/bag storms keep the awake coalesce; live Stock comes from
-    -- Watch UI flush / PatchWatchRowsLiveCounts.
+    -- Watch window open: Status/tips coalesce to PLAN_MIN_GAP when AutoGrow is idle.
+    -- Live Stock/Craftable come from Watch UI flush / PatchWatchRowsLiveCounts — do not
+    -- use PLAN_MAX_WAIT (0.5s) here (0.4.118: that bypassed min-gap and storm-rebuilt).
     if not awake
         and DoesWindowExist("StockPiler2Window")
         and WindowGetShowing("StockPiler2Window") == true
     then
-        local openWait = tonumber(Sch.PLAN_MAX_WAIT_SEC) or 0.5
+        local openWait = tonumber(Sch.PLAN_MIN_GAP_SEC) or 2.0
         if wait > openWait then
             wait = openWait
         end
@@ -372,7 +444,10 @@ function Sch.EnqueuePlanRebuild(opts)
     local at = now + wait
     local minGap = tonumber(Sch.PLAN_MIN_GAP_SEC) or 2.0
     local lastBuilt = tonumber(Sch._lastPlanBuiltAt) or 0
-    if lastBuilt > 0 and minGap > 0 and nudge ~= true then
+    -- Apply min-gap to nudge too (0.4.118). Watch/footer polls used to fire PlanRebuild
+    -- every ~0.5s while Stock was already live-patched. Keep nudge "do not stretch
+    -- pending" early-return above; only clamp the first arm deadline.
+    if lastBuilt > 0 and minGap > 0 then
         local gapAt = lastBuilt + minGap
         if gapAt > at then
             at = gapAt
@@ -698,6 +773,13 @@ function Sch.SkipPlanThisFrame()
     Sch._skipPlanThisFrame = true
 end
 
+--- One-frame skip after harvest-complete attempt: hold Watch paint so Complete does not
+--- fuse with UiFlush/WatchRows/Footer on the same UPDATE_PROCESSED. Dirty stays;
+--- FlushWatch runs on a later frame. Pair with SkipPlanThisFrame from LearnBridge.
+function Sch.SkipUiThisFrame()
+    Sch._skipUiThisFrame = true
+end
+
 function Sch.OnUpdate(timeElapsed)
     if StockPiler2.Buy and StockPiler2.Buy.PollStorePresence then
         StockPiler2.Buy.PollStorePresence()
@@ -739,9 +821,12 @@ function Sch.OnUpdate(timeElapsed)
     Sch._skipPlanThisFrame = false
     -- Skip Watch paint on the same frame as bag flush / plan rebuild.
     -- Do not remove: every PlanRebuild frame used to also carry UiFlush+WatchRows.
+    -- SkipUiThisFrame (harvest Complete): FlushWatchUiIfDirty returns with dirty held.
     if not didHeavy and StockPiler2.Ui and StockPiler2.Ui.FlushWatchUiIfDirty then
         StockPiler2.Ui.FlushWatchUiIfDirty()
     end
+    -- Clear UI-skip after FlushWatch had a chance to honor it this frame.
+    Sch._skipUiThisFrame = false
     Sch._autoAccum = (tonumber(Sch._autoAccum) or 0) + (tonumber(timeElapsed) or 0)
     local tickSec = AutoTickIntervalSec()
     if Sch._autoAccum >= tickSec then
@@ -796,8 +881,28 @@ function Sch.Initialize()
                 and StockPiler2.Grow.IsPlantQuiet() == true
             local storm = Sch.IsHarvestStormActive and Sch.IsHarvestStormActive() == true
             if not plantQuiet and not storm then
-                if StockPiler2.Grow and StockPiler2.Grow.MarkPlantJobDirty then
-                    StockPiler2.Grow.MarkPlantJobDirty()
+                -- 0.4.122: vault/bank snaps used to MarkPlantJobDirty every move → BufferFlags
+                -- with no plant work. Dirty only when AutoGrow actually has plant/additive/buffer.
+                local Watch = StockPiler2.Watch
+                local autoGrowOn = Watch and Watch.IsAutoGrowEnabled
+                    and Watch.IsAutoGrowEnabled() == true
+                local Grow = StockPiler2.Grow
+                local hasPlantWork = false
+                if autoGrowOn and Grow then
+                    if Grow.HasEmptyPlot and Grow.HasEmptyPlot() == true then
+                        hasPlantWork = true
+                    elseif Grow.NeedsCurrentStageAdditive
+                        and Grow.NeedsCurrentStageAdditive() == true
+                    then
+                        hasPlantWork = true
+                    elseif Grow.HasPendingBufferRefine
+                        and Grow.HasPendingBufferRefine() == true
+                    then
+                        hasPlantWork = true
+                    end
+                end
+                if hasPlantWork and Grow.MarkPlantJobDirty then
+                    Grow.MarkPlantJobDirty()
                 end
                 if Sch.ShouldWakeAutoGrowUrgent and Sch.ShouldWakeAutoGrowUrgent() then
                     Sch._autoGrowFast = true
@@ -841,6 +946,7 @@ function Sch.Initialize()
             -- Skill gates alone leave Watch stock/craftable/status from the pre-bag paint.
             if StockPiler2.Ui then
                 StockPiler2.Ui._watchUiLastKey = nil
+                StockPiler2.Ui._watchUiLastBrewKey = nil
                 StockPiler2.Ui._watchUiFlushedAt = 0
                 if StockPiler2.Ui.MarkWatchUiDirty then
                     StockPiler2.Ui.MarkWatchUiDirty()

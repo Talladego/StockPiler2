@@ -73,6 +73,16 @@ function StockPiler2.Persistence.EnsureSettings()
     if s.language == nil then
         s.language = 0
     end
+    if s.potionKnownRecipeOnly == nil then
+        s.potionKnownRecipeOnly = false
+    end
+    -- Hitch settings moved to LibPerf; drop obsolete persisted keys.
+    if s.perfEnabled ~= nil then
+        s.perfEnabled = nil
+    end
+    if s.perfThresholdMs ~= nil then
+        s.perfThresholdMs = nil
+    end
     StockPiler2.Debug.Enabled = s.debugEnabled == true
     StockPiler2.Debug.EventTrace = s.eventTrace == true
     return s

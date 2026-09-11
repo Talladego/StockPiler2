@@ -224,6 +224,40 @@ function Orch.Tick()
         return
     end
     local needBuy = HasAutoBuyWork()
+    -- Post-harvest plant quiet / harvest storm: return before HasAutoGrowWork so
+    -- BufferFlags / seed-line probes do not run on held ticks (0.4.117). Keep fast
+    -- ticks but do not probe/plant/refine/fill-block. Quiet alone used to end at
+    -- 0.75s while storm lasted 1.5s — Orch then ran BufferFlags+CollectAutoGrowSeedLines
+    -- +Refine.TryTick mid-storm. Also require storm when canPlant is false (soft wake
+    -- before empties). Do not revert to probing HasAutoGrowWork first.
+    local plantQuiet = StockPiler2.Grow
+        and StockPiler2.Grow.IsPlantQuiet
+        and StockPiler2.Grow.IsPlantQuiet() == true
+    local harvestStorm = StockPiler2.Scheduler
+        and StockPiler2.Scheduler.IsHarvestStormActive
+        and StockPiler2.Scheduler.IsHarvestStormActive() == true
+    if plantQuiet or harvestStorm then
+        if StockPiler2.Scheduler and StockPiler2.Scheduler.SetAutoGrowIdle then
+            StockPiler2.Scheduler.SetAutoGrowIdle(false)
+        end
+        TryBuyTick(Orch.NewOpId())
+        if StockPiler2.Perf and StockPiler2.Perf.End then
+            StockPiler2.Perf.End("Orchestrator.Tick")
+        end
+        return
+    end
+    -- 0.4.126: brew session — skip AutoGrow probes (PickPlant / BufferFlags) mid-brew.
+    -- Plant/refine already no-op when session active; still allow AutoBuy.
+    if Orch.IsBrewSessionActive() == true then
+        if StockPiler2.Scheduler and StockPiler2.Scheduler.SetAutoGrowIdle then
+            StockPiler2.Scheduler.SetAutoGrowIdle(false)
+        end
+        TryBuyTick(Orch.NewOpId())
+        if StockPiler2.Perf and StockPiler2.Perf.End then
+            StockPiler2.Perf.End("Orchestrator.Tick")
+        end
+        return
+    end
     if not HasAutoGrowWork() then
         if StockPiler2.Scheduler and StockPiler2.Scheduler.SetAutoGrowIdle then
             StockPiler2.Scheduler.SetAutoGrowIdle(true)
@@ -249,27 +283,6 @@ function Orch.Tick()
     local canPlant = false
     if StockPiler2.Grow and StockPiler2.Grow.HasEmptyPlot and StockPiler2.Grow.HasEmptyPlot() then
         canPlant = true
-    end
-    -- Post-harvest plant quiet / harvest storm: keep fast ticks but do not
-    -- probe/plant/refine/fill-block. Quiet alone used to end at 0.75s while storm
-    -- lasted 1.5s — Orch then ran BufferFlags+CollectAutoGrowSeedLines+Refine.TryTick
-    -- mid-storm. Also require storm even when canPlant is false (soft wake before
-    -- empties). Do not revert to `canPlant and plantQuiet` only.
-    local plantQuiet = StockPiler2.Grow
-        and StockPiler2.Grow.IsPlantQuiet
-        and StockPiler2.Grow.IsPlantQuiet() == true
-    local harvestStorm = StockPiler2.Scheduler
-        and StockPiler2.Scheduler.IsHarvestStormActive
-        and StockPiler2.Scheduler.IsHarvestStormActive() == true
-    if plantQuiet or harvestStorm then
-        if StockPiler2.Scheduler and StockPiler2.Scheduler.SetAutoGrowIdle then
-            StockPiler2.Scheduler.SetAutoGrowIdle(false)
-        end
-        TryBuyTick(Orch.NewOpId())
-        if StockPiler2.Perf and StockPiler2.Perf.End then
-            StockPiler2.Perf.End("Orchestrator.Tick")
-        end
-        return
     end
     local hasSeeds = false
     if canPlant and StockPiler2.Grow and StockPiler2.Grow.HasSeedsForNextPlant then

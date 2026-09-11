@@ -405,6 +405,61 @@ function CA.FindSeedSlot(seedUid, seedKey)
     return 0, nil, CA.CraftingBackpackType()
 end
 
+--- Stash FindSeedSlot result on a plant job (snapGen + seedUid keyed).
+--- TryPlant reuses via TrySeedSlotFromJob when GetPlantJob returns the same job.
+function CA.StashSeedSlotOnJob(job, seedUid, slot, bagKey, snapGen)
+    if type(job) ~= "table" then
+        return
+    end
+    seedUid = tonumber(seedUid) or 0
+    slot = tonumber(slot) or 0
+    if seedUid <= 0 or slot <= 0 then
+        return
+    end
+    job._seedSlotUid = seedUid
+    job._seedSlot = slot
+    job._seedSlotBagKey = bagKey
+    job._seedSlotSnapGen = tonumber(snapGen) or 0
+end
+
+--- Resolve a previously stashed job seed slot when snapGen + seedUid still match.
+function CA.TrySeedSlotFromJob(job)
+    if type(job) ~= "table" then
+        return 0, nil, CA.CraftingBackpackType()
+    end
+    local seedUid = tonumber(job.seedUid) or 0
+    local slot = tonumber(job._seedSlot) or 0
+    local bagKey = job._seedSlotBagKey
+    local Inv = StockPiler2.Inventory
+    local snapGen = Inv and Inv.GetSnapGen and Inv.GetSnapGen() or 0
+    if seedUid <= 0 or slot <= 0 then
+        return 0, nil, CA.CraftingBackpackType()
+    end
+    if (tonumber(job._seedSlotUid) or 0) ~= seedUid then
+        return 0, nil, CA.CraftingBackpackType()
+    end
+    if (tonumber(job._seedSlotSnapGen) or 0) ~= snapGen then
+        return 0, nil, CA.CraftingBackpackType()
+    end
+    local item = nil
+    if Inv and Inv._ready == true and type(Inv._itemBySlot) == "table"
+        and type(Inv._itemBySlot[bagKey]) == "table"
+    then
+        item = Inv._itemBySlot[bagKey][slot]
+    end
+    if type(item) ~= "table" or (tonumber(item.uniqueID) or 0) ~= seedUid then
+        return 0, nil, CA.CraftingBackpackType()
+    end
+    local stack = tonumber(item.stackCount) or tonumber(item.StackCount) or 1
+    if stack <= 0 then
+        return 0, nil, CA.CraftingBackpackType()
+    end
+    if Inv and Inv.CanUseCraftingItem and not Inv.CanUseCraftingItem(item) then
+        return 0, nil, CA.CraftingBackpackType()
+    end
+    return slot, item, BackpackTypeForBagKey(bagKey)
+end
+
 function CA.PlantSeed(plotNum, slot, backpackType)
     plotNum = tonumber(plotNum) or 0
     slot = tonumber(slot) or 0

@@ -2,7 +2,7 @@
 
 Greenfield rewrite of StockPiler using an **Orchestrator + Stores + Planner + Executors** architecture. Runs as a **separate addon** alongside v1 — does not modify the original StockPiler folder.
 
-**Version:** 0.4.114
+**Version:** 0.4.129
 
 Repository: [Talladego/StockPiler2](https://github.com/Talladego/StockPiler2)
 
@@ -155,6 +155,36 @@ On each user-facing ship, bump together:
 | **Major** (`N+1.0.0`) | Breaking saved-var / architecture break (rare in 0.x) |
 
 ## Changelog
+
+**0.4.129:** Chat — harvest / brew success / AutoBuy gain lines use clickable item LINKs (`ITEM:uid`); plant and load messages stay plain text.
+
+**0.4.128:** AutoBuy — chat `AutoBuy: Nx Name (spent Xg)` per material type when that type's need is filled (not one summary on vendor close); flush leftovers on stop/close.
+
+**0.4.127:** Chat — "All watches ready to craft" + brew chime only when every watch is green and at least one is Ready to brew (not when all are Potions stocked after /reloadui).
+
+**0.4.126:** Perf — mid-brew: defer PlanRebuild while apo session loading/loaded (not bag flush); keep plan snapshot across crafts; one rebuild on session clear; hold Watch paint except Load/Brew chrome; SkipPlan/SkipUi on craft frame; Orch.Tick skips AutoGrow probes during brew (still AutoBuy).
+
+**0.4.125:** Perf — post-replant: defer PlanRebuild while refine outstanding/pending (one rebuild when clear); SkipPlan/SkipUi on refine delivery frame; fill-wave keeps plan cache; BufferFlags reuse mid-refine when garden full; IntentCacheKey drops snapGen.
+
+**0.4.124:** AutoGrow — print plant chat on accepted PlantSeed (once via meta.chatted); soil confirm only clears pending. FlushPendingSyncAll also runs Grow confirm. Fixes last-plot chat when soil lag / fill-wave wipe skipped notify.
+
+**0.4.123:** AutoGrow — last-plot replant chat: do not `OnFillWaveComplete` (force-clear pending meta) while a plant is still awaiting soil confirm; confirm from SyncPlot cache and complete the wave only after pending clears.
+
+**0.4.122:** Perf — vault/bank↔bag moves: snap-only Watch paint no longer nudges PlanRebuild; INVENTORY_SNAPSHOT MarkPlantJobDirty only when AutoGrow has empty plot / additive / buffer work; pending-harvest Snapshot clears lootDirty on no non-seed gain (stops stuck ~1s Harvest.Snapshot loops).
+
+**0.4.121:** Watch — after R-click unload, block board re-adopt / BrewUi for 1.5s so deferred ClearSlots craft updates cannot flip Load→Brew→Load. Intentional Load clears the block.
+
+**0.4.120:** Watch — suppress brew UI refresh/adopt while clearing a loaded session so ClearSlots craft updates cannot briefly re-show Brew/Idle before Load.
+
+**0.4.119:** Watch — Load/Brew row labels track apo session again (WatchContentKey + flush interval ignored brew phase, so first Load left the chip on Load until a later bag/plan paint).
+
+**0.4.118:** Perf — Watch-open plan coalesce uses `PLAN_MIN_GAP` (nudge no longer bypasses the 2s gap; open wait was 0.5s). Storm end prewarms `BuildBalancedSpecDemand` on the plan-skipped frame so first replant can cache-hit. Plant job stashes seed slot by snapGen+seedUid for same-tick reuse. ~140ms Tick/(none) floor remains client noise.
+
+**0.4.117:** Perf — after harvest Complete, skip Watch paint one frame (`SkipUiThisFrame`) so Complete does not fuse with UiFlush/WatchRows/Footer; Orch storm/quiet returns before `HasAutoGrowWork` (no BufferFlags probe on held ticks). LibPerf note: trails stick ~0.1s across frames — success is Complete spikes without UiFlush/WatchRows, not “trail never lists Complete and PlanRebuild together.”
+
+**0.4.116:** AutoGrow — defer plant/additives in scenario/combat/RvR (same gate as bag flush); plant chat only after soil confirms; 6s per-plot cooldown when pending expires still empty (stops unconfirmed replant spam).
+
+**0.4.115:** Persistence — strip historical settings-flag leaks from Account on load; drop obsolete `perfEnabled`/`perfThresholdMs` from Settings (LibPerf owns hitch config); `/sp2 audit` reports unexpected Account top-level keys. Architecture review doc: `docs/ARCHITECTURE_REVIEW_0.4.114.md`.
 
 **0.4.114:** AutoGrow — plant-hold for ready harvest only when the garden is a uniform ready/mid-batch wave (Grown + empty, no mid-grow). Staggered timers still allow planting empties.
 

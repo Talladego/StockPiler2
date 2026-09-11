@@ -100,7 +100,8 @@ StockPiler2.Locale.Packs[LANG] = {
     ["plan.autogrow_idle"] = L"AutoGrow idle: {summary}.",
 
     -- Buy
-    ["buy.bought"] = L"Bought: {list} (spent {spent}).",
+    ["buy.purchased"] = L"AutoBuy: {qty}x {name} (spent {spent}).",
+    ["buy.bought"] = L"AutoBuy: {list} (spent {spent}).",
     ["buy.stopped"] = L"AutoBuy stopped.",
     ["buy.stopped_reserve"] = L"AutoBuy stopped. Stopped: gold reserve.",
     ["buy.stopped_budget"] = L"AutoBuy stopped. Stopped: budget.",

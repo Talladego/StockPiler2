@@ -459,8 +459,14 @@ function StockPiler2TabWatch.ClearRowPaintCache()
 end
 
 --- Invalidate Load/Brew paint keys only — no paint. Pair with MarkWatchUiDirty.
+--- Clears Watch content coalesce key so FlushWatchUiIfDirty cannot drop dirty when
+--- only brew session phase changed (Load→Brew / unload).
 function StockPiler2TabWatch.InvalidateBrewChrome()
     StockPiler2TabWatch._rowPaintKey = nil
+    if StockPiler2.Ui then
+        StockPiler2.Ui._watchUiLastKey = nil
+        StockPiler2.Ui._watchUiLastBrewKey = nil
+    end
 end
 
 function StockPiler2TabWatch.UpdateRows()

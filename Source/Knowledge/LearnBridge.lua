@@ -327,9 +327,13 @@ function LB.OnUpdateProcessed()
             end
             -- Perf: Scheduler.OnUpdate runs later this frame — skip PlanRebuild so
             -- Harvest.Complete does not fuse with WarmHave (0.4.95 trail ~185–210ms).
-            -- Do not remove SkipPlanThisFrame here.
+            -- SkipUiThisFrame: hold Watch paint so Complete does not fuse with
+            -- UiFlush/WatchRows/Footer (0.4.117). Do not remove either skip here.
             if StockPiler2.Scheduler and StockPiler2.Scheduler.SkipPlanThisFrame then
                 StockPiler2.Scheduler.SkipPlanThisFrame()
+            end
+            if StockPiler2.Scheduler and StockPiler2.Scheduler.SkipUiThisFrame then
+                StockPiler2.Scheduler.SkipUiThisFrame()
             end
             if learned then
                 RefreshUiIfLearned()
@@ -347,9 +351,12 @@ function LB.OnUpdateProcessed()
                 StockPiler2.Perf.End("LearnBridge.OnUpdate")
             end
             if willAttempt then
-                -- Same SkipPlanThisFrame as force path — settle complete also stacks WarmHave.
+                -- Same SkipPlan/SkipUi as force path — settle complete also stacks WarmHave/UI.
                 if StockPiler2.Scheduler and StockPiler2.Scheduler.SkipPlanThisFrame then
                     StockPiler2.Scheduler.SkipPlanThisFrame()
+                end
+                if StockPiler2.Scheduler and StockPiler2.Scheduler.SkipUiThisFrame then
+                    StockPiler2.Scheduler.SkipUiThisFrame()
                 end
             end
             if learned then
