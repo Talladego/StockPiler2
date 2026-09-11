@@ -2,7 +2,7 @@
 
 <ModuleFile xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 
-    <UiMod name="StockPiler2" version="0.4.129" date="2026-09-11">
+    <UiMod name="StockPiler2" version="0.4.130" date="2026-09-11">
 
         <Author name="Talladego" email="" />
 
@@ -51,6 +51,8 @@
             <File name="Source/Core/Audit.lua" />
 
             <File name="Source/Core/Scheduler.lua" />
+
+            <File name="Source/Core/FrameWork.lua" />
 
             <File name="Source/Core/Orchestrator.lua" />
 

@@ -110,12 +110,10 @@ function Sch.IsHarvestStormActive()
         if StockPiler2.Grow and StockPiler2.Grow.MarkPlantJobDirty then
             StockPiler2.Grow.MarkPlantJobDirty()
         end
-        -- Perf (0.4.118): prewarm demand on this plan-skipped frame so the following
-        -- Orch plant hits _demandCache (snapGen:watchGen) instead of cold-building
-        -- BuildBalancedSpecDemand on the plant hitch. Bag snap between here and plant
-        -- correctly misses and rebuilds.
-        if StockPiler2.RecipeSpec and StockPiler2.RecipeSpec.BuildBalancedSpecDemand then
-            StockPiler2.RecipeSpec.BuildBalancedSpecDemand()
+        -- 0.4.130: do NOT sync BuildBalancedSpecDemand here (was cold-build on storm
+        -- expiry hitch). FrameWork prewarm fills demand/seed-lines/WarmHave across frames.
+        if Sch.RequestCachePrewarm then
+            Sch.RequestCachePrewarm("storm-end")
         end
     end
     return false
@@ -472,6 +470,10 @@ function Sch.EnqueuePlanRebuild(opts)
         -- Stretch to longer awake/min-gap deadline; never keep a stale short one.
         Sch._planAt = at
     end
+    -- Arm cache prewarm while plan waits (storm-end / wake paths without BagFlush).
+    if nudge ~= true and Sch.RequestCachePrewarm then
+        Sch.RequestCachePrewarm("plan-enqueue")
+    end
 end
 
 function Sch.IsPlanRebuildPending()
@@ -602,7 +604,54 @@ local function FlushBagIfDue()
     if needQueue then
         Sch.EnqueuePlanRebuild()
     end
+    -- 0.4.130: after Flatten, prewarm have/demand/seed-lines off the next quiet frames
+    -- so PlanRebuild / Orch.Tick hit cache instead of cold WarmHave on the plant hitch.
+    if Sch.RequestCachePrewarm then
+        Sch.RequestCachePrewarm("bag-flush")
+    end
     return true
+end
+
+--- Slice-behind prewarm for plant/plan hitches (see Source/Core/FrameWork.lua PATTERN).
+--- Hot readers keep last-complete caches; jobs cancel/replace when gen changes.
+function Sch.RequestCachePrewarm(reason)
+    local FW = StockPiler2.FrameWork
+    if not FW or not FW.StartOnce then
+        return
+    end
+    local snapGen = 0
+    if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
+        snapGen = tonumber(StockPiler2.Inventory.GetSnapGen()) or 0
+    end
+    local watchGen = 0
+    if StockPiler2.Watch and StockPiler2.Watch.GetGen then
+        watchGen = tonumber(StockPiler2.Watch.GetGen()) or 0
+    end
+    local genKey = tostring(snapGen) .. ":" .. tostring(watchGen)
+    local RS = StockPiler2.RecipeSpec
+    -- WarmHave first — PlanRebuild's expensive nested bag walk.
+    if RS and RS.WarmSpecHaveCacheForWatches then
+        FW.StartOnce("prewarm-warm-have", genKey, function()
+            RS.WarmSpecHaveCacheForWatches()
+        end)
+    end
+    if RS and RS.BuildBalancedSpecDemand then
+        FW.StartOnce("prewarm-demand", genKey, function()
+            RS.BuildBalancedSpecDemand()
+        end)
+    end
+    if RS and RS.CollectAutoGrowSeedLines then
+        FW.StartOnce("prewarm-seed-lines", genKey, function()
+            RS.CollectAutoGrowSeedLines()
+            -- BufferFlags key off seed-lines; force refresh after lines warm.
+            if StockPiler2.Grow then
+                StockPiler2.Grow._bufferFlagsKey = nil
+            end
+        end)
+    end
+    if StockPiler2.Debug and StockPiler2.Debug.Enabled == true and StockPiler2.Debug.LogOp then
+        StockPiler2.Debug.LogOp("perf", "prewarm armed reason=" .. tostring(reason or "") .. " gen=" .. genKey)
+    end
 end
 
 local function RebuildPlanIfDue()
@@ -613,6 +662,17 @@ local function RebuildPlanIfDue()
     -- UPDATE_PROCESSED. Skipping plan this frame avoids LearnBridge+WarmHave fusion
     -- (~185–210ms). Do not remove — wake still enqueues; WarmHave moves to next frame.
     if Sch._skipPlanThisFrame == true then
+        return false
+    end
+    -- 0.4.130: wait one more coalesce tick while WarmHave prewarm still running for
+    -- this snap — avoids PlanRebuild paying cold Build.WarmHave on the same hitch.
+    local FW = StockPiler2.FrameWork
+    if FW and FW.IsActive and FW.IsActive("prewarm-warm-have") then
+        local holdAt = Now() + 0.05
+        local cur = tonumber(Sch._planAt) or 0
+        if holdAt > cur then
+            Sch._planAt = holdAt
+        end
         return false
     end
     local defer, reason = Sch.ShouldDeferPlanRebuild()
@@ -776,8 +836,10 @@ end
 --- One-frame skip after harvest-complete attempt: hold Watch paint so Complete does not
 --- fuse with UiFlush/WatchRows/Footer on the same UPDATE_PROCESSED. Dirty stays;
 --- FlushWatch runs on a later frame. Pair with SkipPlanThisFrame from LearnBridge.
+--- Also sets _skipUiHoldFooter so EngineEventBridge Footer flush (after Scheduler) holds.
 function Sch.SkipUiThisFrame()
     Sch._skipUiThisFrame = true
+    Sch._skipUiHoldFooter = true
 end
 
 function Sch.OnUpdate(timeElapsed)
@@ -814,12 +876,21 @@ function Sch.OnUpdate(timeElapsed)
     if FlushBagIfDue() then
         didHeavy = true
     end
+    -- 0.4.130: frame-sliced prewarm — only on frames without BagFlush so Flatten
+    -- does not fuse with WarmHave. Jobs armed by RequestCachePrewarm after flush.
+    if not didHeavy
+        and StockPiler2.FrameWork
+        and StockPiler2.FrameWork.Pump
+        and StockPiler2.FrameWork.Pump() == true
+    then
+        didHeavy = true
+    end
     if not didHeavy and RebuildPlanIfDue() then
         didHeavy = true
     end
     -- Clear plan-skip after RebuildPlanIfDue had a chance to honor it this frame.
     Sch._skipPlanThisFrame = false
-    -- Skip Watch paint on the same frame as bag flush / plan rebuild.
+    -- Skip Watch paint on the same frame as bag flush / plan rebuild / FrameWork.
     -- Do not remove: every PlanRebuild frame used to also carry UiFlush+WatchRows.
     -- SkipUiThisFrame (harvest Complete): FlushWatchUiIfDirty returns with dirty held.
     if not didHeavy and StockPiler2.Ui and StockPiler2.Ui.FlushWatchUiIfDirty then

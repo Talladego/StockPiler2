@@ -189,6 +189,13 @@ function StockPiler2Window.FlushPendingFooterRefresh()
     if StockPiler2Window._footerRefreshPending ~= true then
         return
     end
+    -- 0.4.130: hold Footer when harvest Complete / refine delivery armed SkipUi.
+    -- Scheduler clears the flag after Watch flush; we run after Scheduler and peek
+    -- a sticky hold so Footer does not fuse with ReconcileAll / Harvest.Complete.
+    local Sch = StockPiler2.Scheduler
+    if Sch and Sch._skipUiHoldFooter == true then
+        return
+    end
     StockPiler2Window._footerRefreshPending = false
     -- Always sync macros; chrome updates only when the window is open (inside Sync).
     StockPiler2Window.SyncActionReadiness()

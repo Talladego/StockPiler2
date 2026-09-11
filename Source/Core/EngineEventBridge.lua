@@ -257,9 +257,6 @@ function Bridge.OnUpdateProcessed(timeElapsed)
     if StockPiler2.Macro and StockPiler2.Macro.DrainEnabledSync then
         StockPiler2.Macro.DrainEnabledSync()
     end
-    if StockPiler2Window and StockPiler2Window.FlushPendingFooterRefresh then
-        StockPiler2Window.FlushPendingFooterRefresh()
-    end
     -- One Brew.OnCraftingUpdated max per frame (craft-slot coalesce); storm may still hold.
     -- Promote post-storm BrewUi arm from a prior expiry frame before flush (0.4.101).
     if StockPiler2.Scheduler and StockPiler2.Scheduler.PromotePostStormBrewUi then
@@ -273,6 +270,15 @@ function Bridge.OnUpdateProcessed(timeElapsed)
     end
     if StockPiler2.Scheduler and StockPiler2.Scheduler.OnUpdate then
         StockPiler2.Scheduler.OnUpdate(timeElapsed)
+    end
+    -- 0.4.130: Footer AFTER LearnBridge/Scheduler so SkipUiThisFrame (Harvest.Complete /
+    -- Refine delivery) can hold Footer off the same hitch as Complete/Reconcile.
+    -- Pending stays set when skipped; next frame flushes.
+    if StockPiler2Window and StockPiler2Window.FlushPendingFooterRefresh then
+        StockPiler2Window.FlushPendingFooterRefresh()
+    end
+    if StockPiler2.Scheduler then
+        StockPiler2.Scheduler._skipUiHoldFooter = false
     end
 end
 

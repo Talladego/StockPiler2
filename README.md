@@ -2,7 +2,7 @@
 
 Greenfield rewrite of StockPiler using an **Orchestrator + Stores + Planner + Executors** architecture. Runs as a **separate addon** alongside v1 — does not modify the original StockPiler folder.
 
-**Version:** 0.4.129
+**Version:** 0.4.130
 
 Repository: [Talladego/StockPiler2](https://github.com/Talladego/StockPiler2)
 
@@ -155,6 +155,8 @@ On each user-facing ship, bump together:
 | **Major** (`N+1.0.0`) | Breaking saved-var / architecture break (rare in 0.x) |
 
 ## Changelog
+
+**0.4.130:** Perf — frame-slice pattern in-addon (`Source/Core/FrameWork.lua`): fuse Footer after LearnBridge/Scheduler + SkipUi holds Footer; Reconcile frames SkipUi; storm-end/bag-flush prewarm WarmHave/Demand/seed-lines across frames (no sync BuildBalancedSpecDemand on storm expiry); PlanRebuild waits while warm-have prewarm active. PATTERN comments for reuse by other addons.
 
 **0.4.129:** Chat — harvest / brew success / AutoBuy gain lines use clickable item LINKs (`ITEM:uid`); plant and load messages stay plain text.
 

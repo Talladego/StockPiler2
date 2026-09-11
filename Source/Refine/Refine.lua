@@ -1715,6 +1715,12 @@ function Refine.OnUpdateProcessed()
     end
     Refine._reconcileSnapGen = snapGen
 
+    -- 0.4.130: hold Watch/Footer only on frames that actually Reconcile (libperf 295/394ms).
+    local Sch = StockPiler2.Scheduler
+    if Sch and Sch.SkipUiThisFrame then
+        Sch.SkipUiThisFrame()
+    end
+
     if StockPiler2.Perf and StockPiler2.Perf.Begin then
         StockPiler2.Perf.Begin("Refine.OnUpdateProcessed")
     end
