@@ -62,6 +62,16 @@ function StockPiler2.Watch.IsSeedBufferEnabled()
     return row.growSeedBufferEnabled ~= false
 end
 
+--- Pause AutoGrow plant/additives while inCombat or scenario (default on).
+--- Never gates on isInRvRLake / RvR flag.
+function StockPiler2.Watch.IsAutoGrowPauseCombat()
+    local row = StockPiler2.Watch.CharacterRow()
+    if type(row) ~= "table" then
+        return true
+    end
+    return row.autoGrowPauseCombat ~= false
+end
+
 function StockPiler2.Watch.IsAutoBuyEnabled()
     local row = StockPiler2.Watch.CharacterRow()
     return type(row) == "table" and row.autoBuyEnabled == true

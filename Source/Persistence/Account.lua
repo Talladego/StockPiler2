@@ -4,7 +4,7 @@
 
 StockPiler2.DefaultAccount = {
     -- Client-global knowledge schema version (not a game-account setting).
-    accountVersion = 1,
+    accountVersion = 3,
     items = {},
     grows = {},
     refines = {},
@@ -25,6 +25,7 @@ local ACCOUNT_LEAKED_SETTINGS_KEYS = {
     "autoBuyBudgetGold",
     "growSeedBufferMin",
     "growSeedBufferEnabled",
+    "autoGrowPauseCombat",
     "brewMacroEnabled",
     "brewRespectGrowReserve",
     "watches",
@@ -57,6 +58,8 @@ function StockPiler2.Persistence.EnsureAccount()
             a[k] = nil
         end
     end
+    -- v2 seed-map cleanup runs in SeedMap.EnsureSpecBootstrap (after SeedMap loads).
+    -- Do not bump accountVersion here — SeedMap may not exist yet at EnsureAccount time.
     if StockPiler2.Knowledge and StockPiler2.Knowledge.Ensure then
         StockPiler2.Knowledge.Ensure()
     end

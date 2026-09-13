@@ -2,7 +2,7 @@
 
 Greenfield rewrite of StockPiler using an **Orchestrator + Stores + Planner + Executors** architecture. Runs as a **separate addon** alongside v1 — does not modify the original StockPiler folder.
 
-**Version:** 0.4.130
+**Version:** 0.4.144
 
 Repository: [Talladego/StockPiler2](https://github.com/Talladego/StockPiler2)
 
@@ -37,7 +37,7 @@ On first load, StockPiler2 creates ActionBar macros **StockPiler2 Harvest** and 
 | `/sp2 mem` | Live table key counts only (safe footprint triage; do **not** `d(StockPiler2)`) |
 | `/sp2 harvest` | Prepare next ready plot (macro/CMD path) |
 
-Perf tip: enable the **LibPerf** addon (optional dependency). Use `/libperf StockPiler2 on 100` (settings persist in LibPerf). Spikes with `trail=(none)` / high `emptyTrail%` on baseline are usually **engine** stalls (native craft/UI, DXVK, other addons, zone load)—not missing Lua sites. Empty trail means SP2 did not `Begin` recently; leave those alone. Empty-trail spike lines are rate-limited (summary still counts every hitch). Logs: `logs/libperf_StockPiler2.log`. Use `/libperf scopes` to list paths.
+Perf tip: enable the **LibPerf** addon (optional dependency). Use `/libperf StockPiler2 on 250` (settings persist in LibPerf; thresholds below 250 are bumped on load because the client idle floor is often ~140–155 ms). Spikes with `trail=(none)` / high `emptyTrail%` on baseline are usually **engine** stalls (native craft/UI, DXVK, other addons, zone load)—not missing Lua sites. Empty trail means SP2 did not `Begin` recently; leave those alone. Empty-trail spike lines are rate-limited (summary still counts every hitch). Logs: `logs/libperf_StockPiler2.log`. Use `/libperf scopes` to list paths.
 
 ## UI
 
@@ -109,7 +109,7 @@ English catalog lives in `Source/Locale/enUS.lua`. User chat and on-screen UI go
 
 ## Profiling (LibPerf)
 
-Install and enable **LibPerf** alongside StockPiler2. Then `/libperf StockPiler2 on 100` writes hitch breadcrumbs to `logs/libperf_StockPiler2.log`. All enable/threshold/summary/baseline (global and per-scope) is via `/libperf` only; StockPiler2 registers the `StockPiler2` scope at load.
+Install and enable **LibPerf** alongside StockPiler2. Then `/libperf StockPiler2 on 250` writes hitch breadcrumbs to `logs/libperf_StockPiler2.log`. All enable/threshold/summary/baseline (global and per-scope) is via `/libperf` only; StockPiler2 registers the `StockPiler2` scope at load.
 
 ## Memory / introspection
 
@@ -155,6 +155,34 @@ On each user-facing ship, bump together:
 | **Major** (`N+1.0.0`) | Breaking saved-var / architecture break (rare in 0.x) |
 
 ## Changelog
+
+**0.4.144:** Perf — restore/bump LibPerf threshold to ≥250ms (client floor ~150ms); Footer no longer `Perf.Begin` on SyncActionReadiness no-ops (stops Footer xN000 trail glue). LibPerf 1.2.3 — low-threshold warn at 250ms.
+
+**0.4.143:** Fix — Watch Status follows live bag counts for stocked / Ready to brew / Seed buffer flips within ~1s (no longer waits on deferred PlanRebuild). Brew session allows Watch paint every 1s so Stock/Status stay current while apo stays open.
+
+**0.4.142:** Fix — sticky `refineConvertFailed` no longer permanently blacklists proven plant→seed converts (Gobswort/Goldweed/Fusk/Beardweed); session cooldown only. accountVersion 3 clears false SV flags; Special Squig Bits stays blocked. Unblocks AutoGrow when bag had plants but refinable=0.
+
+**0.4.141:** Fix — AutoGrow plant spam: chat only when soil leaves EMPTY (no optimistic PlantSeed chat); garden-wide 8s quiet after unconfirmed plant; force InvalidatePlantQueue arms unconfirmed cooldowns instead of wiping protection. Fix — seed-buffer refine only converts surplus plants above brew need (stops burning Gobswort/Goldweed feedstock); 45s cooldown after no-convert / expire-stuck.
+
+**0.4.140:** Fix — SeedMap pollution: Scorching Ashberry / Marshroot no longer map to Drunken Dandedragon (Energy). Matching ignores unrelated grows/refine.seedUid; PrimaryPlant never returns unrelated products; refine.seedUid prefers highest-sample related seedOut; load-time EnsureSpecBootstrap + accountVersion 2 cleanup. Grow.TryPlant only LearnMapping when pair looks related.
+
+**0.4.139:** Fix — AutoGrow plant no longer blocked by `isInRvRLake` (idle lake stay was stuck empty); Watch **Combat pause** toggles combat/scenario plant pause only. Orch does not fill-block on combat/scenario defer. Perf — skip FrameWork.Pump on SkipPlan/harvest-storm; hold Footer for storm/quiet; HoldPlan/Orch prewarm waits include seed-lines.
+
+**0.4.138:** Liniment purple seeds — prefer Eternal ≫ Exceptional ≫ blue when planting; treat Eternal/Exceptional as opaque replant (credit a full plot wave while owned; bag stack does not drop per plant). Strip Eternal/Exceptional/Bunched name prefixes for Bloodseed↔Powder relatedness.
+
+**0.4.137:** Fix — failed refine converts (false `isRefinable` butcher mats like Special Squig Bits) fast-fail in ~1.5s, clear pending/outstanding, and blacklist the uid so AutoGrow does not stall; real seed→plant Extender/Multiplier/Stimulant converts still work.
+
+**0.4.136:** Fix — when the craft bag is full, harvest/refine learning and brew load also see CRAFTING mats in inventory (overflow); Have counts already included both bags.
+
+**0.4.135:** Perf — settings soft/light paths: Reserve/Budget chips no longer BumpWatch/PlanRebuild; Additives/AutoBuy toggles skip plan invalidate; Seed buffer + AutoGrow use Bump + prewarm + coalesced PlanRebuild (MarkWatchUiDirty, no sync Refresh). `Grow.OnDemandChanged` keeps Have caches (`keepPlanCache`) so settings clicks do not cold-WarmHave.
+
+**0.4.134:** Fix — after AutoBuy fills flasks/mats, Status stayed `Buy flasks` (Brew/macro grey) until `/sp2 watchplan`. Tip Have overlays were live, but plan `statusKey` was never rebuilt (per-purchase plan invalidate intentionally removed). Now arm one coalesced PlanRebuild + prewarm when buy jobs go idle after buys, or on visit stop with buys.
+
+**0.4.133:** Perf — target chip (+/-) when bag stock already covers both old and new target no longer BumpGen / Invalidate / OnDemandChanged / PlanRebuild (was ~400–750ms for stocked→stocked tweaks like 40→41 with have 50). Optimistic row paint + in-place PlanSnapshot target patch only; crossing stock / zero-target still full rebuild.
+
+**0.4.132:** Perf — make FrameWork prewarm win before PlanRebuild and post-brew Orch.Tick: skip Pump/BufferFlags during brew session; re-arm prewarm on snapGen drift while plan pending + arm on brew-clear; hold PlanRebuild/Orch.Tick until have/demand caches match current snap (capped); one StartOnce job per Pump frame; skip Planner WarmHave when already warm; hold Footer on PlanRebuild didHeavy; one GetPlantJob per Orch.Tick.
+
+**0.4.131:** Fix — footer/macro Brew stayed grey after one successful auto brew while apo session stayed loaded (row Brew still lit). Cause: brew learn invalidated the plan, PlanRebuild stayed deferred for brew-session (0.4.126), and `CanBrewNow` required a live `ready_to_craft` plan row. Now loaded auto sessions also enable from session deficit/craftable + board validate (same idea as `HasReadyToCraft`); `/sp2 watchplan` no longer needed to wake footer.
 
 **0.4.130:** Perf — frame-slice pattern in-addon (`Source/Core/FrameWork.lua`): fuse Footer after LearnBridge/Scheduler + SkipUi holds Footer; Reconcile frames SkipUi; storm-end/bag-flush prewarm WarmHave/Demand/seed-lines across frames (no sync BuildBalancedSpecDemand on storm expiry); PlanRebuild waits while warm-have prewarm active. PATTERN comments for reuse by other addons.
 

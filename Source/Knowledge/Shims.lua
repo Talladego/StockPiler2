@@ -17,6 +17,7 @@ StockPiler2.CHARACTER_ALIAS_KEYS = {
     "autoBuyBudgetGold",
     "growSeedBufferMin",
     "growSeedBufferEnabled",
+    "autoGrowPauseCombat",
     "brewMacroEnabled",
     "brewRespectGrowReserve",
 }
@@ -90,6 +91,7 @@ local function BindCharacterAliases(session, row)
         session.autoBuyBudgetGold = 50
         session.growSeedBufferMin = 5
         session.growSeedBufferEnabled = true
+        session.autoGrowPauseCombat = true
         session.brewMacroEnabled = false
         session.brewRespectGrowReserve = true
         return
@@ -105,6 +107,7 @@ local function BindCharacterAliases(session, row)
     session.autoBuyBudgetGold = tonumber(row.autoBuyBudgetGold) or 50
     session.growSeedBufferMin = tonumber(row.growSeedBufferMin) or 5
     session.growSeedBufferEnabled = row.growSeedBufferEnabled ~= false
+    session.autoGrowPauseCombat = row.autoGrowPauseCombat ~= false
     session.brewMacroEnabled = row.brewMacroEnabled ~= false
     session.brewRespectGrowReserve = row.brewRespectGrowReserve ~= false
 end

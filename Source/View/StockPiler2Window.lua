@@ -67,9 +67,6 @@ function StockPiler2Window.SyncActionReadiness(opts)
     opts = type(opts) == "table" and opts or {}
     local immediate = opts.immediate == true
     local Perf = StockPiler2.Perf
-    if Perf and Perf.Begin then
-        Perf.Begin("Footer")
-    end
 
     local windowOpen = DoesWindowExist("StockPiler2Window")
         and WindowGetShowing("StockPiler2Window") == true
@@ -83,6 +80,8 @@ function StockPiler2Window.SyncActionReadiness(opts)
         and StockPiler2.Brew.CanBrewNow() == true
 
     -- Early-out when nothing changed (craft-slot / cultivation storms).
+    -- 0.4.144: do not Perf.Begin on no-ops — continuous Footer Marks glue the trail
+    -- (Footer xN000) and drown real hitches in libperf summaries.
     if not immediate
         and StockPiler2Window._footerWindowOpen == windowOpen
         and StockPiler2Window._footerOnWatch == onWatch
@@ -95,11 +94,12 @@ function StockPiler2Window.SyncActionReadiness(opts)
             or StockPiler2.Macro._lastAppearanceKey == nil
             or StockPiler2.Macro._lastAppearanceKey == appearanceKey
         then
-            if Perf and Perf.End then
-                Perf.End("Footer")
-            end
             return canHarvest, canBrew
         end
+    end
+
+    if Perf and Perf.Begin then
+        Perf.Begin("Footer")
     end
 
     if windowOpen then
@@ -195,6 +195,19 @@ function StockPiler2Window.FlushPendingFooterRefresh()
     local Sch = StockPiler2.Scheduler
     if Sch and Sch._skipUiHoldFooter == true then
         return
+    end
+    -- 0.4.139: hold Footer for full harvest storm / plant quiet (mirror Watch).
+    -- Keep pending so one flush runs after storm; brew job stays live.
+    local brewJob = StockPiler2.Brew and type(StockPiler2.Brew._job) == "table"
+    if not brewJob then
+        if Sch and Sch.IsHarvestStormActive and Sch.IsHarvestStormActive() == true then
+            return
+        end
+        if StockPiler2.Grow and StockPiler2.Grow.IsPlantQuiet
+            and StockPiler2.Grow.IsPlantQuiet() == true
+        then
+            return
+        end
     end
     StockPiler2Window._footerRefreshPending = false
     -- Always sync macros; chrome updates only when the window is open (inside Sync).

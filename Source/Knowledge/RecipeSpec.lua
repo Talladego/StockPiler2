@@ -2261,6 +2261,29 @@ function RS.WarmSpecHaveCacheForWatches()
     return RS.WarmSpecHaveCache(specs)
 end
 
+--- True when have-cache already matches current inventory snapGen (prewarm hit).
+function RS.IsHaveCacheWarmForSnap()
+    local snapGen = 0
+    if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
+        snapGen = tonumber(StockPiler2.Inventory.GetSnapGen()) or 0
+    end
+    return type(RS._specHaveCache) == "table" and RS._specHaveSnapGen == snapGen
+end
+
+--- True when demand cache matches current snapGen:watchGen (prewarm hit).
+function RS.IsDemandCacheWarm()
+    local snapGen = 0
+    if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
+        snapGen = tonumber(StockPiler2.Inventory.GetSnapGen()) or 0
+    end
+    local watchGen = 0
+    if StockPiler2.Watch and StockPiler2.Watch.GetGen then
+        watchGen = tonumber(StockPiler2.Watch.GetGen()) or 0
+    end
+    local cacheKey = tostring(snapGen) .. ":" .. tostring(watchGen)
+    return type(RS._demandCache) == "table" and RS._demandSnapGen == cacheKey
+end
+
 --- Call at start of Orchestrator.Tick so PickPlantCandidate + CollectIntents share one
 --- BuildBalancedSpecDemand / CollectAutoGrowSeedLines result for the tick.
 function RS.BeginOrchTick()

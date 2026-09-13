@@ -1425,14 +1425,18 @@ function Planner.Build(opts)
         StockPiler2.SeedMap.ClearPlanCaches()
     end
     -- One-pass have-cache for this snapGen (replaces blind wipe + per-spec bag walks).
+    -- 0.4.132: skip when FrameWork prewarm already filled have-cache for this snap.
     if Perf and Perf.Begin then
         Perf.Begin("Build.WarmHave")
     end
-    if StockPiler2.RecipeSpec and StockPiler2.RecipeSpec.WarmSpecHaveCacheForWatches then
-        StockPiler2.RecipeSpec.WarmSpecHaveCacheForWatches()
-    elseif StockPiler2.RecipeSpec then
-        StockPiler2.RecipeSpec._specHaveCache = {}
-        StockPiler2.RecipeSpec._specHaveSnapGen = nil
+    local RS = StockPiler2.RecipeSpec
+    if RS and RS.IsHaveCacheWarmForSnap and RS.IsHaveCacheWarmForSnap() == true then
+        -- prewarm hit — leave _specHaveCache as-is
+    elseif RS and RS.WarmSpecHaveCacheForWatches then
+        RS.WarmSpecHaveCacheForWatches()
+    elseif RS then
+        RS._specHaveCache = {}
+        RS._specHaveSnapGen = nil
     end
     if Perf and Perf.End then
         Perf.End("Build.WarmHave")

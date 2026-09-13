@@ -11,19 +11,23 @@
 -- Do NOT use maxMs budgets — GetGameTime() does not advance within a frame.
 -- Prefer fuse-breaks (one heavy domain per frame: SkipPlan/SkipUi/didHeavy) before slicing.
 --
--- See README 0.4.130 and Scheduler.OnUpdate didHeavy / Skip*ThisFrame.
+-- See README 0.4.130 / 0.4.132 and Scheduler.OnUpdate didHeavy / Skip*ThisFrame.
+-- 0.4.132: DEFAULT_FRAME_BUDGET=1 so WarmHave, Demand, seed-lines each get their own frame.
 ----------------------------------------------------------------
 
 StockPiler2.FrameWork = StockPiler2.FrameWork or {}
 local FW = StockPiler2.FrameWork
 
 FW.DEFAULT_STEPS_PER_FRAME = 1
-FW.DEFAULT_FRAME_BUDGET = 4
+-- 0.4.132: one StartOnce heavy job per Pump frame (WarmHave / Demand / seed-lines
+-- used to share budget 4 and fuse into one ~280ms hitch before PlanRebuild).
+FW.DEFAULT_FRAME_BUDGET = 1
 
 FW._jobs = FW._jobs or {}
 FW._order = FW._order or {}
 FW._didWork = false
-FW._frameBudget = tonumber(FW._frameBudget) or FW.DEFAULT_FRAME_BUDGET
+-- Always adopt DEFAULT on load (0.4.132 dropped budget 4→1; do not keep a stale 4).
+FW._frameBudget = FW.DEFAULT_FRAME_BUDGET
 
 local function TryCall(context, fn, ...)
     if StockPiler2.TryCallQuiet then

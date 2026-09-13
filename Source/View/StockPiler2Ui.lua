@@ -172,14 +172,14 @@ function StockPiler2.Ui.FlushWatchUiIfDirty()
     then
         return
     end
-    -- 0.4.126: hold Watch paint during apo brew session except Load/Brew chrome flips.
-    -- INVENTORY_SNAPSHOT still MarkWatchUiDirty; dirty must survive for post-session flush.
-    -- Do not clear dirty here — Status may lag until unload; Stock/Craftable patch on next paint.
+    -- 0.4.143: during brew session still flush every 1s so live Stock/Status
+    -- patches appear; Load/Brew chrome flips still flush immediately.
     local Orch = StockPiler2.Orchestrator
+    local brewSessionHold = false
     if Orch and Orch.IsBrewSessionActive and Orch.IsBrewSessionActive() == true then
         local brewKeyHold = BrewChromeKey()
         if brewKeyHold == tostring(StockPiler2.Ui._watchUiLastBrewKey or "") then
-            return
+            brewSessionHold = true
         end
     end
     -- Window open: catch-up paint when plan/knowledge advances. Interval rate-limits
@@ -204,13 +204,19 @@ function StockPiler2.Ui.FlushWatchUiIfDirty()
     local planChanged = planGen ~= (tonumber(StockPiler2.Ui._watchUiLastPlanGen) or 0)
     -- Load→Brew / unload label must not wait on the 5s snap coalesce.
     local brewChanged = brewKey ~= tostring(StockPiler2.Ui._watchUiLastBrewKey or "")
-    -- While plan lags bags, still allow rate-limited paints: BuildVisibleList overlays
-    -- live Stock/Craftable on the last plan (Status catches up on planGen).
+    -- While plan lags bags (or brew session holds chrome-only), allow 1s paints for live overlay.
     local interval = StockPiler2.Ui.WATCH_UI_MIN_INTERVAL_SEC
-    if not knowledgeChanged and not planChanged and not brewChanged and IsWatchPlanStale() then
+    if brewSessionHold
+        or (not knowledgeChanged and not planChanged and not brewChanged and IsWatchPlanStale())
+    then
         interval = math.min(interval, 1.0)
     end
-    if not knowledgeChanged
+    if brewSessionHold and not brewChanged then
+        -- Chrome unchanged: only the 1s cadence may paint; never block forever.
+        if last > 0 and (now - last) < interval then
+            return
+        end
+    elseif not knowledgeChanged
         and not planChanged
         and not brewChanged
         and last > 0

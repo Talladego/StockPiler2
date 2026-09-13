@@ -52,6 +52,7 @@ local function Now()
     return 0
 end
 
+--- Bag Flatten cost gate: combat, RvR lake, or scenario.
 local function PlayerCombatOrScenarioDefer()
     local player = GameData and GameData.Player
     if type(player) ~= "table" then
@@ -59,6 +60,22 @@ local function PlayerCombatOrScenarioDefer()
     end
     if player.inCombat == true or player.isInRvRLake == true then
         return true, "combat-rvr"
+    end
+    if player.isInScenario == true then
+        return true, "scenario"
+    end
+    return false, nil
+end
+
+--- AutoGrow plant/additive gate: combat or scenario only — never isInRvRLake / RvR flag.
+--- Lake presence used to stall planting for the whole open-world RvR stay (idle out of combat).
+local function PlayerCombatOrScenarioPlantDefer()
+    local player = GameData and GameData.Player
+    if type(player) ~= "table" then
+        return false, nil
+    end
+    if player.inCombat == true then
+        return true, "combat"
     end
     if player.isInScenario == true then
         return true, "scenario"
@@ -205,11 +222,16 @@ function Sch.ShouldDeferBagFlush()
     return HarvestOrBrewDefer()
 end
 
---- AutoGrow plant/additives — same combat/RvR/scenario gate as bag Flatten.
+--- AutoGrow plant/additives — combat/scenario only when Watch Combat pause is on.
+--- Does not use isInRvRLake (lake farming must plant while idle). Bag Flatten keeps lake.
 --- Cultivation often rejects AddCraftingItem in scenarios while pcall still succeeds;
 --- without this gate Orch replants empties in a chat spam loop. Refine/AutoBuy stay up.
 function Sch.ShouldDeferAutoGrowPlant()
-    return PlayerCombatOrScenarioDefer()
+    local Watch = StockPiler2.Watch
+    if Watch and Watch.IsAutoGrowPauseCombat and Watch.IsAutoGrowPauseCombat() ~= true then
+        return false, nil
+    end
+    return PlayerCombatOrScenarioPlantDefer()
 end
 
 --- Plan rebuild — NOT deferred in combat (AutoGrow + Watch need live plan).
@@ -270,6 +292,10 @@ function Sch.EnqueuePlanRebuildAfterBrewClear()
         return
     end
     Sch._planHeldForBrew = false
+    -- 0.4.132: warm demand/have before first post-brew Orch.Tick / PlanRebuild.
+    if Sch.RequestCachePrewarm then
+        Sch.RequestCachePrewarm("brew-clear")
+    end
     if Sch.EnqueuePlanRebuild then
         Sch.EnqueuePlanRebuild()
     end
@@ -612,13 +638,7 @@ local function FlushBagIfDue()
     return true
 end
 
---- Slice-behind prewarm for plant/plan hitches (see Source/Core/FrameWork.lua PATTERN).
---- Hot readers keep last-complete caches; jobs cancel/replace when gen changes.
-function Sch.RequestCachePrewarm(reason)
-    local FW = StockPiler2.FrameWork
-    if not FW or not FW.StartOnce then
-        return
-    end
+local function CurrentPrewarmGenKey()
     local snapGen = 0
     if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
         snapGen = tonumber(StockPiler2.Inventory.GetSnapGen()) or 0
@@ -627,7 +647,18 @@ function Sch.RequestCachePrewarm(reason)
     if StockPiler2.Watch and StockPiler2.Watch.GetGen then
         watchGen = tonumber(StockPiler2.Watch.GetGen()) or 0
     end
-    local genKey = tostring(snapGen) .. ":" .. tostring(watchGen)
+    return tostring(snapGen) .. ":" .. tostring(watchGen)
+end
+
+--- Slice-behind prewarm for plant/plan hitches (see Source/Core/FrameWork.lua PATTERN).
+--- Hot readers keep last-complete caches; jobs cancel/replace when gen changes.
+function Sch.RequestCachePrewarm(reason)
+    local FW = StockPiler2.FrameWork
+    if not FW or not FW.StartOnce then
+        return
+    end
+    local genKey = CurrentPrewarmGenKey()
+    Sch._prewarmArmedGen = genKey
     local RS = StockPiler2.RecipeSpec
     -- WarmHave first — PlanRebuild's expensive nested bag walk.
     if RS and RS.WarmSpecHaveCacheForWatches then
@@ -654,6 +685,89 @@ function Sch.RequestCachePrewarm(reason)
     end
 end
 
+--- 0.4.132: if plan is pending and snapGen moved since last arm, re-queue prewarm.
+function Sch.MaybeRearmPrewarmOnSnapDrift(reason)
+    if Sch._planDue ~= true then
+        return
+    end
+    local genKey = CurrentPrewarmGenKey()
+    if Sch._prewarmArmedGen == genKey then
+        return
+    end
+    if Sch.RequestCachePrewarm then
+        Sch.RequestCachePrewarm(reason or "snap-drift")
+    end
+end
+
+--- Hold PlanRebuild while have/demand/seed-lines prewarm jobs still run for this snap.
+--- Caps against PLAN_MAX_STRETCH_SEC from first-due so plan cannot stall forever.
+local function HoldPlanForPrewarm()
+    -- Pump is skipped during brew; do not wait on jobs that cannot run (defer handles brew).
+    local Orch = StockPiler2.Orchestrator
+    if Orch and Orch.IsBrewSessionActive and Orch.IsBrewSessionActive() == true then
+        return false
+    end
+    local RS = StockPiler2.RecipeSpec
+    local haveWarm = RS and RS.IsHaveCacheWarmForSnap and RS.IsHaveCacheWarmForSnap() == true
+    local demandWarm = RS and RS.IsDemandCacheWarm and RS.IsDemandCacheWarm() == true
+    local FW = StockPiler2.FrameWork
+    local seedLinesActive = FW and FW.IsActive and FW.IsActive("prewarm-seed-lines") == true
+    if haveWarm and demandWarm and not seedLinesActive then
+        return false
+    end
+    if not (FW and FW.IsActive) then
+        return false
+    end
+    local waiting = false
+    if not haveWarm and FW.IsActive("prewarm-warm-have") then
+        waiting = true
+    end
+    if not demandWarm and FW.IsActive("prewarm-demand") then
+        waiting = true
+    end
+    if seedLinesActive then
+        waiting = true
+    end
+    if not waiting then
+        return false
+    end
+    local first = tonumber(Sch._planFirstDueAt) or 0
+    local maxStretch = tonumber(Sch.PLAN_MAX_STRETCH_SEC) or 6.0
+    if first > 0 and Now() >= (first + maxStretch) then
+        return false
+    end
+    local holdAt = Now() + 0.05
+    local cur = tonumber(Sch._planAt) or 0
+    if holdAt > cur then
+        Sch._planAt = holdAt
+    end
+    return true
+end
+
+--- Hold AutoGrow Orch.Tick while have/demand/seed-lines prewarm is in flight.
+--- Does not hold brew-session ticks (already skip plant probes) or AutoGrow-off buy ticks.
+local function ShouldHoldOrchForPrewarm()
+    local Watch = StockPiler2.Watch
+    if not (Watch and Watch.IsAutoGrowEnabled and Watch.IsAutoGrowEnabled() == true) then
+        return false
+    end
+    local Orch = StockPiler2.Orchestrator
+    if Orch and Orch.IsBrewSessionActive and Orch.IsBrewSessionActive() == true then
+        return false
+    end
+    local FW = StockPiler2.FrameWork
+    if not (FW and FW.IsActive) then
+        return false
+    end
+    if FW.IsActive("prewarm-demand")
+        or FW.IsActive("prewarm-warm-have")
+        or FW.IsActive("prewarm-seed-lines")
+    then
+        return true
+    end
+    return false
+end
+
 local function RebuildPlanIfDue()
     if Sch._planDue ~= true then
         return false
@@ -664,15 +778,9 @@ local function RebuildPlanIfDue()
     if Sch._skipPlanThisFrame == true then
         return false
     end
-    -- 0.4.130: wait one more coalesce tick while WarmHave prewarm still running for
-    -- this snap — avoids PlanRebuild paying cold Build.WarmHave on the same hitch.
-    local FW = StockPiler2.FrameWork
-    if FW and FW.IsActive and FW.IsActive("prewarm-warm-have") then
-        local holdAt = Now() + 0.05
-        local cur = tonumber(Sch._planAt) or 0
-        if holdAt > cur then
-            Sch._planAt = holdAt
-        end
+    -- 0.4.132: wait while WarmHave or Demand prewarm still running for this snap
+    -- (capped by PLAN_MAX_STRETCH_SEC). Skip wait when caches already match snapGen.
+    if HoldPlanForPrewarm() then
         return false
     end
     local defer, reason = Sch.ShouldDeferPlanRebuild()
@@ -721,6 +829,8 @@ local function RebuildPlanIfDue()
     if StockPiler2.Perf and StockPiler2.Perf.End then
         StockPiler2.Perf.End("PlanRebuild")
     end
+    -- 0.4.132: hold Footer on PlanRebuild didHeavy (same sticky flag as SkipUi).
+    Sch._skipUiHoldFooter = true
     return true
 end
 
@@ -878,7 +988,18 @@ function Sch.OnUpdate(timeElapsed)
     end
     -- 0.4.130: frame-sliced prewarm — only on frames without BagFlush so Flatten
     -- does not fuse with WarmHave. Jobs armed by RequestCachePrewarm after flush.
+    -- 0.4.132: also skip Pump during brew session so craft Inv.ApplySlots does not
+    -- fuse with FrameWork.Pump / BuildBalancedSpecDemand (prewarm stays queued).
+    -- 0.4.139: also skip on SkipPlanThisFrame / harvest-storm so Complete/Wake does not
+    -- share WarmHave/Demand/seed-lines (jobs stay queued).
+    local brewSession = StockPiler2.Orchestrator
+        and StockPiler2.Orchestrator.IsBrewSessionActive
+        and StockPiler2.Orchestrator.IsBrewSessionActive() == true
+    local skipPump = brewSession
+        or Sch._skipPlanThisFrame == true
+        or (Sch.IsHarvestStormActive and Sch.IsHarvestStormActive() == true)
     if not didHeavy
+        and not skipPump
         and StockPiler2.FrameWork
         and StockPiler2.FrameWork.Pump
         and StockPiler2.FrameWork.Pump() == true
@@ -911,6 +1032,10 @@ function Sch.OnUpdate(timeElapsed)
         end
         local skipOrch = Sch._skipOrchThisFrame == true or ShouldSkipOrchIdleWait()
         Sch._skipOrchThisFrame = false
+        -- 0.4.132: hold AutoGrow Tick while demand prewarm still running (post-brew).
+        if not skipOrch and ShouldHoldOrchForPrewarm() then
+            skipOrch = true
+        end
         -- Combat-held bag flush must not block AutoGrow; only block when flush can run.
         local bagBlocksOrch = Sch.BagFlushBlocksOrchestrator and Sch.BagFlushBlocksOrchestrator() == true
         if not didHeavy and not skipOrch and not bagBlocksOrch and ShouldRunOrchestratorTick()
@@ -940,6 +1065,10 @@ function Sch.Initialize()
             elseif StockPiler2.Buy and StockPiler2.Buy.InvalidateJobsCache then
                 StockPiler2.Buy.InvalidateJobsCache()
             end
+            -- 0.4.132: re-arm prewarm when snapGen moves while a plan rebuild is pending.
+            if Sch.MaybeRearmPrewarmOnSnapDrift then
+                Sch.MaybeRearmPrewarmOnSnapDrift("snap-drift")
+            end
             -- Snap-only (SP1): update plant-job dirtiness / UI — do NOT EnqueuePlanRebuild.
             -- Plan rebuild is armed by bag flush needQueue, harvest wake, garden dirty, session.
             -- During plant quiet / harvest storm, Wake already armed fast ticks; skip
@@ -947,11 +1076,15 @@ function Sch.Initialize()
             -- AND MarkPlantJobDirty (every loot snap was forcing GetPlantJob →
             -- BuildBalancedSpecDemand on first post-quiet Tick). Storm end dirties once
             -- in IsHarvestStormActive. Do not re-enable dirty/urgent-wake mid-storm.
+            -- 0.4.132: also skip BufferFlags probes during brew session (craft loot snaps).
             local plantQuiet = StockPiler2.Grow
                 and StockPiler2.Grow.IsPlantQuiet
                 and StockPiler2.Grow.IsPlantQuiet() == true
             local storm = Sch.IsHarvestStormActive and Sch.IsHarvestStormActive() == true
-            if not plantQuiet and not storm then
+            local brewSession = StockPiler2.Orchestrator
+                and StockPiler2.Orchestrator.IsBrewSessionActive
+                and StockPiler2.Orchestrator.IsBrewSessionActive() == true
+            if not plantQuiet and not storm and not brewSession then
                 -- 0.4.122: vault/bank snaps used to MarkPlantJobDirty every move → BufferFlags
                 -- with no plant work. Dirty only when AutoGrow actually has plant/additive/buffer.
                 local Watch = StockPiler2.Watch

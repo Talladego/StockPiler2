@@ -163,6 +163,10 @@ function Orch.Tick()
     if StockPiler2.RecipeSpec and StockPiler2.RecipeSpec.BeginOrchTick then
         StockPiler2.RecipeSpec.BeginOrchTick()
     end
+    -- 0.4.132: one GetPlantJob / PickPlantCandidate per Tick.
+    if StockPiler2.Grow and StockPiler2.Grow.BeginOrchTickPlantMemo then
+        StockPiler2.Grow.BeginOrchTickPlantMemo()
+    end
     local autoGrowOn = StockPiler2.Watch and StockPiler2.Watch.IsAutoGrowEnabled
         and StockPiler2.Watch.IsAutoGrowEnabled() == true
     if not autoGrowOn then
@@ -311,7 +315,20 @@ function Orch.Tick()
             StockPiler2.Scheduler.SetAutoGrowIdle(false)
         end
     elseif canPlant and hasSeeds then
-        if StockPiler2.GrowExecutor and StockPiler2.GrowExecutor.Tick then
+        local Sch = StockPiler2.Scheduler
+        local deferPlant, deferReason = false, nil
+        if Sch and Sch.ShouldDeferAutoGrowPlant then
+            deferPlant, deferReason = Sch.ShouldDeferAutoGrowPlant()
+        end
+        if deferPlant == true then
+            -- Combat/scenario pause: soft skip — never fill-block (that stalled empty plots in RvR lake).
+            if StockPiler2.Grow and StockPiler2.Grow.LogSkipPlant then
+                StockPiler2.Grow.LogSkipPlant(tostring(deferReason or "combat"))
+            end
+            if Sch and Sch.SetAutoGrowIdle then
+                Sch.SetAutoGrowIdle(false)
+            end
+        elseif StockPiler2.GrowExecutor and StockPiler2.GrowExecutor.Tick then
             local ok = StockPiler2.GrowExecutor.Tick(opId)
             if ok == true then
                 SetPhase("planting", "auto")

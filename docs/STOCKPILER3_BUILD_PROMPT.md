@@ -194,6 +194,7 @@ Publish/subscribe names such as: `INVENTORY_DIRTY` / `INVENTORY_FLAT`, `GARDEN_D
 - **MaterialSpec:** material roles (main, stabilizer, extender, etc.).
 - **Classify / Additives / Items:** supporting catalogs.
 - **One-way / Liniment-class mains:** some harvest products are not plant→seed refinable; AutoGrow still plants/learns them without expecting refine (skill- and recipe-aware).
+- **Purple liniment seeds:** Eternal (permanent, never consumed) and Exceptional/charged (~250 grows) keep a bag stack while planting — credit a full plot wave while owned; prefer Eternal ≫ Exceptional ≫ blue when several seeds match. Strip Eternal/Exceptional/Bunched name prefixes for Bloodseed↔Powder (and Bunched harvest) relatedness.
 
 ---
 

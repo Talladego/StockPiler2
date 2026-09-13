@@ -761,6 +761,27 @@ local function FlushUnchattedPurchases()
     end
 end
 
+local function ArmPlanAfterBuyFill(reason)
+    if (tonumber(Buy._visitBought) or 0) <= 0 then
+        return
+    end
+    if Buy._planArmedAfterFill == true then
+        return
+    end
+    Buy._planArmedAfterFill = true
+    local Sch = StockPiler2.Scheduler
+    if Sch and Sch.RequestCachePrewarm then
+        Sch.RequestCachePrewarm(reason or "buy-fill")
+    end
+    if Sch and Sch.EnqueuePlanRebuild then
+        Sch.EnqueuePlanRebuild()
+    end
+    if StockPiler2.Debug and StockPiler2.Debug.Enabled == true and StockPiler2.Debug.LogOp then
+        StockPiler2.Debug.LogOp("buy", "arm-plan reason=" .. tostring(reason or "")
+            .. " bought=" .. tostring(Buy._visitBought or 0))
+    end
+end
+
 local function ChatVisitStop(reason)
     if Buy._visitChatted == true then
         return
@@ -779,6 +800,12 @@ local function ChatVisitStop(reason)
     ))
     -- Announce any material types not flushed mid-visit (e.g. reserve mid-stack).
     FlushUnchattedPurchases()
+    -- 0.4.134: after real buys, arm Status/Brew plan (AfterPurchaseRefresh stays empty
+    -- per-purchase). Without this, tip slots show live Stocked while statusKey stays
+    -- buy_ingredients until /sp2 watchplan.
+    if bought > 0 then
+        ArmPlanAfterBuyFill("visit-stop")
+    end
     -- Quiet when the visit bought nothing and left normally.
     if reason == "nothing" or reason == "bought" then
         return
@@ -816,6 +843,7 @@ local function ResetVisit()
     Buy._visitNoJobsIdleLogged = nil
     Buy._visitStoreIndex = nil
     Buy._visitMatchByKey = {}
+    Buy._planArmedAfterFill = false
     Buy._visitMoneyBrass = PlayerMoneyBrass()
     Buy.InvalidateJobsCache()
 end
@@ -984,6 +1012,8 @@ end
 --- advance to the next watch without reopening the store.
 --- Per-purchase full MarkDirty + PlanSnapshot.Invalidate was Planner.Build +
 --- Buy.TryBuyNext dominating perf summaries.
+--- 0.4.134: when the visit has no more buy jobs (or store closes) after buys,
+--- ArmPlanAfterBuyFill coalesces one PlanRebuild so Status leaves Buy flasks.
 local function AfterPurchaseRefresh()
 end
 
@@ -1043,11 +1073,15 @@ function Buy.TryBuyNext()
             -- rebuilds focus so other watches can buy without reopening.
             Buy._visitNoJobsIdleLogged = true
             LogBuyOp("idle no-jobs bought=" .. tostring(Buy._visitBought or 0))
+            -- Bags already show Stocked in tip Have overlays; Status/Brew need plan.
+            ArmPlanAfterBuyFill("idle-no-jobs")
         end
         return done(false)
     end
     Buy._visitHadJobs = true
     Buy._visitNoJobsIdleLogged = nil
+    -- New jobs appeared (focus advanced); allow another post-fill arm later.
+    Buy._planArmedAfterFill = false
 
     local money = VisitMoneyBrass()
     local liveMoney = PlayerMoneyBrass()

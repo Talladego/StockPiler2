@@ -39,6 +39,7 @@ StockPiler2.DefaultCharacterSettings = {
     autoBuyBudgetGold = 50,
     growSeedBufferMin = 5,
     growSeedBufferEnabled = true,
+    autoGrowPauseCombat = true,
     brewMacroEnabled = false,
     brewRespectGrowReserve = true,
 }

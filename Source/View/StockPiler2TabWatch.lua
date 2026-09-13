@@ -23,6 +23,7 @@ local ENABLE_WIN = "SP2TabWatchEnable"
 local ADDITIVES_WIN = "SP2TabWatchAdditives"
 local AUTOBUY_WIN = "SP2TabWatchAutoBuy"
 local SEED_BUFFER_ENABLE_WIN = "SP2TabWatchSeedBufferEnable"
+local COMBAT_PAUSE_WIN = "SP2TabWatchCombatPause"
 local syncingUi = false
 local STEPPER_BG = { 96, 86, 52 }
 
@@ -210,6 +211,23 @@ local function UpdateAutoBuyCheckbox()
     syncingUi = false
 end
 
+local function UpdateCombatPauseCheckbox()
+    local row = CharRow()
+    if not DoesWindowExist(COMBAT_PAUSE_WIN) then
+        return
+    end
+    local can = CanAutoGrowUi()
+    local paused = true
+    if type(row) == "table" then
+        paused = row.autoGrowPauseCombat ~= false
+    end
+    syncingUi = true
+    ButtonSetCheckButtonFlag(COMBAT_PAUSE_WIN, true)
+    ButtonSetPressedFlag(COMBAT_PAUSE_WIN, can and paused)
+    ButtonSetDisabledFlag(COMBAT_PAUSE_WIN, not can)
+    syncingUi = false
+end
+
 local function UpdateSeedBufferEnableCheckbox()
     local row = CharRow()
     if not DoesWindowExist(SEED_BUFFER_ENABLE_WIN) then
@@ -241,7 +259,133 @@ local function UpdateAutoBuyChips()
 end
 
 --- Overlay live bag counts on plan rows so Stock/Craftable do not lag coalesce.
---- Status text / shared flags stay plan-owned until Planner.Build catches up.
+--- Safe Status flips (stocked / ready / seed-buffer) follow live deficit within ~1s;
+--- buy/shared/plant statuses stay plan-owned until Planner.Build.
+local function PatchPlanSnapshotLiveStatus(row)
+    if type(row) ~= "table" then
+        return
+    end
+    local PS = StockPiler2.PlanSnapshot
+    local plan = PS and PS.Get and PS.Get()
+    if type(plan) ~= "table" or type(plan.rows) ~= "table" then
+        return
+    end
+    local keyStr = tostring(row.potionRecipeKey or row.id or row.potionKey or "")
+    local uid = tonumber(row.uniqueID) or 0
+    if keyStr == "" and uid <= 0 then
+        return
+    end
+    for i = 1, #plan.rows do
+        local snap = plan.rows[i]
+        if type(snap) == "table" then
+            local snapKey = tostring(snap.potionRecipeKey or snap.id or snap.potionKey or "")
+            local snapUid = tonumber(snap.uniqueID) or 0
+            local match = (keyStr ~= "" and snapKey == keyStr)
+                or (uid > 0 and snapUid == uid)
+            if match then
+                snap.potionHave = row.potionHave
+                snap.potionDeficit = row.potionDeficit
+                snap.craftable = row.craftable
+                snap.statusKey = row.statusKey
+                snap.statusText = row.statusText
+                snap.statusLines = row.statusLines
+                snap.craftableShared = row.craftableShared
+                return
+            end
+        end
+    end
+end
+
+local function ApplyLiveWatchStatus(row, recipe, deficit, have, craftable, target)
+    local key = tostring(row.statusKey or "")
+    local potionKey = row.potionRecipeKey or row.id or row.potionKey
+    local RS = StockPiler2.RecipeSpec
+
+    local function SeedBufferShort()
+        if type(recipe) ~= "table" or type(RS) ~= "table" then
+            return false
+        end
+        if not (RS.ShouldAutoGrowPotion and RS.ShouldAutoGrowPotion(potionKey, nil) == true) then
+            return false
+        end
+        if not (StockPiler2.Watch
+            and StockPiler2.Watch.IsSeedBufferEnabled
+            and StockPiler2.Watch.IsSeedBufferEnabled() == true)
+        then
+            return false
+        end
+        return RS.WatchHasSeedBufferShort and RS.WatchHasSeedBufferShort(recipe) == true
+    end
+
+    local function ApplySeedBufferStatus()
+        local buffer = StockPiler2.Watch.GetSeedBufferMin
+            and StockPiler2.Watch.GetSeedBufferMin() or 5
+        row.statusKey = "need_seeds"
+        row.statusText = T("plan.status.seed_buffer")
+        row.statusLines = {
+            T("plan.line.seed_buffer_short", { buffer = tostring(buffer) }),
+            T("plan.line.seed_buffer_grow"),
+        }
+        row.craftableShared = false
+    end
+
+    local function ApplyStockedStatus()
+        row.statusKey = "potion_stocked"
+        row.statusText = T("plan.status.potions_stocked")
+        row.statusLines = { T("plan.line.bag_at_target") }
+        row.craftableShared = false
+    end
+
+    local function ApplyReadyStatus()
+        row.statusKey = "ready_to_craft"
+        row.statusText = T("plan.status.ready_to_craft")
+        row.craftableShared = false
+        if StockPiler2.TradeSkillCaps and StockPiler2.TradeSkillCaps.CanBrewPotions
+            and StockPiler2.TradeSkillCaps.CanBrewPotions() == true
+        then
+            row.statusLines = {
+                T("plan.line.ready_open_apo"),
+                T("plan.line.ready_rarities_note"),
+            }
+        else
+            row.statusLines = {
+                T("plan.line.ready_apo_only_covered"),
+            }
+        end
+    end
+
+    -- Only flip among stocked / ready / seed-buffer; leave buy/plant/skill to plan.
+    local flippable = key == "ready_to_craft"
+        or key == "ready_to_craft_shared"
+        or key == "potion_stocked"
+        or key == "need_seeds"
+    if not flippable then
+        return
+    end
+
+    if deficit <= 0 then
+        if SeedBufferShort() then
+            if key ~= "need_seeds" then
+                ApplySeedBufferStatus()
+            end
+        elseif key ~= "potion_stocked" then
+            ApplyStockedStatus()
+        end
+        return
+    end
+
+    -- Below target: stocked → ready when craftable still covers.
+    if key == "potion_stocked" and target > 0
+        and (have + (tonumber(craftable) or 0)) >= target
+    then
+        if SeedBufferShort() then
+            ApplySeedBufferStatus()
+        else
+            ApplyReadyStatus()
+        end
+    end
+end
+
 local function PatchWatchRowsLiveCounts(rows)
     if type(rows) ~= "table" or #rows == 0 then
         return
@@ -263,18 +407,24 @@ local function PatchWatchRowsLiveCounts(rows)
                 local deficit = math.max(0, min - have)
                 row.potionDeficit = deficit
                 local recipe = row.recipe or row.specRecipe
+                local craftable = tonumber(row.craftable) or 0
                 if type(recipe) == "table" and RS then
                     if RS.CraftsNeededForDeficit then
                         row.craftsNeeded = RS.CraftsNeededForDeficit(deficit, recipe)
                     end
                     if RS.CountPotionsCraftable then
-                        local craftable = tonumber(RS.CountPotionsCraftable(recipe)) or 0
+                        craftable = tonumber(RS.CountPotionsCraftable(recipe)) or 0
                         craftable = math.max(0, math.floor(craftable + 0.5))
                         row.craftable = craftable
                         if craftable > 0 or row.hasRecipe then
                             row.craftableText = towstring(tostring(craftable))
                         end
                     end
+                end
+                local prevKey = tostring(row.statusKey or "")
+                ApplyLiveWatchStatus(row, recipe, deficit, have, craftable, min)
+                if tostring(row.statusKey or "") ~= prevKey then
+                    PatchPlanSnapshotLiveStatus(row)
                 end
             end
         end
@@ -365,6 +515,7 @@ function StockPiler2TabWatch.Initialize()
     LabelSetText("SP2TabWatchAdditivesLabel", T("watch.use_additives"))
     LabelSetText("SP2TabWatchSeedBufferLabel", T("watch.seed_buffer_label"))
     LabelSetText("SP2TabWatchAutoBuyLabel", T("watch.autobuy_label"))
+    LabelSetText("SP2TabWatchCombatPauseLabel", T("watch.combat_pause_label"))
     LabelSetText("SP2TabWatchReserveLabel", T("watch.reserve_label"))
     LabelSetText("SP2TabWatchBudgetLabel", T("watch.budget_label"))
     TintStepper("SP2TabWatchSeedBufferChipBg")
@@ -392,13 +543,14 @@ function StockPiler2TabWatch.RefreshSkillGates()
     local autoGrow = canGrow and type(row) == "table" and row.autoGrowEnabled == true
     local additives = canGrow and type(row) == "table" and row.autoGrowAdditives == true
     local autoBuy = canBuy and type(row) == "table" and row.autoBuyEnabled == true
+    local combatPause = type(row) ~= "table" or row.autoGrowPauseCombat ~= false
     local seedBufOn = type(row) == "table" and row.growSeedBufferEnabled ~= false
     local seedBuf = StockPiler2.Watch and StockPiler2.Watch.GetSeedBufferMin and StockPiler2.Watch.GetSeedBufferMin() or 5
     local reserve = type(row) == "table" and tonumber(row.autoBuyReserveGold) or 10
     local budget = type(row) == "table" and tonumber(row.autoBuyBudgetGold) or 50
     local gatesKey = table.concat({
         tostring(canGrow), tostring(canBuy), tostring(autoGrow), tostring(additives),
-        tostring(autoBuy), tostring(seedBufOn), tostring(seedBuf),
+        tostring(autoBuy), tostring(combatPause), tostring(seedBufOn), tostring(seedBuf),
         tostring(reserve), tostring(budget),
     }, ":")
     if StockPiler2TabWatch._skillGatesKey == gatesKey then
@@ -410,6 +562,7 @@ function StockPiler2TabWatch.RefreshSkillGates()
     UpdateEnableCheckbox()
     UpdateAdditivesCheckbox()
     UpdateAutoBuyCheckbox()
+    UpdateCombatPauseCheckbox()
     UpdateSeedBufferEnableCheckbox()
     UpdateSeedBufferLabel()
     UpdateAutoBuyChips()
@@ -597,6 +750,22 @@ local function BumpWatch()
     end
 end
 
+--- 0.4.135: demand-changing settings — Bump + prewarm + coalesced PlanRebuild.
+--- Avoid sync Refresh on the click frame (list paints via MarkWatchUiDirty).
+local function AfterWatchSettingsChanged()
+    BumpWatch()
+    local Sch = StockPiler2.Scheduler
+    if Sch and Sch.RequestCachePrewarm then
+        Sch.RequestCachePrewarm("settings")
+    end
+    if Sch and Sch.EnqueuePlanRebuild then
+        Sch.EnqueuePlanRebuild({ nudge = true })
+    end
+    if StockPiler2.Ui and StockPiler2.Ui.MarkWatchUiDirty then
+        StockPiler2.Ui.MarkWatchUiDirty()
+    end
+end
+
 --- Instant Target label paint without Refresh / plan rebuild.
 local function ApplyTargetOptimistic(data, target)
     if type(data) ~= "table" then
@@ -606,20 +775,83 @@ local function ApplyTargetOptimistic(data, target)
     data.target = target
     data.targetText = towstring(tostring(target))
     data.potionMin = target
+    local have = tonumber(data.potionHave) or 0
+    data.potionDeficit = math.max(0, target - have)
     StockPiler2TabWatch._rowPaintKey = nil
     if StockPiler2TabWatch.UpdateRows then
         StockPiler2TabWatch.UpdateRows()
     end
 end
 
-local function AfterWatchSettingsChanged()
-    BumpWatch()
-    if StockPiler2.Scheduler and StockPiler2.Scheduler.EnqueuePlanRebuild then
-        StockPiler2.Scheduler.EnqueuePlanRebuild({ nudge = true })
+--- Patch live PlanSnapshot row targets so tips/status stay consistent without rebuild.
+local function PatchPlanSnapshotTarget(potionKey, target, have)
+    if potionKey == nil then
+        return
     end
-    if StockPiler2.Ui and StockPiler2.Ui.MarkWatchUiDirty then
-        StockPiler2.Ui.MarkWatchUiDirty()
+    target = tonumber(target) or 0
+    have = tonumber(have)
+    local PS = StockPiler2.PlanSnapshot
+    local plan = PS and PS.Get and PS.Get()
+    if type(plan) ~= "table" or type(plan.rows) ~= "table" then
+        return
     end
+    local keyStr = tostring(potionKey)
+    for i = 1, #plan.rows do
+        local row = plan.rows[i]
+        if type(row) == "table" then
+            local rowKey = row.potionRecipeKey or row.id or row.potionKey
+            if rowKey ~= nil and tostring(rowKey) == keyStr then
+                row.target = target
+                row.potionMin = target
+                local rowHave = have
+                if rowHave == nil then
+                    rowHave = tonumber(row.potionHave) or 0
+                end
+                row.potionDeficit = math.max(0, target - rowHave)
+            end
+        end
+    end
+end
+
+--- True when target tweak cannot change grow/brew demand or status class.
+--- stocked↔stocked (have >= both targets > 0) or no_target↔no_target (both 0).
+local function TargetChangeIsDemandNoop(have, oldTarget, newTarget)
+    have = tonumber(have) or 0
+    oldTarget = tonumber(oldTarget) or 0
+    newTarget = tonumber(newTarget) or 0
+    local oldDeficit = math.max(0, oldTarget - have)
+    local newDeficit = math.max(0, newTarget - have)
+    if oldDeficit > 0 or newDeficit > 0 then
+        return false
+    end
+    -- no_target (0) vs potion_stocked (>0) is a status change — needs full plan.
+    if (oldTarget > 0) ~= (newTarget > 0) then
+        return false
+    end
+    return true
+end
+
+--- 0.4.133: stocked target chip (+1 with have already above target) used to BumpGen +
+--- Invalidate + OnDemandChanged(force ClearCountCaches) + PlanRebuild (~400–750ms).
+--- When deficit stays 0 and status class unchanged, paint + patch snapshot only.
+local function AfterTargetChipChanged(data, potionKey, oldTarget, newTarget)
+    local have = tonumber(data and data.potionHave)
+    if have == nil and type(data) == "table" then
+        local uid = tonumber(data.uniqueID) or 0
+        if uid > 0 and StockPiler2.Inventory and StockPiler2.Inventory.CountByUid then
+            have = tonumber(StockPiler2.Inventory.CountByUid(uid)) or 0
+        else
+            have = 0
+        end
+    end
+    have = tonumber(have) or 0
+    if TargetChangeIsDemandNoop(have, oldTarget, newTarget) then
+        ApplyTargetOptimistic(data, newTarget)
+        PatchPlanSnapshotTarget(potionKey, newTarget, have)
+        return
+    end
+    ApplyTargetOptimistic(data, newTarget)
+    AfterWatchSettingsChanged()
 end
 
 local function NotifySettings(msg)
@@ -678,7 +910,8 @@ function StockPiler2TabWatch.OnToggleEnabled()
     end
     row.autoGrowEnabled = ButtonGetPressedFlag(ENABLE_WIN) == true
     NotifySettings(T("watch.autogrow", { state = OnOff(row.autoGrowEnabled) }))
-    BumpWatch()
+    -- 0.4.135: demand-changing — light Bump + prewarm + PlanRebuild (not sync Refresh).
+    AfterWatchSettingsChanged()
     if row.autoGrowEnabled == true then
         if StockPiler2.Scheduler and StockPiler2.Scheduler.WakeAutoGrow then
             StockPiler2.Scheduler.WakeAutoGrow()
@@ -688,7 +921,7 @@ function StockPiler2TabWatch.OnToggleEnabled()
             StockPiler2.Orchestrator.OnAutoGrowDisabled()
         end
     end
-    StockPiler2TabWatch.Refresh()
+    UpdateEnableCheckbox()
 end
 
 function StockPiler2TabWatch.OnToggleAdditives()
@@ -705,7 +938,10 @@ function StockPiler2TabWatch.OnToggleAdditives()
     end
     row.autoGrowAdditives = ButtonGetPressedFlag(ADDITIVES_WIN) == true
     NotifySettings(T("watch.additives", { state = OnOff(row.autoGrowAdditives) }))
-    BumpWatch()
+    -- 0.4.135: additives do not change plan demand — dirty plant job only.
+    if StockPiler2.Grow and StockPiler2.Grow.MarkPlantJobDirty then
+        StockPiler2.Grow.MarkPlantJobDirty()
+    end
 end
 
 function StockPiler2TabWatch.OnToggleSeedBuffer()
@@ -722,7 +958,9 @@ function StockPiler2TabWatch.OnToggleSeedBuffer()
     end
     row.growSeedBufferEnabled = ButtonGetPressedFlag(SEED_BUFFER_ENABLE_WIN) == true
     NotifySettings(T("watch.seed_buffer", { state = OnOff(row.growSeedBufferEnabled) }))
-    BumpWatch()
+    AfterWatchSettingsChanged()
+    UpdateSeedBufferEnableCheckbox()
+    UpdateSeedBufferLabel()
 end
 
 function StockPiler2TabWatch.OnToggleAutoBuy()
@@ -739,13 +977,38 @@ function StockPiler2TabWatch.OnToggleAutoBuy()
     end
     row.autoBuyEnabled = ButtonGetPressedFlag(AUTOBUY_WIN) == true
     NotifySettings(T("watch.autobuy", { state = OnOff(row.autoBuyEnabled) }))
+    -- 0.4.135: AutoBuy flag does not change plan Status — no BumpWatch/PlanRebuild.
     if StockPiler2.Buy and StockPiler2.Buy.InvalidateJobsCache then
         StockPiler2.Buy.InvalidateJobsCache()
     end
     if row.autoBuyEnabled == true and StockPiler2.Scheduler and StockPiler2.Scheduler.WakeAutoBuy then
         StockPiler2.Scheduler.WakeAutoBuy()
     end
-    BumpWatch()
+    UpdateAutoBuyCheckbox()
+    UpdateAutoBuyChips()
+end
+
+function StockPiler2TabWatch.OnToggleCombatPause()
+    if syncingUi then
+        return
+    end
+    if not CanAutoGrowUi() then
+        UpdateCombatPauseCheckbox()
+        return
+    end
+    local row = CharRow()
+    if type(row) ~= "table" then
+        return
+    end
+    row.autoGrowPauseCombat = ButtonGetPressedFlag(COMBAT_PAUSE_WIN) == true
+    NotifySettings(T("watch.combat_pause", { state = OnOff(row.autoGrowPauseCombat) }))
+    if StockPiler2.Grow and StockPiler2.Grow.ClearFillBlocked then
+        StockPiler2.Grow.ClearFillBlocked()
+    end
+    if StockPiler2.Scheduler and StockPiler2.Scheduler.WakeAutoGrow then
+        StockPiler2.Scheduler.WakeAutoGrow()
+    end
+    UpdateCombatPauseCheckbox()
 end
 
 local function ChipStep(flags)
@@ -778,23 +1041,34 @@ local function AdjustChip(field, delta, lo, hi)
     if type(row) ~= "table" then
         return
     end
-    local n = (tonumber(row[field]) or lo) + delta
+    local old = tonumber(row[field]) or lo
+    local n = old + delta
     if n < lo then n = lo end
     if n > hi then n = hi end
+    if n == old then
+        return
+    end
     row[field] = n
     local labelKey = CHIP_NOTIFY_LABEL[field]
     if labelKey then
         NotifySettings(T("watch.setting_eq", { label = T(labelKey), value = tostring(n) }))
     end
-    BumpWatch()
-    StockPiler2TabWatch.Refresh()
+    -- 0.4.135: money chips are Soft; seed buffer min is Light (status/seed-lines).
     if field == "autoBuyReserveGold" or field == "autoBuyBudgetGold" then
+        UpdateAutoBuyChips()
         if StockPiler2.Buy and StockPiler2.Buy.ClearMoneyGateStop then
             StockPiler2.Buy.ClearMoneyGateStop(field)
         elseif StockPiler2.Scheduler and StockPiler2.Scheduler.WakeAutoBuy then
             StockPiler2.Scheduler.WakeAutoBuy()
         end
+        return
     end
+    if field == "growSeedBufferMin" then
+        AfterWatchSettingsChanged()
+        UpdateSeedBufferLabel()
+        return
+    end
+    AfterWatchSettingsChanged()
 end
 
 function StockPiler2TabWatch.OnSeedBufferLButtonUp(flags)
@@ -840,7 +1114,8 @@ function StockPiler2TabWatch.OnToggleRowAutoGrow()
     local watch = StockPiler2.Catalog.EnsureWatch(potionKey)
     watch.autoGrow = ButtonGetPressedFlag(clickWin) == true
     NotifySettings(T("watch.row_autogrow", { name = PotionLabel(data), state = OnOff(watch.autoGrow) }))
-    BumpWatch()
+    -- 0.4.135: row AutoGrow changes demand — light plan path.
+    AfterWatchSettingsChanged()
 end
 
 function StockPiler2TabWatch.OnTargetLButtonUp(flags)
@@ -853,15 +1128,18 @@ function StockPiler2TabWatch.OnTargetLButtonUp(flags)
     if type(watch) ~= "table" then
         return
     end
-    local target = (tonumber(watch.targetStock) or 0) + ChipStep(flags)
+    local oldTarget = tonumber(watch.targetStock) or 0
+    local target = oldTarget + ChipStep(flags)
     if target > TARGET_MAX then
         target = TARGET_MAX
+    end
+    if target == oldTarget then
+        return
     end
     watch.targetStock = target
     watch.enabled = true
     NotifySettings(T("watch.row_target", { name = PotionLabel(data), value = tostring(target) }))
-    ApplyTargetOptimistic(data, target)
-    AfterWatchSettingsChanged()
+    AfterTargetChipChanged(data, potionKey, oldTarget, target)
 end
 
 function StockPiler2TabWatch.OnTargetRButtonUp(flags)
@@ -874,17 +1152,20 @@ function StockPiler2TabWatch.OnTargetRButtonUp(flags)
     if type(watch) ~= "table" then
         return
     end
-    local target = (tonumber(watch.targetStock) or 0) - ChipStep(flags)
+    local oldTarget = tonumber(watch.targetStock) or 0
+    local target = oldTarget - ChipStep(flags)
     if target < 0 then
         target = 0
+    end
+    if target == oldTarget then
+        return
     end
     watch.targetStock = target
     if target > 0 then
         watch.enabled = true
     end
     NotifySettings(T("watch.row_target", { name = PotionLabel(data), value = tostring(target) }))
-    ApplyTargetOptimistic(data, target)
-    AfterWatchSettingsChanged()
+    AfterTargetChipChanged(data, potionKey, oldTarget, target)
 end
 
 function StockPiler2TabWatch.OnMouseOverEnabled()
@@ -936,6 +1217,22 @@ function StockPiler2TabWatch.OnMouseOverAutoBuy()
     end
     text = text .. T("tip.watch.autobuy_indep")
     Tooltips.CreateTextOnlyTooltip(SystemData.ActiveWindow.name, text)
+    Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_RIGHT)
+end
+
+function StockPiler2TabWatch.OnMouseOverCombatPause()
+    if not CanAutoGrowUi() then
+        Tooltips.CreateTextOnlyTooltip(
+            SystemData.ActiveWindow.name,
+            T("tip.watch.combat_pause_need_cult")
+        )
+        Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_RIGHT)
+        return
+    end
+    Tooltips.CreateTextOnlyTooltip(
+        SystemData.ActiveWindow.name,
+        T("tip.watch.combat_pause")
+    )
     Tooltips.AnchorTooltip(Tooltips.ANCHOR_WINDOW_RIGHT)
 end
 

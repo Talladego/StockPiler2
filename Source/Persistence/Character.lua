@@ -94,6 +94,7 @@ function StockPiler2.Persistence.EnsureCharacterBucketShape(char)
     char.autoBuyBudgetGold = ClampInt(char.autoBuyBudgetGold, 1, 999, 50)
     char.growSeedBufferMin = ClampInt(char.growSeedBufferMin, 4, 20, 5)
     char.growSeedBufferEnabled = char.growSeedBufferEnabled ~= false
+    char.autoGrowPauseCombat = char.autoGrowPauseCombat ~= false
     return char
 end
 

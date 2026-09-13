@@ -26,6 +26,10 @@ Grow._lastSkipMsg = nil
 Grow._cachedPlantJob = nil
 Grow._plantQueueDirty = true
 Grow._queueSnapGen = -1
+Grow._tickPlantJobId = 0
+Grow._tickPlantJobMemoTick = -1
+Grow._tickPlantJob = nil
+Grow._tickPlantJobProbed = false
 Grow._seedCommitted = Grow._seedCommitted or {}
 Grow._wavePlantedBySeed = Grow._wavePlantedBySeed or {}
 Grow._lastPlantedSeedUid = 0
@@ -45,6 +49,8 @@ Grow._skillSkipSnapGen = -1
 Grow.PENDING_TTL_SEC = 10
 Grow.PENDING_EMPTY_GRACE_SEC = 1.0
 Grow.UNCONFIRMED_PLANT_COOLDOWN_SEC = 6.0
+-- After unconfirmed PlantSeed, pause all plots (not just the failing one).
+Grow.UNCONFIRMED_GARDEN_QUIET_SEC = 8.0
 Grow.CHAT_HARVEST_WAKE_DEBOUNCE_SEC = 1.5
 Grow.HARVEST_FORCE_DEBOUNCE_SEC = 1.5
 -- Quiet after plot-empty wake so replant does not stack on the engine harvest hitch.
@@ -739,6 +745,10 @@ local function SeedHaveForResolved(spec, seed, seedUid, SM, Inv)
             seedHave = bagCount
         end
     end
+    -- Eternal / Exceptional: stack stays while planting — credit a full plot wave.
+    if SM and SM.EffectiveSeedCredit and seedUid > 0 then
+        seedHave = SM.EffectiveSeedCredit(seedUid, seedHave)
+    end
     return seedHave
 end
 
@@ -1115,15 +1125,25 @@ local function ArmUnconfirmedPlantCooldown(plotNum)
     if plotNum <= 0 then
         return
     end
+    local now = NowSec()
     local sec = tonumber(Grow.UNCONFIRMED_PLANT_COOLDOWN_SEC) or 6.0
-    local untilT = NowSec() + sec
+    local untilT = now + sec
     local cur = tonumber(Grow._plantFailCooldownUntil[plotNum]) or 0
     if untilT > cur then
         Grow._plantFailCooldownUntil[plotNum] = untilT
     end
+    -- Garden-wide quiet so 4-plot round-robin cannot spam unconfirmed PlantSeed.
+    local quietSec = tonumber(Grow.UNCONFIRMED_GARDEN_QUIET_SEC) or 8.0
+    local quietUntil = now + quietSec
+    local prevQuiet = tonumber(Grow._plantQuietUntil) or 0
+    if quietUntil > prevQuiet then
+        Grow._plantQuietUntil = quietUntil
+    end
     LogOnce(
         "plant-unconfirmed-" .. tostring(plotNum),
-        "plant-unconfirmed P" .. tostring(plotNum) .. " cooldown=" .. tostring(sec) .. "s"
+        "plant-unconfirmed P" .. tostring(plotNum)
+            .. " cooldown=" .. tostring(sec) .. "s"
+            .. " quiet=" .. tostring(quietSec) .. "s"
     )
 end
 
@@ -1133,7 +1153,7 @@ local function NotifyPlantConfirmed(plotNum)
     if type(meta) ~= "table" then
         return
     end
-    -- Once per pending plant (optimistic PlantSeed chat + soil-confirm path).
+    -- Once per pending plant (soil-confirm path only).
     if meta.chatted == true then
         return
     end
@@ -1164,9 +1184,8 @@ local function ApplyPendingClearForPlot(plotNum, plot)
         return
     end
     if Grow.NormalizeStage(plot.stage) ~= Grow.StageEmpty() then
-        -- Plant confirmed in soil: chat once (no-op if already printed on PlantSeed),
-        -- then release commit so the next PickPlantCandidate does not do seedHave -
-        -- committed against an already-decremented bag.
+        -- Plant confirmed in soil: chat once, then release commit so the next
+        -- PickPlantCandidate does not do seedHave - committed against a decremented bag.
         NotifyPlantConfirmed(plotNum)
         Grow.ClearPendingPlot(plotNum, { rollbackCommit = true })
         Grow.MaybeCompleteFillWave()
@@ -1266,7 +1285,25 @@ end
 function Grow.InvalidatePlantQueue(opts)
     opts = type(opts) == "table" and opts or {}
     Grow._lastSkipMsg = nil
+    -- 0.4.132: force-clear re-pick must not reuse tick-local memo from a nil first probe.
+    Grow._tickPlantJobProbed = false
+    Grow._tickPlantJob = nil
     if opts.force == true then
+        -- Arm unconfirmed cooldown for pending-empty plots before wipe so force
+        -- cannot erase protection and restart a PlantSeed spam storm.
+        local CA = StockPiler2.CultivatorAdapter
+        local n = CA and CA.NumPlots and CA.NumPlots() or 4
+        for plotNum = 1, n do
+            local pending = tonumber(Grow._pendingPlant[plotNum]) or 0
+            if pending > 0 then
+                local plot = Grow.CachedPlot(plotNum)
+                local empty = type(plot) ~= "table"
+                    or Grow.NormalizeStage(plot.stage) == Grow.StageEmpty()
+                if empty then
+                    ArmUnconfirmedPlantCooldown(plotNum)
+                end
+            end
+        end
         Grow._plantQueueDirty = true
         Grow._cachedPlantJob = nil
         Grow._jobProbed = false
@@ -1281,6 +1318,7 @@ function Grow.InvalidatePlantQueue(opts)
         Grow._additiveDirty = false
         Grow._fillBlocked = false
         Grow._plantWaitTicks = 0
+        -- Do not clear _plantFailCooldownUntil / _plantQuietUntil on force.
         if opts.keepCommitForceCleared ~= true then
             Grow._commitForceCleared = false
         end
@@ -1429,11 +1467,27 @@ function Grow.GetPlantJob()
             gardenGen = tonumber(Garden.GetGen()) or 0
         end
     end
+    -- 0.4.132: one PickPlantCandidate per Orch.Tick (HasSeeds + TryPlant + Refine fill-block).
+    local tickId = tonumber(Grow._tickPlantJobId) or 0
+    if tickId > 0
+        and Grow._tickPlantJobMemoTick == tickId
+        and Grow._tickPlantJobProbed == true
+    then
+        return Grow._tickPlantJob
+    end
+    local function memoReturn(job)
+        if tickId > 0 then
+            Grow._tickPlantJobMemoTick = tickId
+            Grow._tickPlantJob = job
+            Grow._tickPlantJobProbed = true
+        end
+        return job
+    end
     if Grow._plantQueueDirty ~= true then
         if type(Grow._cachedPlantJob) == "table" then
             local adjusted = AdjustJobForCommitted(Grow._cachedPlantJob)
             if adjusted ~= nil then
-                return adjusted
+                return memoReturn(adjusted)
             end
             -- Committed seeds exhausted: re-pick another role/seed if plots still empty.
             if Grow.HasEmptyPlot() and not Grow.IsFillBlocked() then
@@ -1441,13 +1495,13 @@ function Grow.GetPlantJob()
                 Grow._jobProbed = false
             else
                 Grow._jobProbed = true
-                return nil
+                return memoReturn(nil)
             end
         elseif Grow._jobProbed == true then
             -- Stay nil until explicitly dirtied (unblock / harvest / refine / demand).
             -- If gens unchanged, do not rebuild PickPlantCandidate (idle no-job spikes).
             if Grow._queueSnapGen == snapGen and Grow._queueGardenGen == gardenGen then
-                return nil
+                return memoReturn(nil)
             end
             Grow._plantQueueDirty = true
             Grow._jobProbed = false
@@ -1458,7 +1512,7 @@ function Grow.GetPlantJob()
         and type(Grow._cachedPlantJob) == "table"
         and Grow._plantQueueDirty ~= true
     then
-        return AdjustJobForCommitted(Grow._cachedPlantJob)
+        return memoReturn(AdjustJobForCommitted(Grow._cachedPlantJob))
     end
     local job = Grow.PickPlantCandidate()
     Grow._cachedPlantJob = job
@@ -1466,7 +1520,15 @@ function Grow.GetPlantJob()
     Grow._jobProbed = true
     Grow._queueSnapGen = snapGen
     Grow._queueGardenGen = gardenGen
-    return AdjustJobForCommitted(job)
+    return memoReturn(AdjustJobForCommitted(job))
+end
+
+--- Call at start of Orchestrator.Tick so HasSeeds / TryPlant / Refine share one probe.
+function Grow.BeginOrchTickPlantMemo()
+    Grow._tickPlantJobId = (tonumber(Grow._tickPlantJobId) or 0) + 1
+    Grow._tickPlantJobMemoTick = -1
+    Grow._tickPlantJob = nil
+    Grow._tickPlantJobProbed = false
 end
 
 --- True when a plant op is still outstanding on any plot.
@@ -1506,7 +1568,9 @@ function Grow.MaybeCompleteFillWave()
 end
 
 function Grow.OnDemandChanged()
-    Grow.InvalidatePlantQueue({ force = true })
+    -- 0.4.135: keep Have/demand count caches — settings BumpGen does not change bags.
+    -- ClearCountCaches forced cold WarmHave on every checkbox/chip PlanRebuild.
+    Grow.InvalidatePlantQueue({ force = true, keepPlanCache = true })
     Grow._lastSkipMsg = nil
     if not Grow.IsEnabled() then
         return
@@ -2343,13 +2407,18 @@ function Grow.TryPlantNextEmptyPlot(opId)
             StockPiler2.Items.UpsertFromItemData(item, kind)
         end
         if plantUid > 0 and seedUid > 0 and StockPiler2.SeedMap.LearnMapping then
-            -- Job already knows plantUid; trust so one-way pairs learn on AutoGrow plant.
-            StockPiler2.SeedMap.LearnMapping(plantUid, seedUid, "plant", true)
+            -- Only persist when names/genus agree — never re-poison from a bad job.plantUid.
+            local okPair = true
+            if StockPiler2.SeedMap.PairLooksLikePlantAndSeed then
+                okPair = StockPiler2.SeedMap.PairLooksLikePlantAndSeed(plantUid, seedUid) == true
+            end
+            if okPair then
+                StockPiler2.SeedMap.LearnMapping(plantUid, seedUid, "plant", true)
+            end
         end
     end
-    -- Chat on accepted PlantSeed (meta.chatted); soil confirm only clears pending.
-    -- Last-plot OnFillWaveComplete used to wipe meta before soil confirm — no chat.
-    NotifyPlantConfirmed(plotNum)
+    -- Chat only when soil leaves EMPTY (ApplyPendingClearForPlot). PlantSeed
+    -- can return ok without the plot accepting the seed.
     LogPlant(string.format(
         "P%d %s uid=%d plantUid=%d reason=%s deficit=%d craftsShort=%d plantable=%d opId=%s",
         plotNum,

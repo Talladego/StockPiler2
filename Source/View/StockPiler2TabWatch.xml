@@ -263,6 +263,31 @@
                     </Windows>
                 </Window>
 
+                <Button name="$parentCombatPause" inherits="EA_Button_DefaultCheckBox">
+                    <Size>
+                        <AbsPoint x="20" y="20" />
+                    </Size>
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="380" y="92" />
+                        </Anchor>
+                    </Anchors>
+                    <EventHandlers>
+                        <EventHandler event="OnLButtonUp" function="StockPiler2TabWatch.OnToggleCombatPause" />
+                        <EventHandler event="OnMouseOver" function="StockPiler2TabWatch.OnMouseOverCombatPause" />
+                    </EventHandlers>
+                </Button>
+                <Label name="$parentCombatPauseLabel" font="font_chat_text" maxchars="28" textalign="leftcenter" handleinput="false">
+                    <Size>
+                        <AbsPoint x="120" y="28" />
+                    </Size>
+                    <Anchors>
+                        <Anchor point="topleft" relativePoint="topleft">
+                            <AbsPoint x="404" y="88" />
+                        </Anchor>
+                    </Anchors>
+                </Label>
+
                 <!-- Headers: Potion | Status | Stock | Craftable | Target | AutoGrow | Brew (1000px; match row columns) -->
                 <Button name="$parentColPotion" inherits="StockPiler2_StaticHeader">
                     <Size>

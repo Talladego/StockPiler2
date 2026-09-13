@@ -70,11 +70,28 @@ local function MakeNoopPerf()
     return Perf
 end
 
+-- Client idle floor is often ~140-155ms; thresholds below this flood empty-trail noise.
+local CAPTURE_FLOOR_MS = 250
+
 if LibPerf and type(LibPerf.Scope) == "function" then
     local Perf = LibPerf.Scope("StockPiler2")
     Perf.Available = true
     function Perf.OnFrame(_timeElapsed)
         -- LibPerf owns the frame pump; intentionally empty.
+    end
+    -- 0.4.144: bump restored low thresholds so next Autogrow/brew capture stays usable.
+    local thr = 0
+    if Perf.GetThreshold then
+        thr = tonumber(Perf.GetThreshold()) or 0
+    elseif Perf.GetFrameThreshold then
+        thr = tonumber(Perf.GetFrameThreshold()) or 0
+    end
+    if thr > 0 and thr < CAPTURE_FLOOR_MS then
+        if Perf.SetThreshold then
+            Perf.SetThreshold(CAPTURE_FLOOR_MS)
+        elseif Perf.SetFrameThreshold then
+            Perf.SetFrameThreshold(CAPTURE_FLOOR_MS)
+        end
     end
     StockPiler2.Perf = Perf
 else

@@ -513,12 +513,19 @@ function Brew.CanBrewNow()
     end
     if phase == "loaded" then
         local deficit = tonumber(session.potionDeficit) or 0
+        local craftable = tonumber(session.craftable) or 0
         local row = FindSessionRow()
-        -- Auto Ready continue only while the plan row stays green Ready (uncontested).
-        if RowIsReadyToCraft(row) and deficit > 0
-            and Brew.ValidateApothecaryPerform
+        local boardOk = Brew.ValidateApothecaryPerform
             and Brew.ValidateApothecaryPerform() == true
-        then
+        -- Prefer green Ready plan row when the snapshot is live.
+        if RowIsReadyToCraft(row) and deficit > 0 and boardOk then
+            return finish(true)
+        end
+        -- 0.4.131: while brew-session defers PlanRebuild (0.4.126), the plan row can be
+        -- missing/stale after learn Invalidate — footer/macro stayed grey with apo still
+        -- loaded. Session counters + board validity are enough to continue (row Brew already
+        -- worked; /sp2 watchplan forced rebuild and woke footer). Do not require Ready here.
+        if deficit > 0 and craftable > 0 and boardOk then
             return finish(true)
         end
         return finish(false)
@@ -554,17 +561,57 @@ local function ItemMatchesSpec(item, spec)
         and StockPiler2.MaterialSpec.Matches(item, spec) == true
 end
 
-local function EachCraftingBagSlot(fn)
-    local a = AA()
-    local bag = a and a.GetCraftingBag and a.GetCraftingBag()
-    if type(bag) ~= "table" then
-        return 0
+local function InventoryBackpackType()
+    if EA_Window_Backpack and EA_Window_Backpack.TYPE_INVENTORY then
+        return EA_Window_Backpack.TYPE_INVENTORY
     end
+    return 1
+end
+
+local function GetInventoryBagTable()
+    if type(EA_Window_Backpack) == "table"
+        and type(EA_Window_Backpack.GetItemsFromBackpack) == "function"
+    then
+        local ok, bag = StockPiler2.TryCallQuiet(
+            "GetItemsFromBackpack.inv",
+            EA_Window_Backpack.GetItemsFromBackpack,
+            InventoryBackpackType()
+        )
+        if ok and type(bag) == "table" then
+            return bag
+        end
+    end
+    if DataUtils and type(DataUtils.GetItems) == "function" then
+        local ok, bag = StockPiler2.TryCallQuiet("DataUtils.GetItems", DataUtils.GetItems)
+        if ok and type(bag) == "table" then
+            return bag
+        end
+    end
+    return nil
+end
+
+--- Walk craft bag first, then inventory (craft-bag overflow).
+local function EachBrewSourceSlot(fn)
+    local a = AA()
+    local craftType = a and a.CraftingBackpackType and a.CraftingBackpackType() or 4
     local n = 0
-    for slot, item in pairs(bag) do
-        if type(slot) == "number" and ItemValid(item) then
-            n = n + 1
-            fn(slot, item)
+    local craftBag = a and a.GetCraftingBag and a.GetCraftingBag()
+    if type(craftBag) == "table" then
+        for slot, item in pairs(craftBag) do
+            if type(slot) == "number" and ItemValid(item) then
+                n = n + 1
+                fn(slot, item, craftType)
+            end
+        end
+    end
+    local invType = InventoryBackpackType()
+    local invBag = GetInventoryBagTable()
+    if type(invBag) == "table" then
+        for slot, item in pairs(invBag) do
+            if type(slot) == "number" and ItemValid(item) then
+                n = n + 1
+                fn(slot, item, invType)
+            end
         end
     end
     return n
@@ -574,7 +621,7 @@ function Brew.CountInCraftingBag(uniqueID, narrowName, spec)
     uniqueID = tonumber(uniqueID) or 0
     narrowName = ToNarrow(narrowName)
     local total = 0
-    EachCraftingBagSlot(function(_, item)
+    EachBrewSourceSlot(function(_, item)
         if type(spec) == "table" then
             if ItemMatchesSpec(item, spec) then
                 total = total + (tonumber(item.stackCount) or 1)
@@ -596,13 +643,14 @@ local function FindCraftingBagItem(uniqueID, narrowName, exclude, spec, role)
     narrowName = ToNarrow(narrowName)
     exclude = exclude or {}
     local a = AA()
-    local bagType = a and a.CraftingBackpackType and a.CraftingBackpackType() or 4
-    local bestSlot, bestItem = nil, nil
+    local craftType = a and a.CraftingBackpackType and a.CraftingBackpackType() or 4
+    local bestSlot, bestItem, bestBagType = nil, nil, craftType
     local bestStack = 100000
+    local bestIsCraft = false
     local seedType = (GameData and GameData.CultivationTypes and GameData.CultivationTypes.SEED) or 1
     local sporeType = (GameData and GameData.CultivationTypes and GameData.CultivationTypes.SPORE) or 5
-    EachCraftingBagSlot(function(slot, item)
-        local key = tostring(bagType) .. ":" .. tostring(slot)
+    EachBrewSourceSlot(function(slot, item, backpackType)
+        local key = tostring(backpackType) .. ":" .. tostring(slot)
         local used = tonumber(exclude[key]) or 0
         local stack = tonumber(item.stackCount) or 1
         if used > 0 and used >= stack then
@@ -621,14 +669,28 @@ local function FindCraftingBagItem(uniqueID, narrowName, exclude, spec, role)
             matched = true
         end
         if matched then
-            if stack < bestStack or (stack == bestStack and (bestSlot == nil or slot < bestSlot)) then
+            local isCraft = backpackType == craftType
+            -- Prefer craft bag; within a bag prefer smaller stacks.
+            local take = false
+            if bestSlot == nil then
+                take = true
+            elseif isCraft and not bestIsCraft then
+                take = true
+            elseif isCraft == bestIsCraft
+                and (stack < bestStack or (stack == bestStack and slot < bestSlot))
+            then
+                take = true
+            end
+            if take then
                 bestSlot = slot
                 bestStack = stack
                 bestItem = item
+                bestBagType = backpackType
+                bestIsCraft = isCraft
             end
         end
     end)
-    return bestSlot, bestItem, bagType
+    return bestSlot, bestItem, bestBagType
 end
 
 local function IsOptionalRole(role)
@@ -2142,10 +2204,16 @@ function Brew.TryBrewClick()
             LogBrew("click phase=" .. phase .. " result=blocked reason=manual-session")
             return "blocked"
         end
-        local deficit = (tonumber(session.potionDeficit) or 0) > 0
+        local deficitOk = (tonumber(session.potionDeficit) or 0) > 0
+        local craftOk = (tonumber(session.craftable) or 0) > 0
         local row = FindSessionRow()
-        local ready = RowIsReadyToCraft(row) and deficit
-        if ready then
+        -- Prefer plan Ready; else session counters (plan may be invalidated while
+        -- brew-session defers rebuild — same as CanBrewNow 0.4.131).
+        local canContinue = deficitOk and (
+            RowIsReadyToCraft(row)
+            or craftOk
+        )
+        if canContinue then
             local ok = Brew.ValidateApothecaryPerform()
             if ok == true then
                 LogBrew("click phase=" .. phase .. " result=go name="

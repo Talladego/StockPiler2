@@ -25,9 +25,11 @@ Refine._reconcileFrameResult = false
 Refine._lastTryTickOnlyThrottle = false
 Refine._outstandingAt = Refine._outstandingAt or {}
 Refine._expireFlushTried = Refine._expireFlushTried or {}
+Refine._seedBufferCooldownUntil = Refine._seedBufferCooldownUntil or {}
 Refine._bagIndexGen = -1
 Refine._bagIndex = nil
 Refine.OUTSTANDING_TTL_SEC = 30
+Refine.SEED_BUFFER_FAIL_COOLDOWN_SEC = 45
 
 local MAX_PENDING_PER_PLANT = 6
 local MAX_OUTSTANDING_PER_SEED = 6
@@ -50,6 +52,45 @@ local function LogRefine(msg)
     if StockPiler2.Debug and StockPiler2.Debug.LogOp then
         StockPiler2.Debug.LogOp("refine", msg)
     end
+end
+
+--- After no-convert / expire-stuck, pause seed-buffer retries for this seedUid.
+local function ArmSeedBufferFailCooldown(seedUid)
+    seedUid = tonumber(seedUid) or 0
+    if seedUid <= 0 then
+        return
+    end
+    local sec = tonumber(Refine.SEED_BUFFER_FAIL_COOLDOWN_SEC) or 45
+    local untilT = NowSec() + sec
+    local cur = tonumber(Refine._seedBufferCooldownUntil[seedUid]) or 0
+    if untilT > cur then
+        Refine._seedBufferCooldownUntil[seedUid] = untilT
+    end
+    LogRefine(string.format(
+        "seed-buffer cooldown seedUid=%d until=%.1f",
+        seedUid,
+        untilT
+    ))
+    if Refine.InvalidateIntentCache then
+        Refine.InvalidateIntentCache()
+    end
+end
+
+local function IsSeedBufferOnCooldown(seedUid)
+    seedUid = tonumber(seedUid) or 0
+    if seedUid <= 0 then
+        return false
+    end
+    local untilT = tonumber(Refine._seedBufferCooldownUntil[seedUid]) or 0
+    if untilT <= 0 then
+        return false
+    end
+    local now = NowSec()
+    if now >= untilT then
+        Refine._seedBufferCooldownUntil[seedUid] = nil
+        return false
+    end
+    return true
 end
 
 --- Drop pending throttle when outstanding was wiped without a successful
@@ -586,6 +627,39 @@ local function DemandRowSurplus(row)
     return surplus
 end
 
+--- Match buffer line to demand row; nil means unwatched (treat surplus as refinable).
+local function DemandRowForBufferLine(line, demand, SM)
+    if type(line) ~= "table" or type(demand) ~= "table" then
+        return nil
+    end
+    local key = tostring(line.specKey or "")
+    if key ~= "" and type(demand[key]) == "table" then
+        return demand[key]
+    end
+    local plantUid = tonumber(line.plantUid) or 0
+    if plantUid <= 0 then
+        return nil
+    end
+    for _, row in pairs(demand) do
+        if type(row) == "table" and type(row.spec) == "table" then
+            local rowPlant = 0
+            if SM and SM.FindPlantUidForSpec then
+                rowPlant = tonumber(SM.FindPlantUidForSpec(row.spec)) or 0
+            end
+            if rowPlant <= 0 and SM and SM.ResolveSeedForSpec then
+                local seed = SM.ResolveSeedForSpec(row.spec)
+                if type(seed) == "table" then
+                    rowPlant = tonumber(seed.plantUid) or 0
+                end
+            end
+            if rowPlant == plantUid then
+                return row
+            end
+        end
+    end
+    return nil
+end
+
 local function GetSpecDemand()
     local RS = StockPiler2.RecipeSpec
     if type(RS) ~= "table" or not RS.BuildBalancedSpecDemand then
@@ -1071,6 +1145,7 @@ function Refine.ExpireStuckOutstanding()
                     ClearPendingForSeed(seedUid, "expire-stuck")
                     Refine._outstandingAt[seedUid] = nil
                     Refine._expireFlushTried[seedUid] = nil
+                    ArmSeedBufferFailCooldown(seedUid)
                 end
             end
         end
@@ -1220,6 +1295,7 @@ function Refine.CollectIntents()
 
     if bufferOn and RS and RS.CollectAutoGrowSeedLines then
         local bufferLines = RS.CollectAutoGrowSeedLines()
+        local demand = GetSpecDemand()
         for i = 1, #bufferLines do
             local line = bufferLines[i]
             local spec = line.spec
@@ -1228,14 +1304,24 @@ function Refine.CollectIntents()
             local key = tostring(line.specKey or seedUid)
             if type(spec) == "table" and seenBufferKey[key] ~= true then
                 seenBufferKey[key] = true
-                local budget = Refine.GetSeedBudgetForSpec(spec, seedUid)
-                local refinable = Refine.CountRefinablePlants(plantUid, spec)
-                if budget.headroom > 0 and refinable > 0 then
-                    local uses = math.min(budget.headroom, refinable, 5)
-                    AppendRefineIntent(intents, SM, line, "seed-buffer", uses, budget)
-                    appendedBuffer[key] = true
-                    if seedUid > 0 then
-                        appendedBuffer["uid:" .. tostring(seedUid)] = true
+                if IsSeedBufferOnCooldown(seedUid) then
+                    -- skip thrash after no-convert / expire-stuck
+                else
+                    local budget = Refine.GetSeedBudgetForSpec(spec, seedUid)
+                    local refinable = Refine.CountRefinablePlants(plantUid, spec)
+                    -- Only convert plants above brew need; never burn feedstock into seeds.
+                    local surplus = refinable
+                    local demandRow = DemandRowForBufferLine(line, demand, SM)
+                    if type(demandRow) == "table" then
+                        surplus = DemandRowSurplus(demandRow)
+                    end
+                    if budget.headroom > 0 and refinable > 0 and surplus > 0 then
+                        local uses = math.min(budget.headroom, refinable, surplus, 5)
+                        AppendRefineIntent(intents, SM, line, "seed-buffer", uses, budget)
+                        appendedBuffer[key] = true
+                        if seedUid > 0 then
+                            appendedBuffer["uid:" .. tostring(seedUid)] = true
+                        end
                     end
                 end
             end
@@ -1368,6 +1454,10 @@ function Refine.CanIssue(intent)
     end
     local seedUid = tonumber(intent.seedUid) or 0
     local plantUid = tonumber(intent.plantUid) or 0
+    local reason = tostring(intent.reason or "")
+    if reason == "seed-buffer" and IsSeedBufferOnCooldown(seedUid) then
+        return false, "seed-buffer-cooldown"
+    end
     if Refine._issuedSeedThisTick ~= nil and seedUid > 0 and Refine._issuedSeedThisTick == seedUid then
         return false, "duplicate-tick"
     end
@@ -1632,40 +1722,83 @@ function Refine.OnInventoryUpdated()
     if SM and SM.MaybeCompletePendingRefine then
         local result = SM.MaybeCompletePendingRefine()
         if type(result) == "table" then
-            local seedUid = tonumber(result.seedUid) or 0
-            local plantUid = tonumber(result.plantUid) or 0
-            if plantUid > 0 then
-                local pending = tonumber(Refine._pendingByPlant[plantUid]) or 0
-                if pending > 1 then
-                    Refine._pendingByPlant[plantUid] = pending - 1
-                else
-                    Refine._pendingByPlant[plantUid] = nil
-                    Refine._pendingSeedByPlant[plantUid] = nil
-                end
-            end
-            if seedUid > 0 then
-                Refine.TrackLiveSeed(seedUid)
-                -- Do not clear snap/frame gates for a second walk; TrackLiveSeed
-                -- updates baseline. Next frame / next snap reconciles deliveries.
-            end
-            Refine.InvalidateIntentCache()
-            Refine._lastTryTickOnlyThrottle = false
-            if StockPiler2.Grow and StockPiler2.Grow.InvalidatePlantQueue then
-                StockPiler2.Grow.InvalidatePlantQueue({ jobOnly = true })
-            end
-            -- 0.4.125: same hitch fusion as harvest Complete — move PlanRebuild /
-            -- UiFlush off ReconcileAll + ApplySlots frame.
-            local Sch = StockPiler2.Scheduler
-            if Sch and Sch.SkipPlanThisFrame then
-                Sch.SkipPlanThisFrame()
-            end
-            if Sch and Sch.SkipUiThisFrame then
-                Sch.SkipUiThisFrame()
-            end
-            if Sch and Sch.EnqueuePlanRebuildAfterRefineClear then
-                Sch.EnqueuePlanRebuildAfterRefineClear()
-            end
+            Refine.ApplyPendingRefineResult(result)
         end
+    end
+end
+
+--- Apply SeedMap pending-refine success or fail (clears throttle / outstanding on fail).
+function Refine.ApplyPendingRefineResult(result)
+    if type(result) ~= "table" then
+        return
+    end
+    local seedUid = tonumber(result.seedUid) or 0
+    local plantUid = tonumber(result.plantUid) or 0
+    if result.failed == true then
+        if plantUid > 0 then
+            local mappedSeed = tonumber(Refine._pendingSeedByPlant[plantUid]) or seedUid
+            ClearPendingForPlant(plantUid, mappedSeed, "refine-failed:" .. tostring(result.reason or "?"))
+            seedUid = mappedSeed > 0 and mappedSeed or seedUid
+        end
+        if seedUid > 0 then
+            local RP = StockPiler2.RefinePipeline
+            local n = RP and RP.GetOutstanding and (tonumber(RP.GetOutstanding(seedUid)) or 0) or 0
+            if n > 0 and RP.Reconcile then
+                RP.Reconcile(seedUid, n)
+            end
+            Refine._outstandingAt[seedUid] = nil
+            Refine._expireFlushTried[seedUid] = nil
+        end
+        LogRefine(string.format(
+            "convert-failed plantUid=%d seedUid=%d reason=%s",
+            plantUid,
+            seedUid,
+            tostring(result.reason or "?")
+        ))
+        if seedUid > 0 then
+            ArmSeedBufferFailCooldown(seedUid)
+        end
+        Refine.InvalidateIntentCache()
+        Refine._lastTryTickOnlyThrottle = false
+        if StockPiler2.Grow and StockPiler2.Grow.InvalidatePlantQueue then
+            StockPiler2.Grow.InvalidatePlantQueue({ jobOnly = true })
+        end
+        local Sch = StockPiler2.Scheduler
+        if Sch and Sch.EnqueuePlanRebuildAfterRefineClear then
+            Sch.EnqueuePlanRebuildAfterRefineClear()
+        end
+        return
+    end
+    if plantUid > 0 then
+        local pending = tonumber(Refine._pendingByPlant[plantUid]) or 0
+        if pending > 1 then
+            Refine._pendingByPlant[plantUid] = pending - 1
+        else
+            Refine._pendingByPlant[plantUid] = nil
+            Refine._pendingSeedByPlant[plantUid] = nil
+        end
+    end
+    if seedUid > 0 then
+        Refine.TrackLiveSeed(seedUid)
+        -- Do not clear snap/frame gates for a second walk; TrackLiveSeed
+        -- updates baseline. Next frame / next snap reconciles deliveries.
+    end
+    Refine.InvalidateIntentCache()
+    Refine._lastTryTickOnlyThrottle = false
+    if StockPiler2.Grow and StockPiler2.Grow.InvalidatePlantQueue then
+        StockPiler2.Grow.InvalidatePlantQueue({ jobOnly = true })
+    end
+    -- 0.4.125: same hitch fusion as harvest Complete — move PlanRebuild /
+    -- UiFlush off ReconcileAll + ApplySlots frame.
+    local Sch = StockPiler2.Scheduler
+    if Sch and Sch.SkipPlanThisFrame then
+        Sch.SkipPlanThisFrame()
+    end
+    if Sch and Sch.SkipUiThisFrame then
+        Sch.SkipUiThisFrame()
+    end
+    if Sch and Sch.EnqueuePlanRebuildAfterRefineClear then
+        Sch.EnqueuePlanRebuildAfterRefineClear()
     end
 end
 
@@ -1707,8 +1840,14 @@ function Refine.OnUpdateProcessed()
     local Inv = StockPiler2.Inventory
     local snapGen = Inv and Inv.GetSnapGen and Inv.GetSnapGen() or 0
     if snapGen == (tonumber(Refine._reconcileSnapGen) or -1) then
-        -- No new bag snap: still clear orphan pending so AutoGrow cannot wedge.
-        if hadOutstanding ~= true and hadSeedPending ~= true then
+        -- No bag snap: still poll pending refine so false isRefinable converts
+        -- (no bag delta) hit fast-fail / timeout instead of wedging AutoGrow.
+        if hadSeedPending == true and SM and SM.MaybeCompletePendingRefine then
+            local result = SM.MaybeCompletePendingRefine()
+            if type(result) == "table" then
+                Refine.ApplyPendingRefineResult(result)
+            end
+        elseif hadOutstanding ~= true and hadSeedPending ~= true then
             ClearOrphanPending("update-orphan")
         end
         return
