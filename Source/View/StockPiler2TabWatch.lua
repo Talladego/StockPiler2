@@ -1262,128 +1262,48 @@ local function ToW(value)
     return towstring(tostring(value))
 end
 
-local function SeedSpecLabel(spec)
-    local MS = StockPiler2.MaterialSpec
-    if MS and MS.NeedLabelParts then
-        local parts = MS.NeedLabelParts(spec)
-        if type(parts) == "table" and parts.header and parts.header ~= L"" then
-            return parts.header
-        end
-    end
-    if MS and MS.NeedLabel then
-        local label = MS.NeedLabel(spec)
-        if label and label ~= L"" then
-            return label
-        end
-    end
-    return T("watch.watched_seed")
-end
-
 local function CollectSeedBufferTooltipData()
-    local RS = StockPiler2.RecipeSpec
-    local Refine = StockPiler2.Refine
-    local buffer = StockPiler2.Watch and StockPiler2.Watch.GetSeedBufferMin and StockPiler2.Watch.GetSeedBufferMin() or 5
-    local enabled = StockPiler2.Watch and StockPiler2.Watch.IsSeedBufferEnabled and StockPiler2.Watch.IsSeedBufferEnabled() == true
-    local rows = {}
-    local byKey = {}
-
-    local lines = {}
-    if RS and RS.CollectAutoGrowSeedLines then
-        lines = RS.CollectAutoGrowSeedLines() or {}
+    local PS = StockPiler2.PlanSnapshot
+    local plan = PS and PS.Get and PS.Get()
+    local data = type(plan) == "table" and plan.seedBufferTipData or nil
+    if type(data) ~= "table" then
+        return {
+            pending = true,
+            buffer = 0,
+            enabled = false,
+            watched = {},
+            intents = {},
+        }
     end
 
-    for i = 1, #lines do
-        local line = lines[i]
-        local spec = line and line.spec
-        if type(spec) == "table" then
-            local seedUid = tonumber(line.seedUid) or 0
-            local specKey = tostring(line.specKey or seedUid or i)
-            if byKey[specKey] == nil then
-                local live, ground, planned, credit = 0, 0, 0, 0
-                if Refine and Refine.GetSeedBudgetForSpec then
-                    local budget = Refine.GetSeedBudgetForSpec(spec, seedUid)
-                    live = tonumber(budget and budget.live) or 0
-                    ground = tonumber(budget and budget.ground) or 0
-                    planned = tonumber(budget and budget.outstanding) or 0
-                    credit = tonumber(budget and budget.credit) or (live + ground + planned)
-                end
-                local shortBy = math.max(0, (tonumber(buffer) or 0) - credit)
-                local name = SeedSpecLabel(spec)
-                byKey[specKey] = {
-                    key = specKey,
-                    spec = spec,
-                    seedUid = seedUid,
-                    name = name,
-                    live = live,
-                    ground = ground,
-                    planned = planned,
-                    total = credit,
-                    shortBy = shortBy,
-                }
-                rows[#rows + 1] = byKey[specKey]
-            end
-        end
-    end
-
-    table.sort(rows, function(a, b)
-        if a.shortBy ~= b.shortBy then
-            return a.shortBy > b.shortBy
-        end
-        return tostring(a.key) < tostring(b.key)
-    end)
-
-    local intentsByKey = {}
-    if Refine and Refine.CollectIntents then
-        local intents = Refine.CollectIntents() or {}
-        for i = 1, #intents do
-            local it = intents[i]
-            local spec = it and it.spec
-            if type(spec) == "table" then
-                local seedUid = tonumber(it.seedUid) or 0
-                local key = tostring((StockPiler2.MaterialSpec and StockPiler2.MaterialSpec.ProductKey and StockPiler2.MaterialSpec.ProductKey(spec)) or seedUid or i)
-                local rec = intentsByKey[key]
-                if rec == nil then
-                    rec = {
-                        key = key,
-                        name = SeedSpecLabel(spec),
-                        spec = spec,
-                        count = 0,
-                        plantNeed = 0,
-                        seedBuffer = 0,
-                        resinNeed = 0,
-                    }
-                    intentsByKey[key] = rec
-                end
-                local uses = math.max(1, tonumber(it.uses) or 1)
-                rec.count = rec.count + uses
-                if it.reason == "plant-need" then
-                    rec.plantNeed = rec.plantNeed + uses
-                elseif it.reason == "resin-need" then
-                    rec.resinNeed = rec.resinNeed + uses
-                else
-                    rec.seedBuffer = rec.seedBuffer + uses
+    -- Bag snapshots may advance while the planner rebuild is coalesced. Patch only
+    -- live seed Have/SHORT fields; ground, outstanding, intents and demand stay planned.
+    local Inv = StockPiler2.Inventory
+    local watched = type(data.watched) == "table" and data.watched or {}
+    if Inv and Inv.CountByUid then
+        for i = 1, #watched do
+            local row = watched[i]
+            if type(row) == "table" then
+                local seedUid = tonumber(row.seedUid) or 0
+                if seedUid > 0 then
+                    row.live = tonumber(Inv.CountByUid(seedUid)) or 0
+                    row.total = row.live
+                        + (tonumber(row.ground) or 0)
+                        + (tonumber(row.planned) or 0)
+                    row.shortBy = math.max(0, (tonumber(data.buffer) or 0) - row.total)
                 end
             end
         end
+        table.sort(watched, function(a, b)
+            if a.shortBy ~= b.shortBy then
+                return a.shortBy > b.shortBy
+            end
+            return tostring(a.key) < tostring(b.key)
+        end)
     end
-
-    local intentRows = {}
-    for _, rec in pairs(intentsByKey) do
-        intentRows[#intentRows + 1] = rec
-    end
-    table.sort(intentRows, function(a, b)
-        if a.count ~= b.count then
-            return a.count > b.count
-        end
-        return tostring(a.key) < tostring(b.key)
-    end)
-
-    return {
-        buffer = tonumber(buffer) or 5,
-        enabled = enabled,
-        watched = rows,
-        intents = intentRows,
-    }
+    data.watched = watched
+    data.intents = type(data.intents) == "table" and data.intents or {}
+    return data
 end
 
 local function BuildSeedBufferTooltipRows(data)
@@ -1414,14 +1334,27 @@ local function BuildSeedBufferTooltipRows(data)
 
     local rows = {
         { text = T("tip.watch.sb.title"), kind = "title" },
-        {
-            text = T("tip.watch.sb.buffer_line", {
-                value = tostring(data.buffer),
-                state = data.enabled and T("watch.enabled") or T("watch.disabled"),
-            }),
-            kind = data.enabled and "body" or "warning",
-        },
-        { text = T("tip.watch.sb.watched_seeds"), kind = "meta" },
+    }
+
+    if data.pending == true then
+        rows[#rows + 1] = { text = T("tip.status.plan_pending"), kind = "meta" }
+        rows[#rows + 1] = {
+            text = T("tip.watch.seed_buffer_chip"),
+            kind = "meta",
+        }
+        return rows
+    end
+
+    rows[#rows + 1] = {
+        text = T("tip.watch.sb.buffer_line", {
+            value = tostring(data.buffer),
+            state = data.enabled and T("watch.enabled") or T("watch.disabled"),
+        }),
+        kind = data.enabled and "body" or "warning",
+    }
+    rows[#rows + 1] = {
+        text = T("tip.watch.sb.watched_seeds"),
+        kind = "meta",
     }
 
     local maxWatched = 4
@@ -1523,7 +1456,11 @@ function StockPiler2TabWatch.OnMouseOverSeedBuffer()
         return
     end
 
-    local genKey = PlanTipCacheKey()
+    local snapGen = 0
+    if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
+        snapGen = tonumber(StockPiler2.Inventory.GetSnapGen()) or 0
+    end
+    local genKey = PlanTipCacheKey() .. ":s" .. tostring(snapGen)
     local cache = StockPiler2TabWatch._seedBufferTipCache
     if type(cache) ~= "table" or cache.genKey ~= genKey then
         cache = { genKey = genKey, rows = nil }
@@ -1531,14 +1468,8 @@ function StockPiler2TabWatch.OnMouseOverSeedBuffer()
     end
     local rows = cache.rows
     if type(rows) ~= "table" then
-        if StockPiler2.Perf and StockPiler2.Perf.Begin then
-            StockPiler2.Perf.Begin("SeedBufferTooltip.Build")
-        end
         rows = BuildSeedBufferTooltipRows(CollectSeedBufferTooltipData())
         cache.rows = rows
-        if StockPiler2.Perf and StockPiler2.Perf.End then
-            StockPiler2.Perf.End("SeedBufferTooltip.Build")
-        end
     end
     StockPiler2RecipeTooltip.ShowColoredRows(SystemData.ActiveWindow.name, rows, Tooltips.ANCHOR_WINDOW_TOP)
 end
@@ -1848,9 +1779,6 @@ local function BuildStatusTooltipRows(data)
     end
 
     local slots = data.statusTipSlots
-    if type(slots) ~= "table" or #slots == 0 then
-        slots = data.statusSlots
-    end
     local recipe = data.recipe or data.specRecipe
     local craftsNeeded = tonumber(data.craftsNeeded) or 0
     local deficit = tonumber(data.potionDeficit) or 0
@@ -1868,24 +1796,6 @@ local function BuildStatusTooltipRows(data)
         end
     end
     local yield = tonumber(data.recipeYield) or 0
-    local usedTipSlots = type(data.statusTipSlots) == "table" and #data.statusTipSlots > 0
-    local fullSlots = nil
-    if not usedTipSlots
-        and type(recipe) == "table"
-        and StockPiler2.Planner
-        and StockPiler2.Planner.BuildRecipeSlotTooltipEntries
-        and (craftsNeeded > 0 or (type(slots) == "table" and #slots > 0))
-    then
-        local demand = nil
-        local RS = StockPiler2.RecipeSpec
-        if RS and RS.BuildBalancedSpecDemand then
-            demand = RS.BuildBalancedSpecDemand()
-        end
-        fullSlots = StockPiler2.Planner.BuildRecipeSlotTooltipEntries(recipe, craftsNeeded, demand)
-    end
-    if type(fullSlots) == "table" and #fullSlots > 0 then
-        slots = fullSlots
-    end
     if type(slots) == "table" and #slots > 0 then
         if craftsNeeded > 0 and deficit > 0 then
             rows[#rows + 1] = {
@@ -2233,6 +2143,8 @@ local function BuildStatusTooltipRows(data)
                 end
             end
         end
+    elseif type(recipe) == "table" then
+        appendMeta(T("tip.status.plan_pending"))
     elseif type(data.statusLines) == "table" and #data.statusLines > 0 then
         for i = 1, #data.statusLines do
             appendMeta(data.statusLines[i])
@@ -2271,16 +2183,10 @@ function StockPiler2TabWatch.OnMouseOverStatus()
     end
     local rows = watchKey ~= "" and cache.byWatch[watchKey] or nil
     if type(rows) ~= "table" then
-        if StockPiler2.Perf and StockPiler2.Perf.Begin then
-            StockPiler2.Perf.Begin("StatusTooltip.Build")
-        end
         rows = BuildStatusTooltipRows(data)
         TrimStatusTooltipRows(rows, engineMax)
         if watchKey ~= "" then
             cache.byWatch[watchKey] = rows
-        end
-        if StockPiler2.Perf and StockPiler2.Perf.End then
-            StockPiler2.Perf.End("StatusTooltip.Build")
         end
     end
 
@@ -2618,8 +2524,8 @@ end
 
 function StockPiler2TabWatch.OnMouseOverLoad()
     local data = RowDataFromActiveChild()
-    if StockPiler2.Brew and StockPiler2.Brew.ShowRowBrewTooltip then
-        StockPiler2.Brew.ShowRowBrewTooltip(
+    if StockPiler2.BrewTooltip and StockPiler2.BrewTooltip.ShowRow then
+        StockPiler2.BrewTooltip.ShowRow(
             SystemData.ActiveWindow.name,
             data,
             Tooltips.ANCHOR_WINDOW_TOP

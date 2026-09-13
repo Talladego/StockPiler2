@@ -3,7 +3,7 @@
 ----------------------------------------------------------------
 
 StockPiler2 = StockPiler2 or {}
-StockPiler2.Version = L"0.4.144"
+StockPiler2.Version = L"0.4.151"
 
 local function T(key, tokens)
     if StockPiler2.T then
@@ -149,14 +149,6 @@ function StockPiler2.OnSlash(input)
         end
         return
     end
-    if lower == "craftbag" or lower == "craftbag force" then
-        if StockPiler2.BagAdapter and StockPiler2.BagAdapter.Dump then
-            local force = string.find(lower, "force", 1, true) ~= nil
-            StockPiler2.BagAdapter.Dump(function(msg) EmitLog(msg) end, { force = force })
-            Print(T("boot.bags_dumped"))
-        end
-        return
-    end
     if lower == "brewplan" then
         if StockPiler2.Planner and StockPiler2.Planner.DumpBrewPlan then
             StockPiler2.Planner.DumpBrewPlan(function(msg) EmitLog(msg) end)
@@ -280,6 +272,9 @@ end
 function StockPiler2.Shutdown()
     if StockPiler2.Macro and StockPiler2.Macro.Shutdown then
         StockPiler2.Macro.Shutdown()
+    end
+    if StockPiler2.Orchestrator and StockPiler2.Orchestrator.Shutdown then
+        StockPiler2.Orchestrator.Shutdown()
     end
     if StockPiler2.LearnBridge and StockPiler2.LearnBridge.Shutdown then
         StockPiler2.LearnBridge.Shutdown()

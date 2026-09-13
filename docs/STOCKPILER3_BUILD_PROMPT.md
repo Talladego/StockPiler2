@@ -126,17 +126,17 @@ StockPiler3/
     Bootstrap.lua
     Core/         EventBus, Scheduler, Orchestrator, EngineEventBridge, Debug, Perf, Audit
     Stores/       Inventory, Garden, RefinePipeline, Knowledge, Watch, PlanSnapshot
-    Planner/      Planner.lua
-    Grow/         Grow.lua
-    Brew/         Brew.lua
+    Planner/      Planner.lua, SpecDemand.lua, SpecHaveCache.lua (demand/have-cache live here — not Knowledge)
+    Grow/         Grow.lua (readiness + plant/harvest ops; no footer/tooltip chrome)
+    Brew/         Brew.lua (session FSM; no footer/tooltip chrome)
     Refine/       Refine.lua
     Buy/          Buy.lua
-    Executors/    Grow, Refine, Brew, Buy
+    Executors/    Grow, Refine, Brew, Buy (sole auto plant/additive/brew engine-write path)
     Adapters/     Bag, Cultivator, Apothecary, Vendor, CraftChat, TradeSkillCaps
-    Knowledge/    RecipeSpec, SeedMap, BrewLearn, LearnBridge, Classify, MaterialSpec, Additives, Items, Shims
+    Knowledge/    RecipeSpec (store/learn), SeedMap facade + Core/Observe/Resolve/Maintenance, BrewLearn, LearnBridge, Classify, MaterialSpec, Additives, Items, Shims
     Macro/        Macro.lua
     Persistence/  Settings, Character, Account
-    View/         Window, Templates, TabPotions, TabWatch, Catalog, Ui, tooltips
+    View/         Window, Templates, TabPotions, TabWatch, Catalog, Ui, HarvestChrome, HarvestTooltip, BrewChrome, BrewTooltip
 ```
 
 ### 5.5 Orchestrator — phases, tick order, fillBlocked

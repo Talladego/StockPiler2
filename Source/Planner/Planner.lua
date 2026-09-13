@@ -1072,17 +1072,146 @@ local function BuildWatchedTargets(ctx)
     return targets
 end
 
+local function SeedBufferTipSpecLabel(spec)
+    local MS = StockPiler2.MaterialSpec
+    if MS and MS.NeedLabelParts then
+        local parts = MS.NeedLabelParts(spec)
+        if type(parts) == "table" and parts.header and parts.header ~= L"" then
+            return parts.header
+        end
+    end
+    if MS and MS.NeedLabel then
+        local label = MS.NeedLabel(spec)
+        if label and label ~= L"" then
+            return label
+        end
+    end
+    return T("watch.watched_seed")
+end
+
+--- Snapshot-only payload for the Watch seed-buffer tooltip.
+--- Heavy seed-line / refine intent collection belongs to Planner.Build, never hover.
+local function BuildSeedBufferTipData()
+    local RS = StockPiler2.RecipeSpec
+    local Refine = StockPiler2.Refine
+    local buffer = StockPiler2.Watch and StockPiler2.Watch.GetSeedBufferMin
+        and StockPiler2.Watch.GetSeedBufferMin() or 5
+    local enabled = StockPiler2.Watch and StockPiler2.Watch.IsSeedBufferEnabled
+        and StockPiler2.Watch.IsSeedBufferEnabled() == true
+    local rows = {}
+    local byKey = {}
+    local lines = {}
+    if RS and RS.CollectAutoGrowSeedLines then
+        lines = RS.CollectAutoGrowSeedLines() or {}
+    end
+
+    for i = 1, #lines do
+        local line = lines[i]
+        local spec = line and line.spec
+        if type(spec) == "table" then
+            local seedUid = tonumber(line.seedUid) or 0
+            local specKey = tostring(line.specKey or seedUid or i)
+            if byKey[specKey] == nil then
+                local live, ground, planned, credit = 0, 0, 0, 0
+                if Refine and Refine.GetSeedBudgetForSpec then
+                    local budget = Refine.GetSeedBudgetForSpec(spec, seedUid)
+                    live = tonumber(budget and budget.live) or 0
+                    ground = tonumber(budget and budget.ground) or 0
+                    planned = tonumber(budget and budget.outstanding) or 0
+                    credit = tonumber(budget and budget.credit) or (live + ground + planned)
+                end
+                local rec = {
+                    key = specKey,
+                    spec = spec,
+                    seedUid = seedUid,
+                    name = SeedBufferTipSpecLabel(spec),
+                    live = live,
+                    ground = ground,
+                    planned = planned,
+                    total = credit,
+                    shortBy = math.max(0, (tonumber(buffer) or 0) - credit),
+                }
+                byKey[specKey] = rec
+                rows[#rows + 1] = rec
+            end
+        end
+    end
+
+    table.sort(rows, function(a, b)
+        if a.shortBy ~= b.shortBy then
+            return a.shortBy > b.shortBy
+        end
+        return tostring(a.key) < tostring(b.key)
+    end)
+
+    local intentsByKey = {}
+    if Refine and Refine.CollectIntents then
+        local intents = Refine.CollectIntents() or {}
+        for i = 1, #intents do
+            local it = intents[i]
+            local spec = it and it.spec
+            if type(spec) == "table" then
+                local seedUid = tonumber(it.seedUid) or 0
+                local key = tostring((StockPiler2.MaterialSpec
+                    and StockPiler2.MaterialSpec.ProductKey
+                    and StockPiler2.MaterialSpec.ProductKey(spec)) or seedUid or i)
+                local rec = intentsByKey[key]
+                if rec == nil then
+                    rec = {
+                        key = key,
+                        name = SeedBufferTipSpecLabel(spec),
+                        spec = spec,
+                        count = 0,
+                        plantNeed = 0,
+                        seedBuffer = 0,
+                        resinNeed = 0,
+                    }
+                    intentsByKey[key] = rec
+                end
+                local uses = math.max(1, tonumber(it.uses) or 1)
+                rec.count = rec.count + uses
+                if it.reason == "plant-need" then
+                    rec.plantNeed = rec.plantNeed + uses
+                elseif it.reason == "resin-need" then
+                    rec.resinNeed = rec.resinNeed + uses
+                else
+                    rec.seedBuffer = rec.seedBuffer + uses
+                end
+            end
+        end
+    end
+
+    local intentRows = {}
+    for _, rec in pairs(intentsByKey) do
+        intentRows[#intentRows + 1] = rec
+    end
+    table.sort(intentRows, function(a, b)
+        if a.count ~= b.count then
+            return a.count > b.count
+        end
+        return tostring(a.key) < tostring(b.key)
+    end)
+
+    return {
+        buffer = tonumber(buffer) or 5,
+        enabled = enabled,
+        watched = rows,
+        intents = intentRows,
+    }
+end
+
 function Planner.BuildWatchRows(ctx)
     local rows = {}
     local RS = StockPiler2.RecipeSpec
     local Perf = StockPiler2.Perf
     local targets = BuildWatchedTargets(ctx)
     local demand = nil
-    if RS and RS.BuildBalancedSpecDemand then
+    local SpecDemand = Planner.SpecDemand
+    if SpecDemand and SpecDemand.BuildBalancedSpecDemand then
         if Perf and Perf.Begin then
             Perf.Begin("Build.Demand")
         end
-        demand = RS.BuildBalancedSpecDemand()
+        demand = SpecDemand.BuildBalancedSpecDemand()
         if Perf and Perf.End then
             Perf.End("Build.Demand")
         end
@@ -1207,24 +1336,28 @@ function Planner.BuildWatchRows(ctx)
         ApplyNeedApothecaryStatus(row)
         ApplyNeedSkillStatus(row)
 
-        -- Tip-ready full slot entries (stocked + short) so Status hover skips rebuild.
+        -- Tip-ready full slot entries (stocked + short) so Status hover never rebuilds.
         local craftsNeeded = tonumber(row.craftsNeeded) or 0
         local recipe = row.recipe
-        if type(recipe) == "table" and craftsNeeded > 0 then
-            local tipSlots = row.statusTipSlots
-            if type(tipSlots) ~= "table" then
-                tipSlots = Planner.BuildRecipeSlotTooltipEntries(recipe, craftsNeeded, demand)
-            end
-            if Grow and Grow.GrowingNotesForSpec then
-                for s = 1, #tipSlots do
-                    local entry = tipSlots[s]
-                    if type(entry) == "table"
-                        and entry.kind == "plant"
-                        and (entry.stocked ~= true)
-                        and ((tonumber(entry.deficit) or 0) > 0)
-                    then
-                        if entry.growingNotes == nil then
-                            entry.growingNotes = Grow.GrowingNotesForSpec(entry.spec) or L""
+        local recipeSlots = type(recipe) == "table" and recipe.slots or nil
+        if type(recipe) == "table" then
+            local tipSlots = {}
+            if type(recipeSlots) == "table" and #recipeSlots > 0 then
+                tipSlots = row.statusTipSlots
+                if type(tipSlots) ~= "table" or #tipSlots == 0 then
+                    tipSlots = Planner.BuildRecipeSlotTooltipEntries(recipe, craftsNeeded, demand)
+                end
+                if Grow and Grow.GrowingNotesForSpec then
+                    for s = 1, #tipSlots do
+                        local entry = tipSlots[s]
+                        if type(entry) == "table"
+                            and entry.kind == "plant"
+                            and (entry.stocked ~= true)
+                            and ((tonumber(entry.deficit) or 0) > 0)
+                        then
+                            if entry.growingNotes == nil then
+                                entry.growingNotes = Grow.GrowingNotesForSpec(entry.spec) or L""
+                            end
                         end
                     end
                 end
@@ -1234,6 +1367,7 @@ function Planner.BuildWatchRows(ctx)
             row.statusTipSlots = nil
         end
     end
+    local seedBufferTipData = BuildSeedBufferTipData()
     if Perf and Perf.End then
         Perf.End("Build.Tips")
     end
@@ -1246,7 +1380,7 @@ function Planner.BuildWatchRows(ctx)
     if Perf and Perf.End then
         Perf.End("Build.Notify")
     end
-    return rows
+    return rows, seedBufferTipData
 end
 
 local function CacheKey(ctx)
@@ -1416,8 +1550,9 @@ function Planner.Build(opts)
     if StockPiler2.Scheduler and StockPiler2.Scheduler.SuppressInventorySideEffects then
         StockPiler2.Scheduler.SuppressInventorySideEffects(3)
     end
-    if StockPiler2.RecipeSpec and StockPiler2.RecipeSpec.BeginPlanCraftsMemo then
-        StockPiler2.RecipeSpec.BeginPlanCraftsMemo()
+    local SpecHaveCache = Planner.SpecHaveCache
+    if SpecHaveCache and SpecHaveCache.BeginPlanCraftsMemo then
+        SpecHaveCache.BeginPlanCraftsMemo()
     end
     -- Perf: ClearPlanCaches BEFORE WarmHave so Have/plantUid resolve share one cache gen.
     -- Clearing after WarmHave used to discard warm work mid-build. Do not reorder.
@@ -1430,13 +1565,15 @@ function Planner.Build(opts)
         Perf.Begin("Build.WarmHave")
     end
     local RS = StockPiler2.RecipeSpec
-    if RS and RS.IsHaveCacheWarmForSnap and RS.IsHaveCacheWarmForSnap() == true then
-        -- prewarm hit — leave _specHaveCache as-is
-    elseif RS and RS.WarmSpecHaveCacheForWatches then
-        RS.WarmSpecHaveCacheForWatches()
-    elseif RS then
-        RS._specHaveCache = {}
-        RS._specHaveSnapGen = nil
+    if SpecHaveCache and SpecHaveCache.IsHaveCacheWarmForSnap
+        and SpecHaveCache.IsHaveCacheWarmForSnap() == true
+    then
+        -- prewarm hit — leave the spec-have cache as-is
+    elseif SpecHaveCache and SpecHaveCache.WarmSpecHaveCacheForWatches then
+        SpecHaveCache.WarmSpecHaveCacheForWatches()
+    elseif SpecHaveCache then
+        SpecHaveCache._specHaveCache = {}
+        SpecHaveCache._specHaveSnapGen = nil
     end
     if Perf and Perf.End then
         Perf.End("Build.WarmHave")
@@ -1457,11 +1594,13 @@ function Planner.Build(opts)
     end
     local planGen = (tonumber(Planner._planGen) or 0) + 1
     Planner._planGen = planGen
+    local rows, seedBufferTipData = Planner.BuildWatchRows(ctx)
     local plan = {
         planGen = planGen,
         cacheKey = key,
         ctx = ctx,
-        rows = Planner.BuildWatchRows(ctx),
+        rows = rows,
+        seedBufferTipData = seedBufferTipData,
         growJobs = {},
         refineIntents = {},
         brewBlocks = {},
@@ -1970,7 +2109,9 @@ function Planner.CollectVendorBuyJobs()
         return entries
     end
 
-    local focus = RS.CollectAutoBuyFocus and RS.CollectAutoBuyFocus() or nil
+    local SpecDemand = Planner.SpecDemand
+    local focus = SpecDemand and SpecDemand.CollectAutoBuyFocus
+        and SpecDemand.CollectAutoBuyFocus() or nil
     local maxGap = type(focus) == "table" and tonumber(focus.maxBottleGap) or nil
     local focusCount = type(focus) == "table" and type(focus.watches) == "table" and #focus.watches or 0
     Planner._vendorBuyJobsMeta.maxBottleGap = maxGap

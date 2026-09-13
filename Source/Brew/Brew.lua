@@ -1003,38 +1003,11 @@ end
 ----------------------------------------------------------------
 
 local function RefreshBrewUi()
-    -- ClearLoadedSession / FailJob hold this so ClearSlots craft storms cannot
-    -- re-adopt + paint Brew/Idle mid-teardown (label flip before Load).
-    if Brew._suppressBrewUi == true then
-        return
-    end
-    Brew.InvalidateCanBrewCache()
-    if StockPiler2.Perf and StockPiler2.Perf.Begin then
-        StockPiler2.Perf.Begin("BrewUi")
-    end
-    -- Perf: dirty-only paint — do not sync UpdateRows / MaybeNotifyBrewReady here.
-    -- Craft-slot loot storms used to run full BrewUi×N + footer notify per slot.
-    -- Footer/brew-ready coalesce via RequestFooterRefresh → FlushPendingFooterRefresh.
-    -- EngineEventBridge coalesces OnCraftingUpdated to once per UPDATE_PROCESSED
-    -- (_brewUiDue) and holds during harvest storm (unless Brew._job active).
-    if StockPiler2Window and StockPiler2Window.RequestFooterRefresh then
-        StockPiler2Window.RequestFooterRefresh()
-    elseif StockPiler2Window and StockPiler2Window.RefreshFooterButtons then
-        StockPiler2Window.RefreshFooterButtons()
-    end
-    -- Dirty-only: do not sync UpdateRows on every craft slot (login/refine storms).
-    if StockPiler2TabWatch and StockPiler2TabWatch.InvalidateBrewChrome then
-        StockPiler2TabWatch.InvalidateBrewChrome()
-    end
-    if StockPiler2.Ui and StockPiler2.Ui.MarkWatchUiDirty then
-        StockPiler2.Ui.MarkWatchUiDirty()
-    end
-    if StockPiler2Window and StockPiler2Window.RequestListRepopulate then
-        StockPiler2Window.RequestListRepopulate()
-    end
-    if StockPiler2.Perf and StockPiler2.Perf.End then
-        StockPiler2.Perf.End("BrewUi")
-    end
+    return StockPiler2.BrewChrome.RefreshBrewUi()
+end
+
+function Brew.RefreshBrewUi()
+    return StockPiler2.BrewChrome.RefreshBrewUi()
 end
 
 local function CloseOwnedSession()
@@ -1473,6 +1446,8 @@ local function JobShouldRelease(job)
     return AllStepsLoaded(job)
 end
 
+--- Engine-writing load primitive. Automated and manual load progression enters
+--- through BrewExecutor.Tick; keep UI/tip policy outside the executor.
 function Brew.Tick()
     local Perf = StockPiler2.Perf
     if Perf and Perf.Begin then
@@ -1575,7 +1550,9 @@ function Brew.OnUpdate(timeElapsed)
         Brew._updateAccum = (Brew._updateAccum or 0) + timeElapsed
         if Brew._updateAccum >= TICK_INTERVAL_SEC then
             Brew._updateAccum = Brew._updateAccum - TICK_INTERVAL_SEC
-            Brew.Tick()
+            if StockPiler2.BrewExecutor and StockPiler2.BrewExecutor.Tick then
+                StockPiler2.BrewExecutor.Tick()
+            end
         end
     end
     -- CanBrewNow greys during op-lock; re-enable footer + row chrome when lock expires.
@@ -1617,7 +1594,9 @@ function Brew.OnCraftingUpdated()
     if type(Brew._job) == "table" then
         Brew.ReconcileBoardIntegrity("crafting-update")
         if type(Brew._job) == "table" then
-            Brew.Tick()
+            if StockPiler2.BrewExecutor and StockPiler2.BrewExecutor.Tick then
+                StockPiler2.BrewExecutor.Tick()
+            end
         end
         return
     end
@@ -1856,7 +1835,9 @@ function Brew.BeginForRow(row, opts)
     LogBrew("begin-load " .. ToNarrow(row.name)
         .. " source=" .. tostring(source)
         .. " steps=" .. tostring(#steps))
-    Brew.Tick()
+    if StockPiler2.BrewExecutor and StockPiler2.BrewExecutor.Tick then
+        StockPiler2.BrewExecutor.Tick()
+    end
     RefreshBrewUi()
     return done(true)
 end
@@ -2255,7 +2236,9 @@ function Brew.TryBrewClick()
 
     if type(nextRow) == "table" then
         LogBrew("click phase=" .. phase .. " result=blocked reason=begin-load")
-        Brew.BeginForRow(nextRow, { source = "auto" })
+        if StockPiler2.BrewExecutor and StockPiler2.BrewExecutor.BeginLoad then
+            StockPiler2.BrewExecutor.BeginLoad(nextRow, { source = "auto" })
+        end
         return "blocked"
     end
 
@@ -2273,6 +2256,8 @@ function Brew.TryBrewClick()
     return "blocked"
 end
 
+--- Thin perform primitive. BrewExecutor owns the automated lane; footer, macro,
+--- and row buttons may call this directly only for their user-initiated lane.
 function Brew.FirePerform()
     local a = AA()
     if not a or not a.Perform then
@@ -2531,7 +2516,7 @@ local function AppendIngredientStockLines(body, recipe)
     end
 end
 
-function Brew.RegisterBrewLiveTooltip(anchorWindow, anchorPoint)
+function Brew._BrewTooltipRegisterLive(anchorWindow, anchorPoint)
     if anchorWindow == nil or anchorWindow == "" then
         Brew.ClearBrewLiveTooltip()
         return
@@ -2546,7 +2531,7 @@ function Brew.RegisterBrewLiveTooltip(anchorWindow, anchorPoint)
     tip.fingerprint = nil
 end
 
-function Brew.RegisterRowBrewLiveTooltip(anchorWindow, anchorPoint, row)
+function Brew._BrewTooltipRegisterRowLive(anchorWindow, anchorPoint, row)
     if anchorWindow == nil or anchorWindow == "" then
         Brew.ClearBrewLiveTooltip()
         return
@@ -2561,7 +2546,7 @@ function Brew.RegisterRowBrewLiveTooltip(anchorWindow, anchorPoint, row)
     tip.fingerprint = nil
 end
 
-function Brew.ClearBrewLiveTooltip()
+function Brew._BrewTooltipClearLive()
     local tip = Brew._liveBrewTip
     if tip then
         tip.kind = nil
@@ -2608,7 +2593,7 @@ local function DescribeLoadSource()
     return nil
 end
 
-function Brew.BrewTooltipFingerprint(row)
+function Brew._BrewTooltipFingerprint(row)
     local parts = {}
     local Caps = StockPiler2.TradeSkillCaps
     local canBrew = Caps and Caps.CanBrewPotions and Caps.CanBrewPotions() == true
@@ -2706,7 +2691,7 @@ local function FooterBrewActionLine(body)
     end
 end
 
-function Brew.ShowBrewTooltip(anchorWindow, anchor, liveRefresh)
+function Brew._BrewTooltipShow(anchorWindow, anchor, liveRefresh)
     if not Tooltips or type(Tooltips.CreateTextOnlyTooltip) ~= "function" then
         return
     end
@@ -2848,7 +2833,7 @@ function Brew.ShowBrewTooltip(anchorWindow, anchor, liveRefresh)
 end
 
 --- Per-watch Load/Brew tooltip (same style as footer), scoped to this row.
-function Brew.ShowRowBrewTooltip(anchorWindow, row, anchor, liveRefresh)
+function Brew._BrewTooltipShowRow(anchorWindow, row, anchor, liveRefresh)
     if not Tooltips or type(Tooltips.CreateTextOnlyTooltip) ~= "function" then
         return
     end
@@ -2971,7 +2956,7 @@ function Brew.ShowRowBrewTooltip(anchorWindow, row, anchor, liveRefresh)
     end
 end
 
-function Brew.MaybeRefreshBrewTooltip(force)
+function Brew._BrewTooltipMaybeRefresh(force)
     local tip = Brew._liveBrewTip
     if not tip or tip.anchor == nil or tip.anchor == "" then
         return
@@ -3000,7 +2985,7 @@ function Brew.MaybeRefreshBrewTooltip(force)
     end
 end
 
-function Brew.TickBrewLiveTooltip(timeElapsed)
+function Brew._BrewTooltipTickLive(timeElapsed)
     local tip = Brew._liveBrewTip
     if not tip or (tip.kind ~= "brew" and tip.kind ~= "row-brew") then
         return
@@ -3011,6 +2996,39 @@ function Brew.TickBrewLiveTooltip(timeElapsed)
         return
     end
     Brew.MaybeRefreshBrewTooltip(false)
+end
+
+-- One-release compatibility forwards; tooltip rendering is owned by BrewTooltip.
+function Brew.RegisterBrewLiveTooltip(anchorWindow, anchorPoint)
+    return StockPiler2.BrewTooltip.RegisterLive(anchorWindow, anchorPoint)
+end
+
+function Brew.RegisterRowBrewLiveTooltip(anchorWindow, anchorPoint, row)
+    return StockPiler2.BrewTooltip.RegisterRowLive(anchorWindow, anchorPoint, row)
+end
+
+function Brew.ClearBrewLiveTooltip()
+    return StockPiler2.BrewTooltip.ClearLive()
+end
+
+function Brew.BrewTooltipFingerprint(row)
+    return StockPiler2.BrewTooltip.Fingerprint(row)
+end
+
+function Brew.ShowBrewTooltip(anchorWindow, anchor, liveRefresh)
+    return StockPiler2.BrewTooltip.Show(anchorWindow, anchor, liveRefresh)
+end
+
+function Brew.ShowRowBrewTooltip(anchorWindow, row, anchor, liveRefresh)
+    return StockPiler2.BrewTooltip.ShowRow(anchorWindow, row, anchor, liveRefresh)
+end
+
+function Brew.MaybeRefreshBrewTooltip(force)
+    return StockPiler2.BrewTooltip.MaybeRefresh(force)
+end
+
+function Brew.TickBrewLiveTooltip(timeElapsed)
+    return StockPiler2.BrewTooltip.TickLive(timeElapsed)
 end
 
 ----------------------------------------------------------------

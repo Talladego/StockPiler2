@@ -374,9 +374,13 @@ function StockPiler2.Audit.RunMem(emitLog)
     else
         Emit(emitLog, string.format(
             "  recipeSpec specHaveCache=%d demandCache=%d autoGrowSeedLines=%d",
-            TableSize(RS._specHaveCache),
-            TableSize(RS._demandCache),
-            type(RS._autoGrowSeedLines) == "table" and #RS._autoGrowSeedLines or 0
+            TableSize(StockPiler2.Planner and StockPiler2.Planner.SpecHaveCache
+                and StockPiler2.Planner.SpecHaveCache._specHaveCache),
+            TableSize(StockPiler2.Planner and StockPiler2.Planner.SpecHaveCache
+                and StockPiler2.Planner.SpecHaveCache._demandCache),
+            type(StockPiler2.Planner and StockPiler2.Planner.SpecHaveCache
+                and StockPiler2.Planner.SpecHaveCache._autoGrowSeedLines) == "table"
+                and #StockPiler2.Planner.SpecHaveCache._autoGrowSeedLines or 0
         ))
     end
 

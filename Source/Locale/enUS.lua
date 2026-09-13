@@ -288,6 +288,7 @@ StockPiler2.Locale.Packs[LANG] = {
     ["tip.watch.sb.reason.resin"] = L"resin",
     ["tip.watch.sb.reason.need_buffer"] = L"need+buffer",
     ["tip.watch.sb.reason.need"] = L"need",
+    ["tip.status.plan_pending"] = L"Plan pending.",
     ["tip.watch.have_target"] = L"Have {have} / Target {target}",
     ["tip.watch.have_target_status"] = L"Have {have} / Target {target}  |  {status}",
     ["tip.watch.need_crafts"] = L"Need {crafts} crafts for {deficit} more of this potion.",

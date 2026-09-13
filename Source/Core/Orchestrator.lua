@@ -6,18 +6,16 @@ StockPiler2.Orchestrator = StockPiler2.Orchestrator or {}
 local Orch = StockPiler2.Orchestrator
 
 Orch.Phase = "idle"
-Orch._harvestActive = false
 Orch._brewPhase = nil
 Orch._lastOpId = 0
+Orch._initialized = false
 
 function Orch.GetPhase()
     return tostring(Orch.Phase or "idle")
 end
 
+--- Harvest lifecycle lives in Grow op-lock / harvest storm (Scheduler), not Orch phase.
 function Orch.IsHarvestActive()
-    if Orch._harvestActive == true then
-        return true
-    end
     if StockPiler2.Grow and StockPiler2.Grow.IsHarvestOpActive then
         return StockPiler2.Grow.IsHarvestOpActive() == true
     end
@@ -131,12 +129,10 @@ function Orch.DispatchCommand(kind, payload)
     payload = type(payload) == "table" and payload or {}
     local opId = Orch.NewOpId()
     if kind == "harvest" then
-        Orch._harvestActive = true
         SetPhase("harvesting", "user-macro")
         if StockPiler2.GrowExecutor and StockPiler2.GrowExecutor.Harvest then
             StockPiler2.GrowExecutor.Harvest(opId)
         end
-        Orch._harvestActive = false
         if Orch.Phase == "harvesting" then
             SetPhase("idle", "harvest-done")
         end
@@ -347,8 +343,8 @@ function Orch.Tick()
                 StockPiler2.Grow.SetFillBlocked(true, 5)
             end
         end
-    elseif needAdditives and StockPiler2.Grow and StockPiler2.Grow.TryApplyNextAdditive then
-        if StockPiler2.Grow.TryApplyNextAdditive(opId) == true then
+    elseif needAdditives and StockPiler2.GrowExecutor and StockPiler2.GrowExecutor.TryAdditive then
+        if StockPiler2.GrowExecutor.TryAdditive(opId) == true then
             SetPhase("planting", "additive")
             if StockPiler2.Scheduler and StockPiler2.Scheduler.WakeAutoGrow then
                 StockPiler2.Scheduler.WakeAutoGrow()
@@ -439,8 +435,8 @@ function Orch.Tick()
         end
     end
     -- After refine path: still try additives if plots are growing without them.
-    if needAdditives and StockPiler2.Grow and StockPiler2.Grow.TryApplyNextAdditive then
-        if StockPiler2.Grow.TryApplyNextAdditive(opId) == true then
+    if needAdditives and StockPiler2.GrowExecutor and StockPiler2.GrowExecutor.TryAdditive then
+        if StockPiler2.GrowExecutor.TryAdditive(opId) == true then
             SetPhase("planting", "additive")
             if StockPiler2.Scheduler and StockPiler2.Scheduler.WakeAutoGrow then
                 StockPiler2.Scheduler.WakeAutoGrow()
@@ -470,7 +466,7 @@ function Orch.DumpState(emit)
     emit = type(emit) == "function" and emit or function(msg) StockPiler2.Debug.Print(msg) end
     emit("=== StockPiler2 state ===")
     emit("phase=" .. Orch.GetPhase() .. " lastOpId=" .. tostring(Orch._lastOpId or 0))
-    emit("harvestActive=" .. tostring(Orch._harvestActive == true))
+    emit("harvestActive=" .. tostring(Orch.IsHarvestActive() == true))
     emit("brewPhase=" .. tostring(Orch._brewPhase or "none"))
     if StockPiler2.Inventory and StockPiler2.Inventory.GetSnapshotMeta then
         local m = StockPiler2.Inventory.GetSnapshotMeta()
@@ -489,15 +485,23 @@ function Orch.DumpState(emit)
 end
 
 function Orch.Initialize()
+    if Orch._initialized == true then
+        return
+    end
     local E = StockPiler2.Events
     local B = StockPiler2.EventBus
     if not B or not E then
         return
     end
+    Orch._initialized = true
     B.Subscribe(E.CMD_HARVEST, function()
         Orch.DispatchCommand("harvest", {})
     end)
     B.Subscribe(E.CMD_BREW_PERFORM, function()
         Orch.DispatchCommand("brew.perform", {})
     end)
+end
+
+function Orch.Shutdown()
+    Orch._initialized = false
 end

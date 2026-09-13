@@ -57,83 +57,8 @@ Grow.HARVEST_FORCE_DEBOUNCE_SEC = 1.5
 Grow.POST_HARVEST_PLANT_DELAY_SEC = 0.75
 Grow.HARVEST_OP_LOCK_SEC = 1.0
 
-local HARVEST_WIN = "StockPiler2WindowHarvest"
-local HARVEST_ACTION_WIN = "StockPiler2WindowHarvestAction"
-local CULTIVATION_HARVEST_WIN = "CultivationWindowHarvest"
-
-local function RestoreHarvestChrome(windowName)
-    if windowName == nil or windowName == "" or not DoesWindowExist(windowName) then
-        return
-    end
-    if ButtonSetText then
-        ButtonSetText(windowName, T("ui.harvest"))
-    end
-    -- Mid-click rebinds can leave the pressed/highlight state stuck after gameaction thrash.
-    if ButtonSetPressedFlag then
-        ButtonSetPressedFlag(windowName, false)
-    end
-end
-
---- Footer Harvest: bind when ready, clear when not (transition only).
---- Keep HandleInput on — toggling it off blocks OnMouseOver / tooltips.
---- Skip redundant WindowSetGameActionData (strips DefaultResizeable chrome).
-local function ClearHarvestBindOnly()
-    if Grow._harvestActionBound ~= true then
-        return false
-    end
-    if WindowSetGameActionData == nil then
-        Grow._harvestActionBound = false
-        return false
-    end
-    local none = 0
-    if GameData and GameData.PlayerActions and GameData.PlayerActions.NONE ~= nil then
-        none = GameData.PlayerActions.NONE
-    end
-    local function clearWin(windowName)
-        if not DoesWindowExist(windowName) then
-            return false
-        end
-        local ok
-        if StockPiler2.TryCall then
-            ok = StockPiler2.TryCall("WindowSetGameActionData.clear", WindowSetGameActionData, windowName, none, 0, L"")
-        else
-            ok = pcall(WindowSetGameActionData, windowName, none, 0, L"")
-        end
-        RestoreHarvestChrome(windowName)
-        return ok == true
-    end
-    local cleared = clearWin(HARVEST_WIN)
-    clearWin(HARVEST_ACTION_WIN)
-    Grow._harvestActionBound = false
-    return cleared
-end
-
-local function SetHarvestClickGate(enabled)
-    if not DoesWindowExist(HARVEST_WIN) then
-        return
-    end
-    enabled = enabled == true
-    -- Recover from older builds that left HandleInput off (tooltip dead).
-    if WindowSetHandleInput then
-        WindowSetHandleInput(HARVEST_WIN, true)
-    end
-    if Grow._footerHarvestClickable == enabled then
-        return
-    end
-    if ButtonSetDisabledFlag then
-        ButtonSetDisabledFlag(HARVEST_WIN, not enabled)
-    end
-    if enabled then
-        Grow.EnsureHarvestActionBound()
-    else
-        -- Disabled gameactionbutton still fires if bound — clear so no false craft.
-        ClearHarvestBindOnly()
-    end
-    Grow._footerHarvestClickable = enabled
-end
-
 function Grow.SetFooterHarvestClickable(enabled)
-    SetHarvestClickGate(enabled)
+    return StockPiler2.HarvestChrome.SetFooterHarvestClickable(enabled)
 end
 
 -- Prefer underfilled recipe roles when craftsShort ties (lower = higher priority).
@@ -1762,120 +1687,16 @@ function Grow.IsHarvestOpActive()
     return false
 end
 
-local function BindCultivationHarvestAction(windowName)
-    if WindowSetGameActionData == nil or windowName == nil or windowName == "" then
-        return false
-    end
-    if not DoesWindowExist(windowName) then
-        return false
-    end
-    local cult = GameData and GameData.TradeSkills and GameData.TradeSkills.CULTIVATION or 3
-    local action = GameData and GameData.PlayerActions and GameData.PlayerActions.PERFORM_CRAFTING or 8
-    local ok, err
-    if StockPiler2.TryCall then
-        ok, err = StockPiler2.TryCall("WindowSetGameActionData", WindowSetGameActionData, windowName, action, cult, L"")
-    else
-        ok, err = pcall(WindowSetGameActionData, windowName, action, cult, L"")
-    end
-    if ok ~= true then
-        LogGrow("BindCultivationHarvestAction failed win=" .. tostring(windowName) .. " err=" .. tostring(err))
-        return false
-    end
-    RestoreHarvestChrome(windowName)
-    return true
-end
-
 function Grow.EnsureHarvestActionBound()
-    -- Skip rebind when already set — WindowSetGameActionData on DefaultResizeable
-    -- replaces ResizeImages chrome (rapid harvest footer clicks).
-    if Grow._harvestActionBound == true and DoesWindowExist(HARVEST_WIN) then
-        return true
-    end
-    -- Visible footer Harvest owns native gameactionbutton click (primary path).
-    if BindCultivationHarvestAction(HARVEST_WIN) then
-        Grow._harvestActionBound = true
-        return true
-    end
-    if BindCultivationHarvestAction(HARVEST_ACTION_WIN) then
-        Grow._harvestActionBound = true
-        return true
-    end
-    if BindCultivationHarvestAction(CULTIVATION_HARVEST_WIN) then
-        Grow._harvestActionBound = true
-        return true
-    end
-    Grow._harvestActionBound = false
-    return false
+    return StockPiler2.HarvestChrome.EnsureHarvestActionBound()
 end
 
 function Grow.ClearHarvestActionBound()
-    Grow._footerHarvestClickable = nil
-    local cleared = ClearHarvestBindOnly()
-    if DoesWindowExist(HARVEST_WIN) and WindowSetHandleInput then
-        WindowSetHandleInput(HARVEST_WIN, true)
-    end
-    return cleared
+    return StockPiler2.HarvestChrome.ClearHarvestActionBound()
 end
 
---- Best-effort for orch/macros. Manual footer Harvest uses native gameactionbutton click.
---- Prefers placed StockPiler2 Harvest macro Action windows; then footer / cult windows.
---- WindowGameAction often pcall-succeeds without harvesting.
 function Grow.FireHarvestAction()
-    if StockPiler2.Macro and StockPiler2.Macro.FireHarvestGameAction then
-        if StockPiler2.Macro.FireHarvestGameAction() == true then
-            LogGrow("FireHarvestAction ok via macro")
-            return true
-        end
-    end
-    Grow.EnsureHarvestActionBound()
-    if type(WindowGameAction) ~= "function" then
-        LogGrow("FireHarvestAction no WindowGameAction")
-        return false
-    end
-    local function tryWin(windowName, rebind)
-        if windowName == nil or windowName == "" or not DoesWindowExist(windowName) then
-            return false
-        end
-        if rebind == true then
-            BindCultivationHarvestAction(windowName)
-        end
-        local child = windowName .. "Action"
-        if DoesWindowExist(child) then
-            local okChild, errChild
-            if StockPiler2.TryCall then
-                okChild, errChild = StockPiler2.TryCall("WindowGameAction", WindowGameAction, child)
-            else
-                okChild, errChild = pcall(WindowGameAction, child)
-            end
-            if okChild == true then
-                LogGrow("FireHarvestAction ok win=" .. tostring(child))
-                return true
-            end
-            LogGrow("FireHarvestAction fail win=" .. tostring(child) .. " err=" .. tostring(errChild))
-        end
-        local ok, err
-        if StockPiler2.TryCall then
-            ok, err = StockPiler2.TryCall("WindowGameAction", WindowGameAction, windowName)
-        else
-            ok, err = pcall(WindowGameAction, windowName)
-        end
-        if ok == true then
-            LogGrow("FireHarvestAction ok win=" .. tostring(windowName))
-            return true
-        end
-        LogGrow("FireHarvestAction fail win=" .. tostring(windowName) .. " err=" .. tostring(err))
-        return false
-    end
-    if tryWin(HARVEST_WIN, true) then
-        return true
-    end
-    if tryWin(HARVEST_ACTION_WIN, true) then
-        return true
-    end
-    if tryWin(CULTIVATION_HARVEST_WIN, true) then
-        return true
-    end
-    return false
+    return StockPiler2.HarvestChrome.FireHarvestAction()
 end
 
 function Grow.SelectHarvestPlot(manual)
@@ -3154,7 +2975,7 @@ local function applyTooltipTextRow(row, text, color)
     end
 end
 
-function Grow.EnsureHarvestTooltipRows()
+function Grow._HarvestTooltipEnsureRows()
     if Grow._harvestTooltipRowsReady == true then
         return true
     end
@@ -3196,7 +3017,7 @@ function Grow.EnsureHarvestTooltipRows()
     return true
 end
 
-function Grow.GetPlotTooltipEntries()
+function Grow._HarvestTooltipGetPlotEntries()
     local entries = {}
     local CA = StockPiler2.CultivatorAdapter
     local n = CA and CA.NumPlots and CA.NumPlots() or 4
@@ -3282,7 +3103,7 @@ local function ApplyPlotTooltipRow(row, entry)
     return row
 end
 
-function Grow.ApplyPlotTooltipRows(startRow)
+function Grow._HarvestTooltipApplyPlotRows(startRow)
     if not Tooltips or type(Tooltips.SetTooltipText) ~= "function" then
         return tonumber(startRow) or 1
     end
@@ -3304,7 +3125,7 @@ end
 
 --- Multi-row harvest tooltip for the Watch footer Harvest button.
 --- liveRefresh=true skips re-register (used while mouse stays over the button).
-function Grow.ShowHarvestTooltip(anchorWindow, anchor, liveRefresh)
+function Grow._HarvestTooltipShow(anchorWindow, anchor, liveRefresh)
     if not Tooltips or type(Tooltips.CreateTextOnlyTooltip) ~= "function" then
         return
     end
@@ -3431,7 +3252,7 @@ local function DecayTipTimer(plot, field, onField, elapsed)
     return math.floor(after) < math.floor(before)
 end
 
-function Grow.SyncHarvestTipPlotsFromEngine()
+function Grow._HarvestTooltipSyncPlotsFromEngine()
     local tip = Grow._liveHarvestTip
     if not tip then
         tip = { plots = {} }
@@ -3447,7 +3268,7 @@ function Grow.SyncHarvestTipPlotsFromEngine()
     end
 end
 
-function Grow.RegisterHarvestLiveTooltip(anchorWindow, anchorPoint)
+function Grow._HarvestTooltipRegisterLive(anchorWindow, anchorPoint)
     if anchorWindow == nil or anchorWindow == "" then
         Grow.ClearHarvestLiveTooltip()
         return
@@ -3461,7 +3282,7 @@ function Grow.RegisterHarvestLiveTooltip(anchorWindow, anchorPoint)
     Grow.SyncHarvestTipPlotsFromEngine()
 end
 
-function Grow.ClearHarvestLiveTooltip()
+function Grow._HarvestTooltipClearLive()
     local tip = Grow._liveHarvestTip
     if tip then
         tip.kind = nil
@@ -3472,7 +3293,7 @@ function Grow.ClearHarvestLiveTooltip()
     end
 end
 
-function Grow.HarvestTooltipFingerprint()
+function Grow._HarvestTooltipFingerprint()
     local parts = {}
     local CA = StockPiler2.CultivatorAdapter
     local n = CA and CA.NumPlots and CA.NumPlots() or 4
@@ -3526,7 +3347,7 @@ function Grow.HarvestTooltipFingerprint()
     return table.concat(parts, "|")
 end
 
-function Grow.MaybeRefreshHarvestTooltip(force)
+function Grow._HarvestTooltipMaybeRefresh(force)
     local tip = Grow._liveHarvestTip
     if not tip or tip.kind ~= "harvest" or tip.anchor == nil or tip.anchor == "" then
         return
@@ -3545,7 +3366,7 @@ function Grow.MaybeRefreshHarvestTooltip(force)
 end
 
 --- Local countdown while harvest tip is open (engine timers only refresh on events).
-function Grow.TickHarvestLiveTooltip(timeElapsed)
+function Grow._HarvestTooltipTickLive(timeElapsed)
     local tip = Grow._liveHarvestTip
     if not tip or tip.kind ~= "harvest" or type(tip.plots) ~= "table" then
         return
@@ -3573,4 +3394,45 @@ function Grow.TickHarvestLiveTooltip(timeElapsed)
     else
         Grow.MaybeRefreshHarvestTooltip(false)
     end
+end
+
+-- One-release compatibility forwards; tooltip rendering is owned by HarvestTooltip.
+function Grow.EnsureHarvestTooltipRows()
+    return StockPiler2.HarvestTooltip.EnsureRows()
+end
+
+function Grow.GetPlotTooltipEntries()
+    return StockPiler2.HarvestTooltip.GetPlotEntries()
+end
+
+function Grow.ApplyPlotTooltipRows(startRow)
+    return StockPiler2.HarvestTooltip.ApplyPlotRows(startRow)
+end
+
+function Grow.ShowHarvestTooltip(anchorWindow, anchor, liveRefresh)
+    return StockPiler2.HarvestTooltip.Show(anchorWindow, anchor, liveRefresh)
+end
+
+function Grow.RegisterHarvestLiveTooltip(anchorWindow, anchorPoint)
+    return StockPiler2.HarvestTooltip.RegisterLive(anchorWindow, anchorPoint)
+end
+
+function Grow.SyncHarvestTipPlotsFromEngine()
+    return StockPiler2.HarvestTooltip.SyncPlotsFromEngine()
+end
+
+function Grow.ClearHarvestLiveTooltip()
+    return StockPiler2.HarvestTooltip.ClearLive()
+end
+
+function Grow.HarvestTooltipFingerprint()
+    return StockPiler2.HarvestTooltip.Fingerprint()
+end
+
+function Grow.MaybeRefreshHarvestTooltip(force)
+    return StockPiler2.HarvestTooltip.MaybeRefresh(force)
+end
+
+function Grow.TickHarvestLiveTooltip(timeElapsed)
+    return StockPiler2.HarvestTooltip.TickLive(timeElapsed)
 end

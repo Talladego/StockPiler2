@@ -2,7 +2,7 @@
 
 Greenfield rewrite of StockPiler using an **Orchestrator + Stores + Planner + Executors** architecture. Runs as a **separate addon** alongside v1 — does not modify the original StockPiler folder.
 
-**Version:** 0.4.144
+**Version:** 0.4.151
 
 Repository: [Talladego/StockPiler2](https://github.com/Talladego/StockPiler2)
 
@@ -155,6 +155,20 @@ On each user-facing ship, bump together:
 | **Major** (`N+1.0.0`) | Breaking saved-var / architecture break (rare in 0.x) |
 
 ## Changelog
+
+**0.4.151:** Fix — SeedMap split: `SeedMatchesGrowSpec` lives on shared `Private` (Resolve was calling a Core-only local every UPDATE_PROCESSED).
+
+**0.4.150:** Architecture — SeedMap facade split (Core / Observe / Resolve / Maintenance); public `SeedMap.*` API unchanged.
+
+**0.4.149:** Architecture — plant/brew engine writes routed only through GrowExecutor / BrewExecutor (Orch + domain call executors).
+
+**0.4.148:** Architecture — Harvest/Brew footer chrome + tooltips moved to `View/HarvestChrome`, `View/HarvestTooltip`, `View/BrewChrome`, `View/BrewTooltip`.
+
+**0.4.147:** Perf — Watch Status + Seed buffer tooltips are plan-snapshot only (no SpecDemand / CollectIntents on hover); live-patch Have counts on bag snap.
+
+**0.4.146:** Architecture — `BuildBalancedSpecDemand` + WarmHave caches moved to `Planner/SpecDemand.lua` + `Planner/SpecHaveCache.lua`; RecipeSpec keeps thin one-release aliases.
+
+**0.4.145:** Architecture nits (GrokBot Phase 0) — Orch.Initialize once-only; additive ticks via GrowExecutor.TryAdditive; drop craftbag slash alias; harvest active = Grow op-lock only; GrowExecutor header cleanup.
 
 **0.4.144:** Perf — restore/bump LibPerf threshold to ≥250ms (client floor ~150ms); Footer no longer `Perf.Begin` on SyncActionReadiness no-ops (stops Footer xN000 trail glue). LibPerf 1.2.3 — low-threshold warn at 250ms.
 

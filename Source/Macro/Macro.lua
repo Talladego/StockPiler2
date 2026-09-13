@@ -999,14 +999,14 @@ local function installMacroTooltipHook()
             end
         end
         if isHarvest then
-            if StockPiler2.Grow and StockPiler2.Grow.ShowHarvestTooltip then
-                StockPiler2.Grow.ShowHarvestTooltip(mouseoverWindow, anchor or Tooltips.ANCHOR_WINDOW_TOP)
+            if StockPiler2.HarvestTooltip and StockPiler2.HarvestTooltip.Show then
+                StockPiler2.HarvestTooltip.Show(mouseoverWindow, anchor or Tooltips.ANCHOR_WINDOW_TOP)
             end
             return
         end
         if isBrew then
-            if StockPiler2.Brew and StockPiler2.Brew.ShowBrewTooltip then
-                StockPiler2.Brew.ShowBrewTooltip(mouseoverWindow, anchor or Tooltips.ANCHOR_WINDOW_TOP)
+            if StockPiler2.BrewTooltip and StockPiler2.BrewTooltip.Show then
+                StockPiler2.BrewTooltip.Show(mouseoverWindow, anchor or Tooltips.ANCHOR_WINDOW_TOP)
             end
             return
         end

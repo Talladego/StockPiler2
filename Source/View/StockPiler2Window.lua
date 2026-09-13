@@ -109,13 +109,13 @@ function StockPiler2Window.SyncActionReadiness(opts)
         if DoesWindowExist(HARVEST_WIN) then
             WindowSetShowing(HARVEST_WIN, onWatch)
             if onWatch then
-                if StockPiler2.Grow and StockPiler2.Grow.SetFooterHarvestClickable then
-                    StockPiler2.Grow.SetFooterHarvestClickable(canHarvest)
+                if StockPiler2.HarvestChrome and StockPiler2.HarvestChrome.SetFooterHarvestClickable then
+                    StockPiler2.HarvestChrome.SetFooterHarvestClickable(canHarvest)
                 else
                     ButtonSetDisabledFlag(HARVEST_WIN, not canHarvest)
                 end
-            elseif StockPiler2.Grow and StockPiler2.Grow.ClearHarvestActionBound then
-                StockPiler2.Grow.ClearHarvestActionBound()
+            elseif StockPiler2.HarvestChrome and StockPiler2.HarvestChrome.ClearHarvestActionBound then
+                StockPiler2.HarvestChrome.ClearHarvestActionBound()
             end
         end
         if DoesWindowExist(BREW_WIN) then
@@ -242,8 +242,8 @@ function StockPiler2Window.Initialize()
     end
     if DoesWindowExist(HARVEST_WIN) then
         ButtonSetText(HARVEST_WIN, T("ui.harvest"))
-        if StockPiler2.Grow and StockPiler2.Grow.EnsureHarvestActionBound then
-            StockPiler2.Grow.EnsureHarvestActionBound()
+        if StockPiler2.HarvestChrome and StockPiler2.HarvestChrome.EnsureHarvestActionBound then
+            StockPiler2.HarvestChrome.EnsureHarvestActionBound()
         end
     end
     if DoesWindowExist(BREW_WIN) then
@@ -445,8 +445,8 @@ function StockPiler2Window.OnHarvest()
 end
 
 function StockPiler2Window.OnMouseOverHarvest()
-    if StockPiler2.Grow and StockPiler2.Grow.ShowHarvestTooltip then
-        StockPiler2.Grow.ShowHarvestTooltip(
+    if StockPiler2.HarvestTooltip and StockPiler2.HarvestTooltip.Show then
+        StockPiler2.HarvestTooltip.Show(
             SystemData.ActiveWindow.name,
             Tooltips.ANCHOR_WINDOW_TOP
         )
@@ -491,8 +491,8 @@ function StockPiler2Window.OnBrewRightClick()
 end
 
 function StockPiler2Window.OnMouseOverBrew()
-    if StockPiler2.Brew and StockPiler2.Brew.ShowBrewTooltip then
-        StockPiler2.Brew.ShowBrewTooltip(
+    if StockPiler2.BrewTooltip and StockPiler2.BrewTooltip.Show then
+        StockPiler2.BrewTooltip.Show(
             SystemData.ActiveWindow.name,
             Tooltips.ANCHOR_WINDOW_TOP
         )

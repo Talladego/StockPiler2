@@ -1,12 +1,9 @@
 ----------------------------------------------------------------
--- StockPiler2 Executors — stubs (one engine action per tick)
+-- StockPiler2 Executors/GrowExecutor — plant / additive / harvest prepare
+-- One engine action per Tick. Other executors live in their own files.
 ----------------------------------------------------------------
 
 StockPiler2.GrowExecutor = StockPiler2.GrowExecutor or {}
-StockPiler2.RefineExecutor = StockPiler2.RefineExecutor or {}
--- BuyExecutor lives in Source/Executors/BuyExecutor.lua
-StockPiler2.BrewExecutor = StockPiler2.BrewExecutor or {}
-StockPiler2.BuyExecutor = StockPiler2.BuyExecutor or {}
 
 function StockPiler2.GrowExecutor.Tick(opId)
     if StockPiler2.Grow and StockPiler2.Grow.TryPlantNextEmptyPlot then
@@ -14,6 +11,11 @@ function StockPiler2.GrowExecutor.Tick(opId)
             return true
         end
     end
+    return StockPiler2.GrowExecutor.TryAdditive(opId) == true
+end
+
+--- Additive-only path (Orch additive-only ticks; Tick also tries plant first).
+function StockPiler2.GrowExecutor.TryAdditive(opId)
     if StockPiler2.Grow and StockPiler2.Grow.TryApplyNextAdditive then
         if StockPiler2.Grow.TryApplyNextAdditive(opId) == true then
             return true

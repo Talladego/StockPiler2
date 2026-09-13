@@ -2,7 +2,7 @@
 
 <ModuleFile xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
 
-    <UiMod name="StockPiler2" version="0.4.144" date="2026-09-13">
+    <UiMod name="StockPiler2" version="0.4.151" date="2026-09-13">
 
         <Author name="Talladego" email="" />
 
@@ -86,11 +86,23 @@
 
             <File name="Source/Knowledge/RecipeSpec.lua" />
 
+            <File name="Source/Planner/SpecHaveCache.lua" />
+
+            <File name="Source/Planner/SpecDemand.lua" />
+
             <File name="Source/Stores/WatchStore.lua" />
 
             <File name="Source/Stores/InventoryStore.lua" />
 
             <File name="Source/Knowledge/BrewLearn.lua" />
+
+            <File name="Source/Knowledge/SeedMapCore.lua" />
+
+            <File name="Source/Knowledge/SeedMapObserve.lua" />
+
+            <File name="Source/Knowledge/SeedMapResolve.lua" />
+
+            <File name="Source/Knowledge/SeedMapMaintenance.lua" />
 
             <File name="Source/Knowledge/SeedMap.lua" />
 
@@ -125,6 +137,14 @@
             <File name="Source/Executors/BuyExecutor.lua" />
 
             <File name="Source/Macro/Macro.lua" />
+
+            <File name="Source/View/HarvestChrome.lua" />
+
+            <File name="Source/View/HarvestTooltip.lua" />
+
+            <File name="Source/View/BrewChrome.lua" />
+
+            <File name="Source/View/BrewTooltip.lua" />
 
             <File name="Source/View/StockPiler2Catalog.lua" />
 

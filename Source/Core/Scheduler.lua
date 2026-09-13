@@ -959,8 +959,8 @@ function Sch.OnUpdate(timeElapsed)
     if StockPiler2.Grow and StockPiler2.Grow.ExpireStalePending then
         StockPiler2.Grow.ExpireStalePending()
     end
-    if StockPiler2.Grow and StockPiler2.Grow.TickHarvestLiveTooltip then
-        StockPiler2.Grow.TickHarvestLiveTooltip(timeElapsed)
+    if StockPiler2.HarvestTooltip and StockPiler2.HarvestTooltip.TickLive then
+        StockPiler2.HarvestTooltip.TickLive(timeElapsed)
     end
     if StockPiler2.Brew and StockPiler2.Brew.OnUpdate then
         StockPiler2.Brew.OnUpdate(timeElapsed)
@@ -971,8 +971,8 @@ function Sch.OnUpdate(timeElapsed)
     then
         StockPiler2Window.FlushPendingListRepopulate()
     end
-    if StockPiler2.Brew and StockPiler2.Brew.TickBrewLiveTooltip then
-        StockPiler2.Brew.TickBrewLiveTooltip(timeElapsed)
+    if StockPiler2.BrewTooltip and StockPiler2.BrewTooltip.TickLive then
+        StockPiler2.BrewTooltip.TickLive(timeElapsed)
     end
     DecaySuppressInventorySideEffects()
     -- Expire harvest storm and arm BrewUi flush when the window ends.
