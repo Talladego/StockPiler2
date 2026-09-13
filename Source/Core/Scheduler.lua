@@ -1055,140 +1055,156 @@ function Sch.Initialize()
     Sch._initialized = true
     local E = StockPiler2.Events
     local B = StockPiler2.EventBus
-    if B and E then
-        B.Subscribe(E.INVENTORY_DIRTY, function()
-            -- coalesce already scheduled by InventoryStore.MarkDirty
-        end)
-        B.Subscribe(E.INVENTORY_SNAPSHOT, function()
-            if StockPiler2.Buy and StockPiler2.Buy.OnInventorySnapshot then
-                StockPiler2.Buy.OnInventorySnapshot()
-            elseif StockPiler2.Buy and StockPiler2.Buy.InvalidateJobsCache then
-                StockPiler2.Buy.InvalidateJobsCache()
-            end
-            -- 0.4.132: re-arm prewarm when snapGen moves while a plan rebuild is pending.
-            if Sch.MaybeRearmPrewarmOnSnapDrift then
-                Sch.MaybeRearmPrewarmOnSnapDrift("snap-drift")
-            end
-            -- Snap-only (SP1): update plant-job dirtiness / UI — do NOT EnqueuePlanRebuild.
-            -- Plan rebuild is armed by bag flush needQueue, harvest wake, garden dirty, session.
-            -- During plant quiet / harvest storm, Wake already armed fast ticks; skip
-            -- ShouldWakeAutoGrowUrgent (HasPendingBufferRefine → BufferFlags/seed lines)
-            -- AND MarkPlantJobDirty (every loot snap was forcing GetPlantJob →
-            -- BuildBalancedSpecDemand on first post-quiet Tick). Storm end dirties once
-            -- in IsHarvestStormActive. Do not re-enable dirty/urgent-wake mid-storm.
-            -- 0.4.132: also skip BufferFlags probes during brew session (craft loot snaps).
-            local plantQuiet = StockPiler2.Grow
-                and StockPiler2.Grow.IsPlantQuiet
-                and StockPiler2.Grow.IsPlantQuiet() == true
-            local storm = Sch.IsHarvestStormActive and Sch.IsHarvestStormActive() == true
-            local brewSession = StockPiler2.Orchestrator
-                and StockPiler2.Orchestrator.IsBrewSessionActive
-                and StockPiler2.Orchestrator.IsBrewSessionActive() == true
-            if not plantQuiet and not storm and not brewSession then
-                -- 0.4.122: vault/bank snaps used to MarkPlantJobDirty every move → BufferFlags
-                -- with no plant work. Dirty only when AutoGrow actually has plant/additive/buffer.
-                local Watch = StockPiler2.Watch
-                local autoGrowOn = Watch and Watch.IsAutoGrowEnabled
-                    and Watch.IsAutoGrowEnabled() == true
-                local Grow = StockPiler2.Grow
-                local hasPlantWork = false
-                if autoGrowOn and Grow then
-                    if Grow.HasEmptyPlot and Grow.HasEmptyPlot() == true then
-                        hasPlantWork = true
-                    elseif Grow.NeedsCurrentStageAdditive
-                        and Grow.NeedsCurrentStageAdditive() == true
-                    then
-                        hasPlantWork = true
-                    elseif Grow.HasPendingBufferRefine
-                        and Grow.HasPendingBufferRefine() == true
-                    then
-                        hasPlantWork = true
-                    end
+    if not (B and E) then
+        return
+    end
+    Sch._busTokens = Sch._busTokens or {}
+    local tokens = Sch._busTokens
+    local function track(token)
+        if token then
+            tokens[#tokens + 1] = token
+        end
+    end
+    track(B.Subscribe(E.INVENTORY_DIRTY, function()
+        -- coalesce already scheduled by InventoryStore.MarkDirty
+    end))
+    track(B.Subscribe(E.INVENTORY_SNAPSHOT, function()
+        if StockPiler2.Buy and StockPiler2.Buy.OnInventorySnapshot then
+            StockPiler2.Buy.OnInventorySnapshot()
+        elseif StockPiler2.Buy and StockPiler2.Buy.InvalidateJobsCache then
+            StockPiler2.Buy.InvalidateJobsCache()
+        end
+        -- 0.4.132: re-arm prewarm when snapGen moves while a plan rebuild is pending.
+        if Sch.MaybeRearmPrewarmOnSnapDrift then
+            Sch.MaybeRearmPrewarmOnSnapDrift("snap-drift")
+        end
+        -- Snap-only (SP1): update plant-job dirtiness / UI — do NOT EnqueuePlanRebuild.
+        -- Plan rebuild is armed by bag flush needQueue, harvest wake, garden dirty, session.
+        -- During plant quiet / harvest storm, Wake already armed fast ticks; skip
+        -- ShouldWakeAutoGrowUrgent (HasPendingBufferRefine → BufferFlags/seed lines)
+        -- AND MarkPlantJobDirty (every loot snap was forcing GetPlantJob →
+        -- BuildBalancedSpecDemand on first post-quiet Tick). Storm end dirties once
+        -- in IsHarvestStormActive. Do not re-enable dirty/urgent-wake mid-storm.
+        -- 0.4.132: also skip BufferFlags probes during brew session (craft loot snaps).
+        local plantQuiet = StockPiler2.Grow
+            and StockPiler2.Grow.IsPlantQuiet
+            and StockPiler2.Grow.IsPlantQuiet() == true
+        local storm = Sch.IsHarvestStormActive and Sch.IsHarvestStormActive() == true
+        local brewSession = StockPiler2.Orchestrator
+            and StockPiler2.Orchestrator.IsBrewSessionActive
+            and StockPiler2.Orchestrator.IsBrewSessionActive() == true
+        if not plantQuiet and not storm and not brewSession then
+            -- 0.4.122: vault/bank snaps used to MarkPlantJobDirty every move → BufferFlags
+            -- with no plant work. Dirty only when AutoGrow actually has plant/additive/buffer.
+            local Watch = StockPiler2.Watch
+            local autoGrowOn = Watch and Watch.IsAutoGrowEnabled
+                and Watch.IsAutoGrowEnabled() == true
+            local Grow = StockPiler2.Grow
+            local hasPlantWork = false
+            if autoGrowOn and Grow then
+                if Grow.HasEmptyPlot and Grow.HasEmptyPlot() == true then
+                    hasPlantWork = true
+                elseif Grow.NeedsCurrentStageAdditive
+                    and Grow.NeedsCurrentStageAdditive() == true
+                then
+                    hasPlantWork = true
+                elseif Grow.HasPendingBufferRefine
+                    and Grow.HasPendingBufferRefine() == true
+                then
+                    hasPlantWork = true
                 end
-                if hasPlantWork and Grow.MarkPlantJobDirty then
-                    Grow.MarkPlantJobDirty()
-                end
-                if Sch.ShouldWakeAutoGrowUrgent and Sch.ShouldWakeAutoGrowUrgent() then
-                    Sch._autoGrowFast = true
-                end
             end
-            if Sch.ClearSessionCraftUiHold then
-                Sch.ClearSessionCraftUiHold()
+            if hasPlantWork and Grow.MarkPlantJobDirty then
+                Grow.MarkPlantJobDirty()
+            end
+            if Sch.ShouldWakeAutoGrowUrgent and Sch.ShouldWakeAutoGrowUrgent() then
+                Sch._autoGrowFast = true
+            end
+        end
+        if Sch.ClearSessionCraftUiHold then
+            Sch.ClearSessionCraftUiHold()
+        end
+        if StockPiler2.Ui and StockPiler2.Ui.MarkWatchUiDirty then
+            StockPiler2.Ui.MarkWatchUiDirty()
+        end
+    end))
+    track(B.Subscribe(E.GARDEN_DIRTY, function()
+        if Sch.ShouldWakeAutoGrow() then
+            -- Already coalesced plan pending: skip Wake churn + re-enqueue.
+            if Sch.IsPlanRebuildPending and Sch.IsPlanRebuildPending() == true then
+                Sch._autoGrowFast = true
+                return
+            end
+            Sch.WakeAutoGrow()
+            Sch.EnqueuePlanRebuild()
+        elseif StockPiler2.Ui and StockPiler2.Ui.MarkWatchUiDirty then
+            StockPiler2.Ui.MarkWatchUiDirty()
+        end
+    end))
+    track(B.Subscribe(E.SESSION_LOADED, function()
+        if Sch.BeginSessionCraftUiHold then
+            Sch.BeginSessionCraftUiHold()
+        end
+        Sch.EnqueueBagFlush(true)
+        if StockPiler2.PlanSnapshot and StockPiler2.PlanSnapshot.Invalidate then
+            StockPiler2.PlanSnapshot.Invalidate()
+        end
+        if Sch.EnqueuePlanRebuild then
+            Sch.EnqueuePlanRebuild()
+        end
+        if StockPiler2TabWatch and StockPiler2TabWatch.RefreshSkillGates then
+            StockPiler2TabWatch.RefreshSkillGates()
+        end
+        -- Window may stay open across reload (savesettings) without a second OnShow.
+        -- Skill gates alone leave Watch stock/craftable/status from the pre-bag paint.
+        if StockPiler2.Ui then
+            StockPiler2.Ui._watchUiLastKey = nil
+            StockPiler2.Ui._watchUiLastBrewKey = nil
+            StockPiler2.Ui._watchUiFlushedAt = 0
+            if StockPiler2.Ui.MarkWatchUiDirty then
+                StockPiler2.Ui.MarkWatchUiDirty()
+            end
+        end
+        if StockPiler2Window then
+            StockPiler2Window._tabListsPrimed = false
+        end
+        if DoesWindowExist("StockPiler2Window")
+            and WindowGetShowing("StockPiler2Window") == true
+        then
+            -- Session load: rebuild L0 from warm DataUtils; forceEngine only via ForceFullRefresh.
+            if StockPiler2.Inventory and StockPiler2.Inventory.Flush then
+                StockPiler2.Inventory.Flush({ force = true, forceEngine = false })
+            end
+            -- Skip sync GetOrBuild when a coalesced rebuild is already enqueued
+            -- (avoids login Flatten+Plan+WatchRows+Footer double work).
+            local planPending = Sch.IsPlanRebuildPending and Sch.IsPlanRebuildPending() == true
+            if not planPending and StockPiler2.Planner and StockPiler2.Planner.GetOrBuild then
+                StockPiler2.Planner.GetOrBuild()
+            end
+            if StockPiler2Window.RequestFooterRefresh then
+                StockPiler2Window.RequestFooterRefresh()
             end
             if StockPiler2.Ui and StockPiler2.Ui.MarkWatchUiDirty then
                 StockPiler2.Ui.MarkWatchUiDirty()
+            elseif StockPiler2Window.RefreshActiveTab then
+                StockPiler2Window.RefreshActiveTab()
             end
-        end)
-        B.Subscribe(E.GARDEN_DIRTY, function()
-            if Sch.ShouldWakeAutoGrow() then
-                -- Already coalesced plan pending: skip Wake churn + re-enqueue.
-                if Sch.IsPlanRebuildPending and Sch.IsPlanRebuildPending() == true then
-                    Sch._autoGrowFast = true
-                    return
-                end
-                Sch.WakeAutoGrow()
-                Sch.EnqueuePlanRebuild()
-            elseif StockPiler2.Ui and StockPiler2.Ui.MarkWatchUiDirty then
-                StockPiler2.Ui.MarkWatchUiDirty()
-            end
-        end)
-        B.Subscribe(E.SESSION_LOADED, function()
-            if Sch.BeginSessionCraftUiHold then
-                Sch.BeginSessionCraftUiHold()
-            end
-            Sch.EnqueueBagFlush(true)
-            if StockPiler2.PlanSnapshot and StockPiler2.PlanSnapshot.Invalidate then
-                StockPiler2.PlanSnapshot.Invalidate()
-            end
-            if Sch.EnqueuePlanRebuild then
-                Sch.EnqueuePlanRebuild()
-            end
-            if StockPiler2TabWatch and StockPiler2TabWatch.RefreshSkillGates then
-                StockPiler2TabWatch.RefreshSkillGates()
-            end
-            -- Window may stay open across reload (savesettings) without a second OnShow.
-            -- Skill gates alone leave Watch stock/craftable/status from the pre-bag paint.
-            if StockPiler2.Ui then
-                StockPiler2.Ui._watchUiLastKey = nil
-                StockPiler2.Ui._watchUiLastBrewKey = nil
-                StockPiler2.Ui._watchUiFlushedAt = 0
-                if StockPiler2.Ui.MarkWatchUiDirty then
-                    StockPiler2.Ui.MarkWatchUiDirty()
-                end
-            end
-            if StockPiler2Window then
-                StockPiler2Window._tabListsPrimed = false
-            end
-            if DoesWindowExist("StockPiler2Window")
-                and WindowGetShowing("StockPiler2Window") == true
-            then
-                -- Session load: rebuild L0 from warm DataUtils; forceEngine only via ForceFullRefresh.
-                if StockPiler2.Inventory and StockPiler2.Inventory.Flush then
-                    StockPiler2.Inventory.Flush({ force = true, forceEngine = false })
-                end
-                -- Skip sync GetOrBuild when a coalesced rebuild is already enqueued
-                -- (avoids login Flatten+Plan+WatchRows+Footer double work).
-                local planPending = Sch.IsPlanRebuildPending and Sch.IsPlanRebuildPending() == true
-                if not planPending and StockPiler2.Planner and StockPiler2.Planner.GetOrBuild then
-                    StockPiler2.Planner.GetOrBuild()
-                end
-                if StockPiler2Window.RequestFooterRefresh then
-                    StockPiler2Window.RequestFooterRefresh()
-                end
-                if StockPiler2.Ui and StockPiler2.Ui.MarkWatchUiDirty then
-                    StockPiler2.Ui.MarkWatchUiDirty()
-                elseif StockPiler2Window.RefreshActiveTab then
-                    StockPiler2Window.RefreshActiveTab()
-                end
-            elseif StockPiler2Window and StockPiler2Window.RequestFooterRefresh then
-                StockPiler2Window.RequestFooterRefresh()
-            elseif StockPiler2Window and StockPiler2Window.RefreshFooterButtons then
-                StockPiler2Window.RefreshFooterButtons()
-            end
-        end)
-    end
+        elseif StockPiler2Window and StockPiler2Window.RequestFooterRefresh then
+            StockPiler2Window.RequestFooterRefresh()
+        elseif StockPiler2Window and StockPiler2Window.RefreshFooterButtons then
+            StockPiler2Window.RefreshFooterButtons()
+        end
+    end))
 end
 
 function Sch.Shutdown()
+    local B = StockPiler2.EventBus
+    local tokens = Sch._busTokens
+    if B and B.Unsubscribe and type(tokens) == "table" then
+        for i = 1, #tokens do
+            B.Unsubscribe(tokens[i])
+        end
+    end
+    Sch._busTokens = nil
     Sch._initialized = false
 end

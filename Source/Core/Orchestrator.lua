@@ -494,14 +494,24 @@ function Orch.Initialize()
         return
     end
     Orch._initialized = true
-    B.Subscribe(E.CMD_HARVEST, function()
+    Orch._busTokens = Orch._busTokens or {}
+    local tokens = Orch._busTokens
+    tokens[#tokens + 1] = B.Subscribe(E.CMD_HARVEST, function()
         Orch.DispatchCommand("harvest", {})
     end)
-    B.Subscribe(E.CMD_BREW_PERFORM, function()
+    tokens[#tokens + 1] = B.Subscribe(E.CMD_BREW_PERFORM, function()
         Orch.DispatchCommand("brew.perform", {})
     end)
 end
 
 function Orch.Shutdown()
+    local B = StockPiler2.EventBus
+    local tokens = Orch._busTokens
+    if B and B.Unsubscribe and type(tokens) == "table" then
+        for i = 1, #tokens do
+            B.Unsubscribe(tokens[i])
+        end
+    end
+    Orch._busTokens = nil
     Orch._initialized = false
 end

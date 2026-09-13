@@ -6,6 +6,7 @@ StockPiler2.EventBus = StockPiler2.EventBus or {}
 
 local Bus = StockPiler2.EventBus
 local subs = {}
+local nextToken = 0
 
 StockPiler2.Events = StockPiler2.Events or {
     INVENTORY_DIRTY = "sp2.inventory.dirty",
@@ -23,6 +24,8 @@ StockPiler2.Events = StockPiler2.Events or {
     KNOWLEDGE_UPDATED = "sp2.knowledge.updated",
 }
 
+--- Subscribe to an event. Returns a token for Bus.Unsubscribe, or false on bad args.
+--- Same function pointer on the same event is deduped (returns the existing token).
 function Bus.Subscribe(eventName, fn)
     eventName = tostring(eventName or "")
     if eventName == "" or type(fn) ~= "function" then
@@ -33,8 +36,39 @@ function Bus.Subscribe(eventName, fn)
         list = {}
         subs[eventName] = list
     end
-    list[#list + 1] = fn
-    return true
+    for i = 1, #list do
+        local entry = list[i]
+        if type(entry) == "table" and entry.fn == fn then
+            return entry.token
+        end
+    end
+    nextToken = nextToken + 1
+    local token = nextToken
+    list[#list + 1] = { token = token, fn = fn }
+    return token
+end
+
+--- Remove one subscription by token. Safe if token is missing/already removed.
+function Bus.Unsubscribe(token)
+    token = tonumber(token)
+    if token == nil then
+        return false
+    end
+    for eventName, list in pairs(subs) do
+        if type(list) == "table" then
+            for i = #list, 1, -1 do
+                local entry = list[i]
+                if type(entry) == "table" and entry.token == token then
+                    table.remove(list, i)
+                    if #list == 0 then
+                        subs[eventName] = nil
+                    end
+                    return true
+                end
+            end
+        end
+    end
+    return false
 end
 
 function Bus.UnsubscribeAll(eventName)
@@ -67,10 +101,16 @@ function Bus.Fire(eventName, payload)
     if n <= 0 then
         return
     end
+    -- Copy handlers first so Unsubscribe mid-Fire cannot skip or double-call.
+    local handlers = {}
     for i = 1, n do
-        local fn = list[i]
+        local entry = list[i]
+        local fn = type(entry) == "table" and entry.fn or entry
         if type(fn) == "function" then
-            StockPiler2.Debug.TryCallQuiet("EventBus." .. eventName, fn, payload)
+            handlers[#handlers + 1] = fn
         end
+    end
+    for i = 1, #handlers do
+        StockPiler2.Debug.TryCallQuiet("EventBus." .. eventName, handlers[i], payload)
     end
 end

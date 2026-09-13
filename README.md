@@ -2,7 +2,7 @@
 
 Greenfield rewrite of StockPiler using an **Orchestrator + Stores + Planner + Executors** architecture. Runs as a **separate addon** alongside v1 — does not modify the original StockPiler folder.
 
-**Version:** 0.4.152
+**Version:** 0.4.153
 
 Repository: [Talladego/StockPiler2](https://github.com/Talladego/StockPiler2)
 
@@ -155,6 +155,8 @@ On each user-facing ship, bump together:
 | **Major** (`N+1.0.0`) | Breaking saved-var / architecture break (rare in 0.x) |
 
 ## Changelog
+
+**0.4.153:** Fix — EventBus Subscribe returns tokens + Unsubscribe; Orch/Scheduler/Ui/Brew store tokens and clear on Shutdown; idempotent RegisterEventRefresh (Issue #3).
 
 **0.4.152:** Fix — Watch Status tip hover: drop `HasResinConvertFeedstock` / `ResolveSeedForSpec` / `GetSeedBudgetForSpec` fallbacks (Issue #4); plan snapshot + live Have only.
 

@@ -3,7 +3,7 @@
 ----------------------------------------------------------------
 
 StockPiler2 = StockPiler2 or {}
-StockPiler2.Version = L"0.4.152"
+StockPiler2.Version = L"0.4.153"
 
 local function T(key, tokens)
     if StockPiler2.T then
@@ -272,6 +272,12 @@ end
 function StockPiler2.Shutdown()
     if StockPiler2.Macro and StockPiler2.Macro.Shutdown then
         StockPiler2.Macro.Shutdown()
+    end
+    if StockPiler2.Brew and StockPiler2.Brew.UnregisterEventHandlers then
+        StockPiler2.Brew.UnregisterEventHandlers()
+    end
+    if StockPiler2.Ui and StockPiler2.Ui.UnregisterEventRefresh then
+        StockPiler2.Ui.UnregisterEventRefresh()
     end
     if StockPiler2.Orchestrator and StockPiler2.Orchestrator.Shutdown then
         StockPiler2.Orchestrator.Shutdown()

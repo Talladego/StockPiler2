@@ -2048,10 +2048,26 @@ function Brew.RegisterEventHandlers()
     if not B or not E or not E.PLAN_UPDATED then
         return
     end
-    B.Subscribe(E.PLAN_UPDATED, function()
+    Brew._busTokens = Brew._busTokens or {}
+    local token = B.Subscribe(E.PLAN_UPDATED, function()
         Brew.MaybeClearLoadedIfCannotContinue("plan-updated")
     end)
+    if token then
+        Brew._busTokens[#Brew._busTokens + 1] = token
+    end
     Brew._eventsRegistered = true
+end
+
+function Brew.UnregisterEventHandlers()
+    local B = StockPiler2.EventBus
+    local tokens = Brew._busTokens
+    if B and B.Unsubscribe and type(tokens) == "table" then
+        for i = 1, #tokens do
+            B.Unsubscribe(tokens[i])
+        end
+    end
+    Brew._busTokens = nil
+    Brew._eventsRegistered = false
 end
 
 function Brew.MaybeCloseBrewSessionIfIdle(reason)

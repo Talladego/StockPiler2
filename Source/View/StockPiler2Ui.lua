@@ -248,26 +248,36 @@ function StockPiler2.Ui.InitializeWindow()
 end
 
 function StockPiler2.Ui.RegisterEventRefresh()
+    if StockPiler2.Ui._eventsRegistered == true then
+        return
+    end
     local B = StockPiler2.EventBus
     local E = StockPiler2.Events
     if not B or not E then
         return
     end
+    StockPiler2.Ui._busTokens = StockPiler2.Ui._busTokens or {}
+    local tokens = StockPiler2.Ui._busTokens
+    local function track(token)
+        if token then
+            tokens[#tokens + 1] = token
+        end
+    end
     local function markDirty()
         StockPiler2.Ui.MarkWatchUiDirty()
     end
-    B.Subscribe(E.PLAN_UPDATED, function()
+    track(B.Subscribe(E.PLAN_UPDATED, function()
         StockPiler2.Ui.ClearWatchTipCaches()
         StockPiler2.Ui.MarkWatchUiDirty()
-    end)
-    B.Subscribe(E.PLAN_INVALIDATED, markDirty)
-    B.Subscribe(E.INVENTORY_SNAPSHOT, markDirty)
-    B.Subscribe(E.GARDEN_SNAPSHOT, markDirty)
+    end))
+    track(B.Subscribe(E.PLAN_INVALIDATED, markDirty))
+    track(B.Subscribe(E.INVENTORY_SNAPSHOT, markDirty))
+    track(B.Subscribe(E.GARDEN_SNAPSHOT, markDirty))
     if E.KNOWLEDGE_UPDATED then
-        B.Subscribe(E.KNOWLEDGE_UPDATED, markDirty)
+        track(B.Subscribe(E.KNOWLEDGE_UPDATED, markDirty))
     end
     if E.SESSION_LOADED then
-        B.Subscribe(E.SESSION_LOADED, function()
+        track(B.Subscribe(E.SESSION_LOADED, function()
             if StockPiler2TabWatch and StockPiler2TabWatch.RefreshSkillGates then
                 StockPiler2TabWatch.RefreshSkillGates()
             end
@@ -279,6 +289,19 @@ function StockPiler2.Ui.RegisterEventRefresh()
             StockPiler2.Ui._watchUiLastPlanGen = 0
             StockPiler2.Ui.ClearWatchTipCaches()
             StockPiler2.Ui.MarkWatchUiDirty()
-        end)
+        end))
     end
+    StockPiler2.Ui._eventsRegistered = true
+end
+
+function StockPiler2.Ui.UnregisterEventRefresh()
+    local B = StockPiler2.EventBus
+    local tokens = StockPiler2.Ui._busTokens
+    if B and B.Unsubscribe and type(tokens) == "table" then
+        for i = 1, #tokens do
+            B.Unsubscribe(tokens[i])
+        end
+    end
+    StockPiler2.Ui._busTokens = nil
+    StockPiler2.Ui._eventsRegistered = false
 end
