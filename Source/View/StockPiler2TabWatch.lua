@@ -1948,21 +1948,16 @@ local function BuildStatusTooltipRows(data)
                 if not stocked then
                     if entry.kind == "convert" then
                         -- Byproduct: yellow while plant feedstock or refinable surplus can feed convert.
-                        local feedable = false
-                        for j = 1, #slots do
-                            local sibling = slots[j]
-                            if type(sibling) == "table" and sibling.kind == "plant" then
-                                feedable = true
-                                break
-                            end
-                        end
+                        -- Snapshot-only: sibling plant tips + plan convertFeedable — never HasResinConvertFeedstock
+                        -- (that rebuilds BuildBalancedSpecDemand on hover).
+                        local feedable = data.convertFeedable == true
                         if not feedable then
-                            if data.convertFeedable == true then
-                                feedable = true
-                            elseif StockPiler2.Refine and StockPiler2.Refine.HasResinConvertFeedstock
-                                and StockPiler2.Refine.HasResinConvertFeedstock() == true
-                            then
-                                feedable = true
+                            for j = 1, #slots do
+                                local sibling = slots[j]
+                                if type(sibling) == "table" and sibling.kind == "plant" then
+                                    feedable = true
+                                    break
+                                end
                             end
                         end
                         haveColor = feedable and colorWarn or colorBlock
@@ -1978,7 +1973,8 @@ local function BuildStatusTooltipRows(data)
                 if (entry.kind == "plant" or (agProgressable and entry.kind ~= "convert"))
                     and not stocked
                 then
-                    -- Always prefer live plot notes over plan-time growingNotes.
+                    -- Prefer live plot notes over plan-time growingNotes (plot scan only —
+                    -- never ResolveSeed / GetSeedBudget / BuildBalanced on this path).
                     local notes = L""
                     if Grow and Grow.GrowingNotesForSpec then
                         notes = Grow.GrowingNotesForSpec(entry.spec) or L""
@@ -1994,28 +1990,9 @@ local function BuildStatusTooltipRows(data)
                             notes = T("watch.note.needs_cult")
                             haveColor = colorBlock
                         elseif data.autoGrow == true then
-                            -- Prefer plan-time seed credit when present; else resolve once.
+                            -- Plan-time seedUid / seedCredit only (Issue #4: no hover resolve/budget).
                             local seedUid = tonumber(entry.seedUid) or 0
-                            local credit = tonumber(entry.seedCredit)
-                            if credit == nil then
-                                credit = 0
-                                if seedUid <= 0 then
-                                    local SM = StockPiler2.SeedMap
-                                    if SM and SM.ResolveSeedForSpec then
-                                        local seed = SM.ResolveSeedForSpec(entry.spec)
-                                        if type(seed) == "table" then
-                                            seedUid = tonumber(seed.uniqueID)
-                                                or tonumber(seed.itemData and seed.itemData.uniqueID)
-                                                or tonumber(seed.seedUid)
-                                                or 0
-                                        end
-                                    end
-                                end
-                                if seedUid > 0 and StockPiler2.Refine and StockPiler2.Refine.GetSeedBudgetForSpec then
-                                    local budget = StockPiler2.Refine.GetSeedBudgetForSpec(entry.spec, seedUid)
-                                    credit = tonumber(budget and budget.credit) or 0
-                                end
-                            end
+                            local credit = tonumber(entry.seedCredit) or 0
 
                             -- Yellow: matches status need_seeds / restocking (buy seeds helps, AG can too).
                             if seedUid > 0 and credit <= 0 then
@@ -2109,19 +2086,9 @@ local function BuildStatusTooltipRows(data)
                     color = haveColor,
                 }
                 if entry.kind == "plant" then
+                    -- Plan-time seedUid/plantUid only — no ResolveSeedForSpec on hover.
                     local seedUid = tonumber(entry.seedUid) or 0
                     local plantUid = tonumber(entry.plantUid) or 0
-                    if seedUid <= 0 and StockPiler2.SeedMap and StockPiler2.SeedMap.ResolveSeedForSpec
-                        and type(entry.spec) == "table"
-                    then
-                        local seed = StockPiler2.SeedMap.ResolveSeedForSpec(entry.spec)
-                        if type(seed) == "table" then
-                            seedUid = tonumber(seed.uniqueID) or 0
-                            if plantUid <= 0 then
-                                plantUid = tonumber(seed.plantUid) or 0
-                            end
-                        end
-                    end
                     if seedUid > 0 and StockPiler2.SeedMap then
                         local rateLines = nil
                         if StockPiler2.SeedMap.FormatHarvestTooltipRateLines then
