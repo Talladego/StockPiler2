@@ -232,7 +232,7 @@ On each user-facing ship, bump together:
 
 **0.4.116:** AutoGrow — defer plant/additives in scenario/combat/RvR (same gate as bag flush); plant chat only after soil confirms; 6s per-plot cooldown when pending expires still empty (stops unconfirmed replant spam).
 
-**0.4.115:** Persistence — strip historical settings-flag leaks from Account on load; drop obsolete `perfEnabled`/`perfThresholdMs` from Settings (LibPerf owns hitch config); `/sp2 audit` reports unexpected Account top-level keys. Architecture review doc: `docs/ARCHITECTURE_REVIEW_0.4.114.md`.
+**0.4.115:** Persistence — strip historical settings-flag leaks from Account on load; drop obsolete `perfEnabled`/`perfThresholdMs` from Settings (LibPerf owns hitch config); `/sp2 audit` reports unexpected Account top-level keys.
 
 **0.4.114:** AutoGrow — plant-hold for ready harvest only when the garden is a uniform ready/mid-batch wave (Grown + empty, no mid-grow). Staggered timers still allow planting empties.
 
