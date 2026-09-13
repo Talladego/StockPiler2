@@ -85,7 +85,7 @@ StockPiler2.Locale.Packs[LANG] = {
 
     -- Grow
     ["grow.harvest_ready"] = L"Harvest: Ready - {count} plot(s).",
-    ["grow.harvest_outcome"] = L"Harvest: Plot {plot} harvested {count} {name}.",
+    ["grow.harvest_outcome"] = L"Harvest: Plot {plot} harvested {name} x{count}.",
     ["grow.harvest_crit_fail"] = L"Harvest: Plot {plot} critical failure.",
     ["grow.plant_failed"] = L"Harvest: Plot {plot} plant failed ({err}).",
     ["grow.planted"] = L"Harvest: Plot {plot} planted {name} ({reason}).",

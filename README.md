@@ -2,7 +2,7 @@
 
 Greenfield rewrite of StockPiler using an **Orchestrator + Stores + Planner + Executors** architecture. Runs as a **separate addon** alongside v1 — does not modify the original StockPiler folder.
 
-**Version:** 0.4.153
+**Version:** 0.4.165
 
 Repository: [Talladego/StockPiler2](https://github.com/Talladego/StockPiler2)
 
@@ -155,6 +155,30 @@ On each user-facing ship, bump together:
 | **Major** (`N+1.0.0`) | Breaking saved-var / architecture break (rare in 0.x) |
 
 ## Changelog
+
+**0.4.165:** Fix — Watch Status stayed Potions stocked after vault/mail/bank removed bag potions (Stock already live-patched to 0; `ApplyLiveWatchStatus` never demoted `potion_stocked`). Same cheap live patch path as Ready demotion — no full `/sp2 watchplan` rebuild.
+
+**0.4.164:** Fix — Strength (and other cult mains) marked `not-growable` / `seedUid=0` after brewing the same ProductKey with a butcher substitute (Bear Tooth) once plants were depleted. `SpecLooksButchering` trusted bag `ProductMatches` + recipe butcher uid while `Items.AsItemData` has no `craftingBonus`, so Elder Beardweed vanished from the grow check; `CachedPlantUidForSpec` could also return the butcher recipe uid. Cultivation linkage now wins; plant uid resolve skips butcher substitutes; seed match uses learned `Items.ToSpec`.
+
+**0.4.163:** Fix — AutoGrow stall with empty plots + full seed buffer + buy-only shorts: empty refine/`no-job` kept re-arming `SetFillBlocked(true, 5)` so wait never decayed (`fillBlocked` sticky, idle no-job loop). Now clears fill-block when buffer satisfied, wakes brew footer, and does not reset an active fill-block wait. Live Ready demotion uses Buy vs Restocking (not always Restocking).
+
+**0.4.162:** Fix — Watch Status stayed Ready to brew with Craftable 0 after brewing shared mats (live patch promoted Ready but never demoted when `have+craftable < target`). Now flips to Restocking / Seed buffer and dirties the plant job.
+
+**0.4.161:** Fix — Watch Status stuck on Seed buffer after buffer fills until `/sp2 watchplan` (live patch never promoted `need_seeds` → Ready/Restocking). Leaving Seed buffer dirties the plant job so AutoGrow can plant without a forced rebuild. Fix — Brew Ready chat/sound no longer re-fires on every plant while another Ready watch is only held by pending plant / seed-buffer / refine.
+
+**0.4.160:** Fix — Seed buffer stuck at Have==Need (yellow Shared / `need_seeds`): buffer refine now bootstraps convert up to headroom when brew deficit is 0 (still prefers true surplus; still refuses while brew plants are short). Aligns `HasPendingBufferRefine` with the same gate so brew hold / no-job idle cannot spin forever without intents.
+
+**0.4.159:** Perf — Footer/PrepareHarvest trail glue (edge-only harvest/brew notify; Footer early-out honors `immediate`; PrepareHarvest same-frame + op-lock no-op). Mid-session `LOADING_END` soft-invalidates plan (Clear only on char change). Orch holds plant/refine while demand/seed-lines prewarm. Main-bag `Inv.ApplySlots` coalesced like craft.
+
+**0.4.158:** Fix — plant chat for every soil-confirmed plot (stash meta survives premature empty/grace clear; TryPlant no longer false-unconfirms while cache still EMPTY). Harvest chat qty matches brew: `Plot N harvested [Item] xN`.
+
+**0.4.157:** Perf/fix — craftable no longer zeros after brew load (WarmHave no live-cache pre-zeros; brew Patch keeps prior craftable). Knowledge.Touch only on new/remapped brew recipes. Nested FrameWork plan-build slices Status.Craftable then Tips. Brew load: frame-cached bag tables, coalesced job Tick, cheaper ApoCapture (skip mid-load / reuse unchanged slots). Coalesced ApplySlots ~300ms remains an engine floor.
+
+**0.4.156:** Perf — Soft PlanSnapshot.Invalidate keeps stale rows (Clear only on SESSION_LOADED). GardenPatch for plant/harvest (reuse tips, flip restocking, no Tips.Slots). FrameWork-sliced WarmHave + last-complete counts. Coalesced craft ApplySlots. Deferred Tips.Slots publish for watch-edit full Builds.
+
+**0.4.155:** Perf — PlanRebuild cheap path uses structural gens only (HasOutstanding gate contradicted defer and never fired). Have-cache warm requires warmed-for-snap flag (empty table ≠ warm). WarmHave single-pass Key index + thin ProductMatches. PatchWatchRowsLiveCounts skips craftable recount when snap unchanged; Status uses one CountCraftsPossible.
+
+**0.4.154:** Perf — mid-refine PlanRebuild uses cheap path (patch live counts, keep statusTipSlots; skip Demand/Status/Tips) while RefinePipeline has outstanding; full Build on refine-clear / garden change. Seed-buffer tip reads PeekCachedIntents only (no CollectIntents in Build). Inner LibPerf Marks: WarmHave.miss, Status.Craftable, Tips.Slots, Build.Ctx, Planner.CheapRebuild.
 
 **0.4.153:** Fix — EventBus Subscribe returns tokens + Unsubscribe; Orch/Scheduler/Ui/Brew store tokens and clear on Shutdown; idempotent RegisterEventRefresh (Issue #3).
 

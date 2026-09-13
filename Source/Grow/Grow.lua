@@ -16,6 +16,8 @@ Grow._pendingPlant = Grow._pendingPlant or {}
 Grow._pendingPlantAt = Grow._pendingPlantAt or {}
 Grow._pendingSeedUid = Grow._pendingSeedUid or {}
 Grow._pendingPlantMeta = Grow._pendingPlantMeta or {}
+-- Survives premature pending clear so late soil confirm still chats.
+Grow._plantChatMeta = Grow._plantChatMeta or {}
 Grow._plantFailCooldownUntil = Grow._plantFailCooldownUntil or {}
 Grow._pendingAdditive = Grow._pendingAdditive or {}
 Grow._pendingAdditiveAt = Grow._pendingAdditiveAt or {}
@@ -47,7 +49,10 @@ Grow._footerHarvestClickable = nil
 Grow._skillSkipByUid = Grow._skillSkipByUid or {}
 Grow._skillSkipSnapGen = -1
 Grow.PENDING_TTL_SEC = 10
-Grow.PENDING_EMPTY_GRACE_SEC = 1.0
+-- PlantSeed can return ok while soil cache stays EMPTY for >1s; short grace
+-- false-unconfirmed pending and dropped Plot-N planted chat (soil filled later).
+Grow.PENDING_EMPTY_GRACE_SEC = 5.0
+Grow.PLANT_CHAT_META_TTL_SEC = 30
 Grow.UNCONFIRMED_PLANT_COOLDOWN_SEC = 6.0
 -- After unconfirmed PlantSeed, pause all plots (not just the failing one).
 Grow.UNCONFIRMED_GARDEN_QUIET_SEC = 8.0
@@ -392,7 +397,13 @@ local function AnyBufferRefinePending(lines)
         local budget = Refine.GetSeedBudgetForSpec(line.spec, line.seedUid)
         local refinable = Refine.CountRefinablePlants
             and Refine.CountRefinablePlants(line.plantUid, line.spec) or 0
-        if (tonumber(budget and budget.headroom) or 0) > 0 and refinable > 0 then
+        local convertible = 0
+        if Refine.SeedBufferConvertibleCount then
+            convertible = tonumber(Refine.SeedBufferConvertibleCount(line, budget, refinable)) or 0
+        elseif (tonumber(budget and budget.headroom) or 0) > 0 and refinable > 0 then
+            convertible = refinable
+        end
+        if convertible > 0 then
             return true
         end
     end
@@ -479,6 +490,7 @@ local function EnsureBufferFlagsCached()
         Perf.Begin("Grow.BufferFlags")
     end
     local RS = StockPiler2.RecipeSpec
+    -- Seed lines are structural-cached; CollectAutoGrowSeedLines should hit after prewarm.
     local lines = (RS and RS.CollectAutoGrowSeedLines and RS.CollectAutoGrowSeedLines()) or {}
     local flags = {
         pending = AnyBufferRefinePending(lines),
@@ -491,6 +503,14 @@ local function EnsureBufferFlagsCached()
         Perf.End("Grow.BufferFlags")
     end
     return flags
+end
+
+--- True when BufferFlags match current snap/garden/watch key (Orch hold / diagnostics).
+function Grow.AreBufferFlagsWarm()
+    if type(Grow._bufferFlags) ~= "table" then
+        return false
+    end
+    return Grow._bufferFlagsKey == BufferFlagsCacheKey()
 end
 
 --- True when Seed Buffer is on and at least one watched line can refine for buffer.
@@ -1043,6 +1063,10 @@ function Grow.ClearPendingPlot(plotNum, opts)
     Grow._pendingPlantAt[plotNum] = nil
     Grow._pendingSeedUid[plotNum] = nil
     Grow._pendingPlantMeta[plotNum] = nil
+    -- opts.keepChatMeta: empty/grace clear — late soil fill may still need chat.
+    if opts.keepChatMeta ~= true then
+        Grow._plantChatMeta[plotNum] = nil
+    end
 end
 
 local function ArmUnconfirmedPlantCooldown(plotNum)
@@ -1072,17 +1096,54 @@ local function ArmUnconfirmedPlantCooldown(plotNum)
     )
 end
 
+local function StashPlantChatMeta(plotNum, meta)
+    plotNum = tonumber(plotNum) or 0
+    if plotNum <= 0 or type(meta) ~= "table" then
+        return
+    end
+    Grow._plantChatMeta[plotNum] = {
+        reason = meta.reason,
+        name = meta.name,
+        seedUid = meta.seedUid,
+        at = NowSec(),
+        chatted = false,
+    }
+end
+
 local function NotifyPlantConfirmed(plotNum)
     plotNum = tonumber(plotNum) or 0
-    local meta = Grow._pendingPlantMeta[plotNum]
+    local pendingMeta = Grow._pendingPlantMeta[plotNum]
+    local stash = Grow._plantChatMeta[plotNum]
+    local meta = pendingMeta
+    if type(meta) ~= "table" then
+        meta = stash
+    end
     if type(meta) ~= "table" then
         return
     end
-    -- Once per pending plant (soil-confirm path only).
+    -- Once per plant attempt (pending and/or late soil after premature clear).
     if meta.chatted == true then
         return
     end
+    if type(stash) == "table" and stash.chatted == true then
+        return
+    end
+    if meta == stash then
+        local at = tonumber(stash.at) or 0
+        local now = NowSec()
+        local ttl = tonumber(Grow.PLANT_CHAT_META_TTL_SEC) or 30
+        if at <= 0 or (now > 0 and at > 0 and (now - at) > ttl) then
+            Grow._plantChatMeta[plotNum] = nil
+            return
+        end
+    end
     meta.chatted = true
+    if type(stash) == "table" then
+        stash.chatted = true
+    end
+    if type(pendingMeta) == "table" then
+        pendingMeta.chatted = true
+    end
     local reasonRaw = tostring(meta.reason or "potion_stock")
     local reasonKey = PLANT_REASON_LABEL[reasonRaw]
     local reasonLabel = reasonKey and T(reasonKey) or towstring(reasonRaw)
@@ -1105,23 +1166,40 @@ local function ApplyPendingClearForPlot(plotNum, plot)
     if plotNum <= 0 or type(plot) ~= "table" then
         return
     end
-    if (tonumber(Grow._pendingPlant[plotNum]) or 0) <= 0 then
+    local pending = (tonumber(Grow._pendingPlant[plotNum]) or 0) > 0
+    if Grow.NormalizeStage(plot.stage) ~= Grow.StageEmpty() then
+        -- Soil has a plant: chat once (pending meta or stash after premature clear).
+        if not pending then
+            local stash = Grow._plantChatMeta[plotNum]
+            if type(stash) == "table" then
+                local plotSeed = tonumber(plot.seedUid) or 0
+                local metaSeed = tonumber(stash.seedUid) or 0
+                -- Stale stash from a failed attempt must not chat a different plant.
+                if plotSeed > 0 and metaSeed > 0 and plotSeed ~= metaSeed then
+                    Grow._plantChatMeta[plotNum] = nil
+                    return
+                end
+            end
+        end
+        NotifyPlantConfirmed(plotNum)
+        if pending then
+            -- Release commit so the next PickPlantCandidate does not do
+            -- seedHave - committed against a decremented bag.
+            Grow.ClearPendingPlot(plotNum, { rollbackCommit = true })
+            Grow.MaybeCompleteFillWave()
+        end
         return
     end
-    if Grow.NormalizeStage(plot.stage) ~= Grow.StageEmpty() then
-        -- Plant confirmed in soil: chat once, then release commit so the next
-        -- PickPlantCandidate does not do seedHave - committed against a decremented bag.
-        NotifyPlantConfirmed(plotNum)
-        Grow.ClearPendingPlot(plotNum, { rollbackCommit = true })
-        Grow.MaybeCompleteFillWave()
+    if not pending then
         return
     end
     -- Empty while pending: harvest/fail. Grace so post-plant empty frames don't clear.
     local at = tonumber(Grow._pendingPlantAt[plotNum]) or 0
     local now = NowSec()
-    local grace = tonumber(Grow.PENDING_EMPTY_GRACE_SEC) or 1.0
+    local grace = tonumber(Grow.PENDING_EMPTY_GRACE_SEC) or 5.0
     if at > 0 and (now - at) >= grace then
-        Grow.ClearPendingPlot(plotNum, { rollbackCommit = true })
+        -- Keep _plantChatMeta so a late soil fill still emits planted chat.
+        Grow.ClearPendingPlot(plotNum, { rollbackCommit = true, keepChatMeta = true })
         ArmUnconfirmedPlantCooldown(plotNum)
         Grow._plantQueueDirty = true
         Grow._cachedPlantJob = nil
@@ -1137,10 +1215,31 @@ function Grow.OnCultivationUpdated(plotNum)
         ApplyPendingClearForPlot(pn, row)
         Grow.ClearPendingAdditiveIfFilled(pn, row)
     end
+    local function MaybeNotify(force)
+        -- 0.4.159: per-frame SyncAll confirm must not re-notify every frame.
+        -- Notify when garden gen advanced, a specific plot updated, or pending plant work.
+        if force == true or Grow.HasPendingPlant() == true then
+            Grow.MaybeNotifyHarvestReady()
+            local Garden = StockPiler2.Garden
+            if Garden and Garden.GetGen then
+                Grow._lastHarvestNotifyGardenGen = tonumber(Garden.GetGen()) or 0
+            end
+            return
+        end
+        local Garden = StockPiler2.Garden
+        local gen = 0
+        if Garden and Garden.GetGen then
+            gen = tonumber(Garden.GetGen()) or 0
+        end
+        if gen ~= (tonumber(Grow._lastHarvestNotifyGardenGen) or -1) then
+            Grow._lastHarvestNotifyGardenGen = gen
+            Grow.MaybeNotifyHarvestReady()
+        end
+    end
     if plotNum > 0 then
         HandleOne(plotNum, Grow.CachedPlot(plotNum))
         Grow.MarkAdditiveDue()
-        Grow.MaybeNotifyHarvestReady()
+        MaybeNotify(true)
         if Grow._liveHarvestTip and Grow._liveHarvestTip.kind == "harvest" then
             Grow.SyncHarvestTipPlotsFromEngine()
             Grow.MaybeRefreshHarvestTooltip(true)
@@ -1149,6 +1248,7 @@ function Grow.OnCultivationUpdated(plotNum)
     end
     local Garden = StockPiler2.Garden
     local plots = Garden and Garden.GetPlotsCopy and Garden.GetPlotsCopy() or nil
+    local hadPending = Grow.HasPendingPlant() == true
     if type(plots) ~= "table" then
         for pn, _ in pairs(Grow._pendingPlant) do
             HandleOne(pn, Grow.CachedPlot(pn))
@@ -1157,7 +1257,7 @@ function Grow.OnCultivationUpdated(plotNum)
             Grow.ClearPendingAdditiveIfFilled(pn, Grow.CachedPlot(pn))
         end
         Grow.MarkAdditiveDue()
-        Grow.MaybeNotifyHarvestReady()
+        MaybeNotify(hadPending)
         if Grow._liveHarvestTip and Grow._liveHarvestTip.kind == "harvest" then
             Grow.SyncHarvestTipPlotsFromEngine()
             Grow.MaybeRefreshHarvestTooltip(true)
@@ -1168,7 +1268,7 @@ function Grow.OnCultivationUpdated(plotNum)
         HandleOne(pn, row)
     end
     Grow.MarkAdditiveDue()
-    Grow.MaybeNotifyHarvestReady()
+    MaybeNotify(hadPending)
     if Grow._liveHarvestTip and Grow._liveHarvestTip.kind == "harvest" then
         Grow.SyncHarvestTipPlotsFromEngine()
         Grow.MaybeRefreshHarvestTooltip(true)
@@ -1190,7 +1290,7 @@ function Grow.ExpireStalePending()
             local at = tonumber(Grow._pendingPlantAt[plotNum]) or 0
             if empty and at > 0 and (now - at) >= ttl then
                 LogGrow("pending TTL clear P" .. tostring(plotNum))
-                Grow.ClearPendingPlot(plotNum, { rollbackCommit = true })
+                Grow.ClearPendingPlot(plotNum, { rollbackCommit = true, keepChatMeta = true })
                 ArmUnconfirmedPlantCooldown(plotNum)
                 Grow._plantQueueDirty = true
                 Grow._cachedPlantJob = nil
@@ -1276,18 +1376,28 @@ function Grow.MarkPlantJobDirty()
 end
 
 function Grow.SetFillBlocked(blocked, waitTicks)
-    Grow._fillBlocked = blocked == true
-    if Grow._fillBlocked then
+    if blocked == true then
+        -- Do not reset an active wait on every no-job/refine-empty tick (stall loop).
+        if Grow._fillBlocked == true then
+            local cur = tonumber(Grow._plantWaitTicks) or 0
+            local want = tonumber(waitTicks) or 5
+            if want > cur then
+                Grow._plantWaitTicks = want
+            end
+            return
+        end
+        Grow._fillBlocked = true
         Grow._plantWaitTicks = tonumber(waitTicks) or 5
         if StockPiler2.Scheduler and StockPiler2.Scheduler.SetAutoGrowIdle then
             StockPiler2.Scheduler.SetAutoGrowIdle(true)
         end
-    else
-        Grow._plantWaitTicks = 0
-        Grow._jobProbed = false
-        Grow._plantQueueDirty = true
-        Grow._cachedPlantJob = nil
+        return
     end
+    Grow._fillBlocked = false
+    Grow._plantWaitTicks = 0
+    Grow._jobProbed = false
+    Grow._plantQueueDirty = true
+    Grow._cachedPlantJob = nil
 end
 
 function Grow.ClearFillBlocked()
@@ -1562,14 +1672,22 @@ end
 
 --- Transition-only harvest-ready chat/sound (not on every footer CountReady).
 --- Same gates as the Harvest button/macro: all planted plots ready AND CanHarvestNow.
+--- 0.4.159: edge-only immediate footer sync; steady ready uses RequestFooterRefresh
+--- so per-frame cultivation confirm does not Mark Footer xN000.
 function Grow.MaybeNotifyHarvestReady()
     local allReady, readyN = Grow.AllPlantedPlotsHarvestReady()
     local canHarvest = Grow.CanHarvestNow and Grow.CanHarvestNow() == true
-    if allReady and canHarvest then
-        -- Light macros/footer before chat/sound so they stay in sync.
-        if StockPiler2Window and StockPiler2Window.SyncActionReadiness then
-            StockPiler2Window.SyncActionReadiness({ immediate = true })
+    local ready = allReady == true and canHarvest == true
+    local wasReady = Grow._harvestReadyLatched == true
+    if ready then
+        if not wasReady then
+            if StockPiler2Window and StockPiler2Window.SyncActionReadiness then
+                StockPiler2Window.SyncActionReadiness({ immediate = true })
+            end
+        elseif StockPiler2Window and StockPiler2Window.RequestFooterRefresh then
+            StockPiler2Window.RequestFooterRefresh()
         end
+        Grow._harvestReadyLatched = true
         local printed = NotifyChatOnce(
             "harvest-ready",
             T("grow.harvest_ready", { count = tostring(readyN) })
@@ -1579,6 +1697,10 @@ function Grow.MaybeNotifyHarvestReady()
             PlayUiSound(soundId)
         end
     else
+        if wasReady and StockPiler2Window and StockPiler2Window.RequestFooterRefresh then
+            StockPiler2Window.RequestFooterRefresh()
+        end
+        Grow._harvestReadyLatched = false
         ClearNotifyChatOnce("harvest-ready")
     end
 end
@@ -1811,6 +1933,24 @@ end
 
 --- Prepare CurrentPlot + harvest watch; game-action button performs the craft.
 function Grow.PrepareHarvestPlot(manual)
+    -- 0.4.159: same-frame dedupe (hotbar hook + macro HarvestClick) and op-lock
+    -- no-op before Perf.Begin — key-repeat was Marking PrepareHarvest x100.
+    local frame = tonumber(StockPiler2.FrameCounter) or 0
+    if frame > 0 and Grow._prepareHarvestFrame == frame then
+        return true
+    end
+    local last = tonumber(Grow._lastPreparedHarvestPlot) or 0
+    local lockUntil = tonumber(Grow._harvestOpLockUntil) or 0
+    local now = NowSec()
+    if last > 0 and lockUntil > 0 and now > 0 and now < lockUntil then
+        local CA = StockPiler2.CultivatorAdapter
+        local plot = CA and CA.ReadPlot and CA.ReadPlot(last) or Grow.CachedPlot(last)
+        if type(plot) == "table"
+            and (Grow.IsPlotGrown(plot.stage) or Grow.IsPlotHarvesting(plot.stage))
+        then
+            return true
+        end
+    end
     local Perf = StockPiler2.Perf
     if Perf and Perf.Begin then
         Perf.Begin("Grow.PrepareHarvest")
@@ -1831,6 +1971,9 @@ function Grow.PrepareHarvestPlot(manual)
         return false
     end
     Grow.ArmHarvestOpLock(Grow.HARVEST_OP_LOCK_SEC)
+    if frame > 0 then
+        Grow._prepareHarvestFrame = frame
+    end
     LogGrow(string.format(
         "harvest prepare P%d manual=%s ready=%d",
         tonumber(plotNum) or 0,
@@ -2193,6 +2336,7 @@ function Grow.TryPlantNextEmptyPlot(opId)
         name = seedName,
         seedUid = seedUid,
     }
+    StashPlantChatMeta(plotNum, Grow._pendingPlantMeta[plotNum])
     if StockPiler2.Scheduler and StockPiler2.Scheduler.SuppressInventorySideEffects then
         StockPiler2.Scheduler.SuppressInventorySideEffects(2)
     end
@@ -2238,8 +2382,8 @@ function Grow.TryPlantNextEmptyPlot(opId)
             end
         end
     end
-    -- Chat only when soil leaves EMPTY (ApplyPendingClearForPlot). PlantSeed
-    -- can return ok without the plot accepting the seed.
+    -- Chat only when soil leaves EMPTY (confirm path below / cultivation events).
+    -- PlantSeed can return ok without the plot accepting the seed.
     LogPlant(string.format(
         "P%d %s uid=%d plantUid=%d reason=%s deficit=%d craftsShort=%d plantable=%d opId=%s",
         plotNum,
@@ -2258,13 +2402,24 @@ function Grow.TryPlantNextEmptyPlot(opId)
     if StockPiler2.Refine and StockPiler2.Refine.ClearPostHarvestState then
         StockPiler2.Refine.ClearPostHarvestState()
     end
+    -- Chat only when soil leaves EMPTY. PlantSeed can return ok while the plot
+    -- cache is still empty for seconds — do not run empty/grace clear here
+    -- (that false-unconfirmed P1/P2 and dropped planted chat; soil filled later).
     if StockPiler2.Garden and StockPiler2.Garden.SyncPlot then
         StockPiler2.Garden.SyncPlot(plotNum)
     elseif StockPiler2.Garden and StockPiler2.Garden.OnCultivationUpdated then
         StockPiler2.Garden.OnCultivationUpdated()
     end
-    -- SyncPlot updates Garden cache only — clear pending when soil already shows seed.
-    Grow.OnCultivationUpdated(plotNum)
+    local filled = Grow.CachedPlot(plotNum)
+    if type(filled) == "table" and Grow.NormalizeStage(filled.stage) ~= Grow.StageEmpty() then
+        NotifyPlantConfirmed(plotNum)
+        if (tonumber(Grow._pendingPlant[plotNum]) or 0) > 0 then
+            Grow.ClearPendingPlot(plotNum, { rollbackCommit = true })
+        end
+        Grow.MaybeCompleteFillWave()
+    end
+    Grow.ClearPendingAdditiveIfFilled(plotNum, filled)
+    Grow.MarkAdditiveDue()
     -- Re-pick next plot for craftsShort / role fairness; keep seedCommitted.
     Grow._plantQueueDirty = true
     Grow._cachedPlantJob = nil
@@ -2274,8 +2429,6 @@ function Grow.TryPlantNextEmptyPlot(opId)
     if StockPiler2.Scheduler and StockPiler2.Scheduler.WakeAutoGrow then
         StockPiler2.Scheduler.WakeAutoGrow()
     end
-    Grow.MarkAdditiveDue()
-    Grow.MaybeCompleteFillWave()
     if StockPiler2.Perf and StockPiler2.Perf.End then
         StockPiler2.Perf.End("Grow.TryPlant")
     end
@@ -2676,21 +2829,36 @@ end
 --- Do NOT PairLooksLikePlantAndSeed against plot seeds — that falsely tags
 --- Extender plots onto Multiplier (and similar) when names/products are unrelated.
 --- Do NOT FindSeedInBagsForPlantSpec — SeedMatchesGrowSpec can pollute seedSet.
-function Grow.GrowingNotesForSpec(spec)
+function Grow.GrowingNotesForSpec(spec, opts)
     if type(spec) ~= "table" then
         return L""
     end
+    opts = type(opts) == "table" and opts or {}
+    local cacheOnly = opts.cacheOnly == true
     local SM = StockPiler2.SeedMap
     if not SM then
-        return L""
+        return cacheOnly and nil or L""
     end
 
     local plantUid = 0
-    if SM.FindPlantUidForSpec then
-        plantUid = tonumber(SM.FindPlantUidForSpec(spec)) or 0
-    end
-    if plantUid <= 0 and SM.CachedPlantUidForSpec then
-        plantUid = tonumber(SM.CachedPlantUidForSpec(spec)) or 0
+    if cacheOnly then
+        -- Never FindPlantUidForSpec (account/bag walk). Cache miss → nil (caller keeps prior).
+        if SM.FindPlantUidForHave then
+            plantUid = tonumber(SM.FindPlantUidForHave(spec)) or 0
+        end
+        if plantUid <= 0 and SM.CachedPlantUidForSpec then
+            plantUid = tonumber(SM.CachedPlantUidForSpec(spec)) or 0
+        end
+        if plantUid <= 0 then
+            return nil
+        end
+    else
+        if SM.FindPlantUidForSpec then
+            plantUid = tonumber(SM.FindPlantUidForSpec(spec)) or 0
+        end
+        if plantUid <= 0 and SM.CachedPlantUidForSpec then
+            plantUid = tonumber(SM.CachedPlantUidForSpec(spec)) or 0
+        end
     end
 
     local seedSet = {}
@@ -2709,7 +2877,7 @@ function Grow.GrowingNotesForSpec(spec)
             end
         end
     end
-    if SM.ResolveSeedForSpec then
+    if not cacheOnly and SM.ResolveSeedForSpec then
         local seed = SM.ResolveSeedForSpec(spec)
         if type(seed) == "table" then
             local uid = tonumber(seed.uniqueID) or 0

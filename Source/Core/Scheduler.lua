@@ -657,28 +657,45 @@ function Sch.RequestCachePrewarm(reason)
     if not FW or not FW.StartOnce then
         return
     end
+    local RS = StockPiler2.RecipeSpec
+    -- Skip entirely when have-cache already warm for this snap (zero-net rearrange / L0 skip).
+    if RS and RS.IsHaveCacheWarmForSnap and RS.IsHaveCacheWarmForSnap() == true
+        and RS.IsDemandCacheWarm and RS.IsDemandCacheWarm() == true
+    then
+        local seedLinesActive = FW.IsActive and FW.IsActive("prewarm-seed-lines") == true
+        if not seedLinesActive then
+            return
+        end
+    end
     local genKey = CurrentPrewarmGenKey()
     Sch._prewarmArmedGen = genKey
-    local RS = StockPiler2.RecipeSpec
-    -- WarmHave first — PlanRebuild's expensive nested bag walk.
-    if RS and RS.WarmSpecHaveCacheForWatches then
-        FW.StartOnce("prewarm-warm-have", genKey, function()
-            RS.WarmSpecHaveCacheForWatches()
-        end)
+    -- WarmHave first — PlanRebuild's expensive nested bag walk (0.4.156: list-sliced).
+    if RS and RS.StartSlicedWarmHaveForWatches then
+        RS.StartSlicedWarmHaveForWatches(genKey)
+    elseif RS and RS.WarmSpecHaveCacheForWatches then
+        if not (RS.IsHaveCacheWarmForSnap and RS.IsHaveCacheWarmForSnap() == true) then
+            FW.StartOnce("prewarm-warm-have", genKey, function()
+                RS.WarmSpecHaveCacheForWatches()
+            end)
+        end
     end
     if RS and RS.BuildBalancedSpecDemand then
-        FW.StartOnce("prewarm-demand", genKey, function()
-            RS.BuildBalancedSpecDemand()
-        end)
+        if not (RS.IsDemandCacheWarm and RS.IsDemandCacheWarm() == true) then
+            FW.StartOnce("prewarm-demand", genKey, function()
+                RS.BuildBalancedSpecDemand()
+            end)
+        end
     end
     if RS and RS.CollectAutoGrowSeedLines then
-        FW.StartOnce("prewarm-seed-lines", genKey, function()
-            RS.CollectAutoGrowSeedLines()
-            -- BufferFlags key off seed-lines; force refresh after lines warm.
-            if StockPiler2.Grow then
-                StockPiler2.Grow._bufferFlagsKey = nil
-            end
-        end)
+        if not (RS.IsSeedLinesCacheWarm and RS.IsSeedLinesCacheWarm() == true) then
+            FW.StartOnce("prewarm-seed-lines", genKey, function()
+                RS.CollectAutoGrowSeedLines()
+                -- BufferFlags key off seed-lines; force refresh after lines warm.
+                if StockPiler2.Grow then
+                    StockPiler2.Grow._bufferFlagsKey = nil
+                end
+            end)
+        end
     end
     if StockPiler2.Debug and StockPiler2.Debug.Enabled == true and StockPiler2.Debug.LogOp then
         StockPiler2.Debug.LogOp("perf", "prewarm armed reason=" .. tostring(reason or "") .. " gen=" .. genKey)
@@ -701,7 +718,13 @@ end
 
 --- Hold PlanRebuild while have/demand/seed-lines prewarm jobs still run for this snap.
 --- Caps against PLAN_MAX_STRETCH_SEC from first-due so plan cannot stall forever.
+--- 0.4.156: never hold when CheapRebuild / GardenPatch can run (stretch expiry used to
+--- force a cold full Build = 2s plant hitch).
 local function HoldPlanForPrewarm()
+    local Planner = StockPiler2.Planner
+    if Planner and Planner.CanCheapOrGardenPatch and Planner.CanCheapOrGardenPatch() == true then
+        return false
+    end
     -- Pump is skipped during brew; do not wait on jobs that cannot run (defer handles brew).
     local Orch = StockPiler2.Orchestrator
     if Orch and Orch.IsBrewSessionActive and Orch.IsBrewSessionActive() == true then
@@ -744,7 +767,8 @@ local function HoldPlanForPrewarm()
     return true
 end
 
---- Hold AutoGrow Orch.Tick while have/demand/seed-lines prewarm is in flight.
+--- Hold AutoGrow Orch.Tick while have/demand/seed-lines prewarm is in flight,
+--- or while demand/seed-lines caches are cold for the current snap (0.4.159).
 --- Does not hold brew-session ticks (already skip plant probes) or AutoGrow-off buy ticks.
 local function ShouldHoldOrchForPrewarm()
     local Watch = StockPiler2.Watch
@@ -756,16 +780,51 @@ local function ShouldHoldOrchForPrewarm()
         return false
     end
     local FW = StockPiler2.FrameWork
+    if FW and FW.IsActive then
+        if FW.IsActive("prewarm-demand")
+            or FW.IsActive("prewarm-warm-have")
+            or FW.IsActive("prewarm-seed-lines")
+        then
+            return true
+        end
+    end
+    local RS = StockPiler2.RecipeSpec
+    local demandWarm = RS and RS.IsDemandCacheWarm and RS.IsDemandCacheWarm() == true
+    local seedWarm = true
+    if Watch.IsSeedBufferEnabled and Watch.IsSeedBufferEnabled() == true then
+        if RS and RS.IsSeedLinesCacheWarm then
+            seedWarm = RS.IsSeedLinesCacheWarm() == true
+        end
+    end
+    if demandWarm and seedWarm then
+        Sch._orchPrewarmHoldSince = nil
+        return false
+    end
+    -- Arm sliced prewarm; only hold while jobs are actually running (no FW → do not stall).
+    if Sch.RequestCachePrewarm then
+        Sch.RequestCachePrewarm("orch-hold-cold")
+    end
     if not (FW and FW.IsActive) then
         return false
     end
-    if FW.IsActive("prewarm-demand")
+    local waiting = FW.IsActive("prewarm-demand")
         or FW.IsActive("prewarm-warm-have")
         or FW.IsActive("prewarm-seed-lines")
-    then
-        return true
+    if not waiting then
+        return false
     end
-    return false
+    local now = Now()
+    local since = tonumber(Sch._orchPrewarmHoldSince) or 0
+    if since <= 0 then
+        Sch._orchPrewarmHoldSince = now
+        since = now
+    end
+    local maxStretch = tonumber(Sch.PLAN_MAX_STRETCH_SEC) or 6.0
+    if now >= (since + maxStretch) then
+        Sch._orchPrewarmHoldSince = nil
+        return false
+    end
+    return true
 end
 
 local function RebuildPlanIfDue()
@@ -1146,8 +1205,35 @@ function Sch.Initialize()
             Sch.BeginSessionCraftUiHold()
         end
         Sch.EnqueueBagFlush(true)
-        if StockPiler2.PlanSnapshot and StockPiler2.PlanSnapshot.Invalidate then
-            StockPiler2.PlanSnapshot.Invalidate()
+        -- 0.4.159: mid-session LOADING_END (zone/scenario) must not PlanSnapshot.Clear —
+        -- that forced cold full PlanRebuild (~500ms, cheap-miss no-stale). Soft Invalidate
+        -- keeps _plan for Cheap/Garden. Hard Clear only on character identity change.
+        local charKey = ""
+        if StockPiler2.Persistence and StockPiler2.Persistence.GetCharacterKey then
+            charKey = tostring(StockPiler2.Persistence.GetCharacterKey() or "")
+        elseif StockPiler2.Watch and StockPiler2.Watch.GetCharacterKey then
+            charKey = tostring(StockPiler2.Watch.GetCharacterKey() or "")
+        end
+        local prevKey = tostring(Sch._planSessionCharKey or "")
+        local charChanged = charKey ~= "" and prevKey ~= "" and charKey ~= prevKey
+        local firstPlan = StockPiler2.PlanSnapshot == nil
+            or StockPiler2.PlanSnapshot.Get == nil
+            or type(StockPiler2.PlanSnapshot.Get()) ~= "table"
+        if StockPiler2.PlanSnapshot then
+            if charChanged or (firstPlan and prevKey == "") then
+                if StockPiler2.PlanSnapshot.Clear then
+                    StockPiler2.PlanSnapshot.Clear()
+                elseif StockPiler2.PlanSnapshot.Invalidate then
+                    StockPiler2.PlanSnapshot.Invalidate()
+                end
+            elseif StockPiler2.PlanSnapshot.Invalidate then
+                StockPiler2.PlanSnapshot.Invalidate()
+            elseif StockPiler2.PlanSnapshot.Clear then
+                StockPiler2.PlanSnapshot.Clear()
+            end
+        end
+        if charKey ~= "" then
+            Sch._planSessionCharKey = charKey
         end
         if Sch.EnqueuePlanRebuild then
             Sch.EnqueuePlanRebuild()

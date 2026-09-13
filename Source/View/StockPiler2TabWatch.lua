@@ -259,175 +259,21 @@ local function UpdateAutoBuyChips()
 end
 
 --- Overlay live bag counts on plan rows so Stock/Craftable do not lag coalesce.
---- Safe Status flips (stocked / ready / seed-buffer) follow live deficit within ~1s;
---- buy/shared/plant statuses stay plan-owned until Planner.Build.
-local function PatchPlanSnapshotLiveStatus(row)
-    if type(row) ~= "table" then
-        return
-    end
-    local PS = StockPiler2.PlanSnapshot
-    local plan = PS and PS.Get and PS.Get()
-    if type(plan) ~= "table" or type(plan.rows) ~= "table" then
-        return
-    end
-    local keyStr = tostring(row.potionRecipeKey or row.id or row.potionKey or "")
-    local uid = tonumber(row.uniqueID) or 0
-    if keyStr == "" and uid <= 0 then
-        return
-    end
-    for i = 1, #plan.rows do
-        local snap = plan.rows[i]
-        if type(snap) == "table" then
-            local snapKey = tostring(snap.potionRecipeKey or snap.id or snap.potionKey or "")
-            local snapUid = tonumber(snap.uniqueID) or 0
-            local match = (keyStr ~= "" and snapKey == keyStr)
-                or (uid > 0 and snapUid == uid)
-            if match then
-                snap.potionHave = row.potionHave
-                snap.potionDeficit = row.potionDeficit
-                snap.craftable = row.craftable
-                snap.statusKey = row.statusKey
-                snap.statusText = row.statusText
-                snap.statusLines = row.statusLines
-                snap.craftableShared = row.craftableShared
-                return
-            end
-        end
-    end
-end
-
-local function ApplyLiveWatchStatus(row, recipe, deficit, have, craftable, target)
-    local key = tostring(row.statusKey or "")
-    local potionKey = row.potionRecipeKey or row.id or row.potionKey
-    local RS = StockPiler2.RecipeSpec
-
-    local function SeedBufferShort()
-        if type(recipe) ~= "table" or type(RS) ~= "table" then
-            return false
-        end
-        if not (RS.ShouldAutoGrowPotion and RS.ShouldAutoGrowPotion(potionKey, nil) == true) then
-            return false
-        end
-        if not (StockPiler2.Watch
-            and StockPiler2.Watch.IsSeedBufferEnabled
-            and StockPiler2.Watch.IsSeedBufferEnabled() == true)
-        then
-            return false
-        end
-        return RS.WatchHasSeedBufferShort and RS.WatchHasSeedBufferShort(recipe) == true
-    end
-
-    local function ApplySeedBufferStatus()
-        local buffer = StockPiler2.Watch.GetSeedBufferMin
-            and StockPiler2.Watch.GetSeedBufferMin() or 5
-        row.statusKey = "need_seeds"
-        row.statusText = T("plan.status.seed_buffer")
-        row.statusLines = {
-            T("plan.line.seed_buffer_short", { buffer = tostring(buffer) }),
-            T("plan.line.seed_buffer_grow"),
-        }
-        row.craftableShared = false
-    end
-
-    local function ApplyStockedStatus()
-        row.statusKey = "potion_stocked"
-        row.statusText = T("plan.status.potions_stocked")
-        row.statusLines = { T("plan.line.bag_at_target") }
-        row.craftableShared = false
-    end
-
-    local function ApplyReadyStatus()
-        row.statusKey = "ready_to_craft"
-        row.statusText = T("plan.status.ready_to_craft")
-        row.craftableShared = false
-        if StockPiler2.TradeSkillCaps and StockPiler2.TradeSkillCaps.CanBrewPotions
-            and StockPiler2.TradeSkillCaps.CanBrewPotions() == true
-        then
-            row.statusLines = {
-                T("plan.line.ready_open_apo"),
-                T("plan.line.ready_rarities_note"),
-            }
-        else
-            row.statusLines = {
-                T("plan.line.ready_apo_only_covered"),
-            }
-        end
-    end
-
-    -- Only flip among stocked / ready / seed-buffer; leave buy/plant/skill to plan.
-    local flippable = key == "ready_to_craft"
-        or key == "ready_to_craft_shared"
-        or key == "potion_stocked"
-        or key == "need_seeds"
-    if not flippable then
-        return
-    end
-
-    if deficit <= 0 then
-        if SeedBufferShort() then
-            if key ~= "need_seeds" then
-                ApplySeedBufferStatus()
-            end
-        elseif key ~= "potion_stocked" then
-            ApplyStockedStatus()
-        end
-        return
-    end
-
-    -- Below target: stocked → ready when craftable still covers.
-    if key == "potion_stocked" and target > 0
-        and (have + (tonumber(craftable) or 0)) >= target
-    then
-        if SeedBufferShort() then
-            ApplySeedBufferStatus()
-        else
-            ApplyReadyStatus()
-        end
-    end
-end
-
+--- Safe Status flips (stocked / ready / seed-buffer / demote-on-short) follow live deficit within ~1s;
+--- buy/shared/plant tip lines stay plan-owned until Planner.Build.
+--- Implementation lives on Planner (shared with mid-refine cheap rebuild).
+--- 0.4.157: during brew session keep prior craftable (mats on apo; WarmHave Pump skipped).
 local function PatchWatchRowsLiveCounts(rows)
-    if type(rows) ~= "table" or #rows == 0 then
+    if not (StockPiler2.Planner and StockPiler2.Planner.PatchWatchRowsLiveCounts) then
         return
     end
-    local Inv = StockPiler2.Inventory
-    local RS = StockPiler2.RecipeSpec
-    if not Inv or not Inv.CountByUid then
-        return
-    end
-    for i = 1, #rows do
-        local row = rows[i]
-        if type(row) == "table" then
-            local uid = tonumber(row.uniqueID) or 0
-            if uid > 0 then
-                local have = tonumber(Inv.CountByUid(uid)) or 0
-                row.potionHave = have
-                row.stockText = towstring(tostring(have))
-                local min = tonumber(row.potionMin) or tonumber(row.target) or 0
-                local deficit = math.max(0, min - have)
-                row.potionDeficit = deficit
-                local recipe = row.recipe or row.specRecipe
-                local craftable = tonumber(row.craftable) or 0
-                if type(recipe) == "table" and RS then
-                    if RS.CraftsNeededForDeficit then
-                        row.craftsNeeded = RS.CraftsNeededForDeficit(deficit, recipe)
-                    end
-                    if RS.CountPotionsCraftable then
-                        craftable = tonumber(RS.CountPotionsCraftable(recipe)) or 0
-                        craftable = math.max(0, math.floor(craftable + 0.5))
-                        row.craftable = craftable
-                        if craftable > 0 or row.hasRecipe then
-                            row.craftableText = towstring(tostring(craftable))
-                        end
-                    end
-                end
-                local prevKey = tostring(row.statusKey or "")
-                ApplyLiveWatchStatus(row, recipe, deficit, have, craftable, min)
-                if tostring(row.statusKey or "") ~= prevKey then
-                    PatchPlanSnapshotLiveStatus(row)
-                end
-            end
-        end
+    local brewActive = StockPiler2.Orchestrator
+        and StockPiler2.Orchestrator.IsBrewSessionActive
+        and StockPiler2.Orchestrator.IsBrewSessionActive() == true
+    if brewActive then
+        StockPiler2.Planner.PatchWatchRowsLiveCounts(rows, { allowWarmHave = false })
+    else
+        StockPiler2.Planner.PatchWatchRowsLiveCounts(rows)
     end
 end
 

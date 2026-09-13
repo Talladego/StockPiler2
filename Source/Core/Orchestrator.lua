@@ -371,6 +371,20 @@ function Orch.Tick()
             end
         else
             Orch._seedBufferRefineArmed = false
+            -- Buy-only remaining / buffer full: clear sticky fill-block (0.4.163).
+            local bufferOk = StockPiler2.Grow.IsSeedBufferSatisfied
+                and StockPiler2.Grow.IsSeedBufferSatisfied() == true
+            if bufferOk then
+                if StockPiler2.Grow.ClearFillBlocked then
+                    StockPiler2.Grow.ClearFillBlocked()
+                end
+                if StockPiler2.Brew and StockPiler2.Brew.InvalidateCanBrewCache then
+                    StockPiler2.Brew.InvalidateCanBrewCache()
+                end
+                if StockPiler2Window and StockPiler2Window.RequestFooterRefresh then
+                    StockPiler2Window.RequestFooterRefresh()
+                end
+            end
             -- Empty plots but no plantable job: back off burst ticks until snap/garden/demand wake.
             if StockPiler2.Scheduler and StockPiler2.Scheduler.SetAutoGrowIdle then
                 StockPiler2.Scheduler.SetAutoGrowIdle(true)
@@ -425,12 +439,26 @@ function Orch.Tick()
                 end
             elseif canPlant and hasSeeds and holdHarvestBatch then
                 -- Ready harvest batch still open; TryPlant would no-op — do not fill-block.
-            elseif canPlant and not hasSeeds and StockPiler2.Grow and StockPiler2.Grow.SetFillBlocked then
-                StockPiler2.Grow.SetFillBlocked(true, 5)
+            elseif canPlant and not hasSeeds and StockPiler2.Grow then
+                local bufferOk = StockPiler2.Grow.IsSeedBufferSatisfied
+                    and StockPiler2.Grow.IsSeedBufferSatisfied() == true
+                if bufferOk then
+                    if StockPiler2.Grow.ClearFillBlocked then
+                        StockPiler2.Grow.ClearFillBlocked()
+                    end
+                elseif StockPiler2.Grow.SetFillBlocked then
+                    StockPiler2.Grow.SetFillBlocked(true, 5)
+                end
             end
         end
-    elseif canPlant and not hasSeeds then
-        if StockPiler2.Grow and StockPiler2.Grow.SetFillBlocked then
+    elseif canPlant and not hasSeeds and StockPiler2.Grow then
+        local bufferOk = StockPiler2.Grow.IsSeedBufferSatisfied
+            and StockPiler2.Grow.IsSeedBufferSatisfied() == true
+        if bufferOk then
+            if StockPiler2.Grow.ClearFillBlocked then
+                StockPiler2.Grow.ClearFillBlocked()
+            end
+        elseif StockPiler2.Grow.SetFillBlocked then
             StockPiler2.Grow.SetFillBlocked(true, 5)
         end
     end

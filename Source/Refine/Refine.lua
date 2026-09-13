@@ -308,6 +308,19 @@ function Refine.InvalidateIntentCache()
     Refine._lastCollectKey = nil
 end
 
+--- Return cached CollectIntents result when gens still match; never rebuild.
+--- Used by Planner seed-buffer tip (0.4.154) so PlanRebuild never pays CollectIntents.
+function Refine.PeekCachedIntents()
+    local cacheKey = IntentCacheKey()
+    local bufferOn = StockPiler2.Watch and StockPiler2.Watch.IsSeedBufferEnabled
+        and StockPiler2.Watch.IsSeedBufferEnabled() == true
+    cacheKey = cacheKey .. ":" .. (bufferOn and "1" or "0")
+    if Refine._intentCacheKey == cacheKey and type(Refine._intentCache) == "table" then
+        return Refine._intentCache
+    end
+    return nil
+end
+
 function Refine.MarkRefineDue(reason)
     Refine._refineDirty = true
     reason = tostring(reason or "")
@@ -666,6 +679,37 @@ local function GetSpecDemand()
         return nil
     end
     return RS.BuildBalancedSpecDemand()
+end
+
+--- How many plants CollectIntents may convert for seed-buffer on this line.
+--- Prefer brew surplus; when Have covers brew need but seed buffer is short,
+--- allow converting claim stock up to headroom (otherwise Plant refuses to
+--- buffer-grow while refinable remains → permanent no-job + Seed buffer tip).
+local function SeedBufferConvertibleCount(line, budget, refinable, demand, SM)
+    refinable = tonumber(refinable) or 0
+    local headroom = tonumber(budget and budget.headroom) or 0
+    if headroom <= 0 or refinable <= 0 then
+        return 0
+    end
+    local demandRow = DemandRowForBufferLine(line, demand, SM)
+    if type(demandRow) ~= "table" then
+        return math.min(headroom, refinable)
+    end
+    local brewSurplus = DemandRowSurplus(demandRow)
+    if brewSurplus > 0 then
+        return math.min(headroom, refinable, brewSurplus)
+    end
+    local deficit = tonumber(demandRow.deficit) or 0
+    if deficit <= 0 then
+        return math.min(headroom, refinable)
+    end
+    return 0
+end
+
+--- Public: Grow BufferFlags / pending must match CollectIntents convertible gate.
+function Refine.SeedBufferConvertibleCount(line, budget, refinable)
+    local demand = GetSpecDemand()
+    return SeedBufferConvertibleCount(line, budget, refinable, demand, StockPiler2.SeedMap)
 end
 
 --- Highest-stack refinable slot matching spec (resin-need prefers richest feedstock).
@@ -1309,14 +1353,13 @@ function Refine.CollectIntents()
                 else
                     local budget = Refine.GetSeedBudgetForSpec(spec, seedUid)
                     local refinable = Refine.CountRefinablePlants(plantUid, spec)
-                    -- Only convert plants above brew need; never burn feedstock into seeds.
-                    local surplus = refinable
-                    local demandRow = DemandRowForBufferLine(line, demand, SM)
-                    if type(demandRow) == "table" then
-                        surplus = DemandRowSurplus(demandRow)
-                    end
-                    if budget.headroom > 0 and refinable > 0 and surplus > 0 then
-                        local uses = math.min(budget.headroom, refinable, surplus, 5)
+                    -- Prefer brew surplus; bootstrap at exact need when buffer short
+                    -- (0.4.160 — surplus-only gate deadlocked Seed buffer tips).
+                    local convertible = SeedBufferConvertibleCount(
+                        line, budget, refinable, demand, SM
+                    )
+                    if convertible > 0 then
+                        local uses = math.min(convertible, 5)
                         AppendRefineIntent(intents, SM, line, "seed-buffer", uses, budget)
                         appendedBuffer[key] = true
                         if seedUid > 0 then
@@ -1704,8 +1747,27 @@ function Refine.TryTick(opId)
                 Grow.ClearFillBlocked()
             end
             Refine.MarkRefineDue("buffer-refine")
-        elseif Grow.SetFillBlocked then
-            Grow.SetFillBlocked(true, 5)
+        else
+            -- Buffer full + no growable plant job (buy-only shorts): clear fill-block.
+            -- Re-arming SetFillBlocked(true, 5) every idle tick never let wait decay (0.4.163).
+            local bufferOk = Grow.IsSeedBufferSatisfied
+                and Grow.IsSeedBufferSatisfied() == true
+            if bufferOk then
+                if Grow.ClearFillBlocked then
+                    Grow.ClearFillBlocked()
+                end
+                if StockPiler2.Scheduler and StockPiler2.Scheduler.SetAutoGrowIdle then
+                    StockPiler2.Scheduler.SetAutoGrowIdle(true)
+                end
+                if StockPiler2.Brew and StockPiler2.Brew.InvalidateCanBrewCache then
+                    StockPiler2.Brew.InvalidateCanBrewCache()
+                end
+                if StockPiler2Window and StockPiler2Window.RequestFooterRefresh then
+                    StockPiler2Window.RequestFooterRefresh()
+                end
+            elseif Grow.SetFillBlocked then
+                Grow.SetFillBlocked(true, 5)
+            end
         end
     end
     if StockPiler2.Perf and StockPiler2.Perf.End then

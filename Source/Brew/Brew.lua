@@ -349,6 +349,9 @@ end
 
 --- Print once when footer Brew becomes actionable; chime only on that edge.
 --- Do not clear the once-key during op-lock / perform / load job (avoids re-chime every craft).
+--- 0.4.159: edge-only immediate footer sync; steady ready uses RequestFooterRefresh.
+--- 0.4.161: do not clear once-key on transient CanBrewNow holds (pending plant /
+--- seed-buffer / refine) while a ready watch still exists — that re-chimed every plant.
 function Brew.MaybeNotifyBrewReady()
     local function clearReady()
         if StockPiler2.Debug and StockPiler2.Debug.ClearNotifyOnce then
@@ -358,20 +361,42 @@ function Brew.MaybeNotifyBrewReady()
     -- Ready-only: never notify for a manual row Load session.
     if Brew._loadSource == "manual" then
         clearReady()
+        Brew._brewReadyLatched = false
         return
     end
     -- Transient busy: keep once-key so leaving op-lock does not re-announce.
     if Brew.IsBusy and Brew.IsBusy() == true then
         return
     end
+    local hasReadyRow = type(Brew.PickReadyWatch and Brew.PickReadyWatch()) == "table"
     if not (Brew.CanBrewNow and Brew.CanBrewNow() == true) then
+        if hasReadyRow then
+            -- Still have a Ready watch; footer is only held (plant/buffer/refine).
+            if Brew._brewReadyLatched == true
+                and StockPiler2Window and StockPiler2Window.RequestFooterRefresh
+            then
+                StockPiler2Window.RequestFooterRefresh()
+            end
+            return
+        end
+        if Brew._brewReadyLatched == true
+            and StockPiler2Window and StockPiler2Window.RequestFooterRefresh
+        then
+            StockPiler2Window.RequestFooterRefresh()
+        end
+        Brew._brewReadyLatched = false
         clearReady()
         return
     end
-    -- Light macros/footer before chat/sound so they stay in sync (even if window closed).
-    if StockPiler2Window and StockPiler2Window.SyncActionReadiness then
-        StockPiler2Window.SyncActionReadiness({ immediate = true })
+    local wasReady = Brew._brewReadyLatched == true
+    if not wasReady then
+        if StockPiler2Window and StockPiler2Window.SyncActionReadiness then
+            StockPiler2Window.SyncActionReadiness({ immediate = true })
+        end
+    elseif StockPiler2Window and StockPiler2Window.RequestFooterRefresh then
+        StockPiler2Window.RequestFooterRefresh()
     end
+    Brew._brewReadyLatched = true
     local row = Brew.PickReadyWatch()
     if type(row) ~= "table" then
         row = FindSessionRow()
@@ -569,33 +594,63 @@ local function InventoryBackpackType()
 end
 
 local function GetInventoryBagTable()
+    local frame = tonumber(StockPiler2.FrameCounter) or 0
+    if frame > 0
+        and Brew._invBagFrame == frame
+        and type(Brew._invBagCache) == "table"
+    then
+        return Brew._invBagCache
+    end
+    local bag = nil
     if type(EA_Window_Backpack) == "table"
         and type(EA_Window_Backpack.GetItemsFromBackpack) == "function"
     then
-        local ok, bag = StockPiler2.TryCallQuiet(
+        local ok, result = StockPiler2.TryCallQuiet(
             "GetItemsFromBackpack.inv",
             EA_Window_Backpack.GetItemsFromBackpack,
             InventoryBackpackType()
         )
-        if ok and type(bag) == "table" then
-            return bag
+        if ok and type(result) == "table" then
+            bag = result
         end
     end
-    if DataUtils and type(DataUtils.GetItems) == "function" then
-        local ok, bag = StockPiler2.TryCallQuiet("DataUtils.GetItems", DataUtils.GetItems)
-        if ok and type(bag) == "table" then
-            return bag
+    if bag == nil and DataUtils and type(DataUtils.GetItems) == "function" then
+        local ok, result = StockPiler2.TryCallQuiet("DataUtils.GetItems", DataUtils.GetItems)
+        if ok and type(result) == "table" then
+            bag = result
         end
     end
-    return nil
+    if frame > 0 then
+        Brew._invBagFrame = frame
+        Brew._invBagCache = bag
+    end
+    return bag
+end
+
+local function GetCraftingBagTableCached()
+    local frame = tonumber(StockPiler2.FrameCounter) or 0
+    if frame > 0
+        and Brew._craftBagFrame == frame
+        and type(Brew._craftBagCache) == "table"
+    then
+        return Brew._craftBagCache
+    end
+    local a = AA()
+    local bag = a and a.GetCraftingBag and a.GetCraftingBag()
+    if frame > 0 then
+        Brew._craftBagFrame = frame
+        Brew._craftBagCache = bag
+    end
+    return bag
 end
 
 --- Walk craft bag first, then inventory (craft-bag overflow).
+--- 0.4.157: bag tables cached once per FrameCounter (IssueLoadStep used to re-fetch each step).
 local function EachBrewSourceSlot(fn)
     local a = AA()
     local craftType = a and a.CraftingBackpackType and a.CraftingBackpackType() or 4
     local n = 0
-    local craftBag = a and a.GetCraftingBag and a.GetCraftingBag()
+    local craftBag = GetCraftingBagTableCached()
     if type(craftBag) == "table" then
         for slot, item in pairs(craftBag) do
             if type(slot) == "number" and ItemValid(item) then
@@ -1546,6 +1601,9 @@ end
 
 function Brew.OnUpdate(timeElapsed)
     timeElapsed = tonumber(timeElapsed) or 0
+    if Brew.FlushJobTickIfDue then
+        Brew.FlushJobTickIfDue()
+    end
     if type(Brew._job) == "table" then
         Brew._updateAccum = (Brew._updateAccum or 0) + timeElapsed
         if Brew._updateAccum >= TICK_INTERVAL_SEC then
@@ -1593,11 +1651,8 @@ function Brew.OnCraftingUpdated()
     end
     if type(Brew._job) == "table" then
         Brew.ReconcileBoardIntegrity("crafting-update")
-        if type(Brew._job) == "table" then
-            if StockPiler2.BrewExecutor and StockPiler2.BrewExecutor.Tick then
-                StockPiler2.BrewExecutor.Tick()
-            end
-        end
+        -- 0.4.157: coalesce Tick to once per frame (was Brew.Tick xN per craft-slot storm).
+        Brew._jobTickDue = true
         return
     end
     Brew.ReconcileBoardIntegrity("crafting-update")
@@ -1605,6 +1660,23 @@ function Brew.OnCraftingUpdated()
         Brew.TryAdoptMatchingWatchFromBoard()
     end
     RefreshBrewUi()
+end
+
+--- Drain coalesced load Tick (call from OnUpdate / UPDATE_PROCESSED).
+function Brew.FlushJobTickIfDue()
+    if Brew._jobTickDue ~= true then
+        return false
+    end
+    Brew._jobTickDue = false
+    if type(Brew._job) ~= "table" then
+        return false
+    end
+    if StockPiler2.BrewExecutor and StockPiler2.BrewExecutor.Tick then
+        StockPiler2.BrewExecutor.Tick()
+    elseif Brew.Tick then
+        Brew.Tick()
+    end
+    return true
 end
 
 ----------------------------------------------------------------

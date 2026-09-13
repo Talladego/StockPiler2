@@ -30,47 +30,104 @@ local function RequestFooterIfOpen()
 end
 
 function Bridge.OnInventoryUpdated(updatedSlots)
+    -- 0.4.159: coalesce main-bag applies to one GetBagTable per UPDATE_PROCESSED
+    -- (mirrors craft FlushPendingCraftSlots; kills Inv.ApplySlots xN storms).
+    Bridge._pendingMainSlots = Bridge._pendingMainSlots or {}
+    Bridge._pendingMainSlotSet = Bridge._pendingMainSlotSet or {}
+    if type(updatedSlots) == "table" then
+        local n = 0
+        for _, v in ipairs(updatedSlots) do
+            local slot = tonumber(v) or 0
+            if slot > 0 and Bridge._pendingMainSlotSet[slot] ~= true then
+                Bridge._pendingMainSlotSet[slot] = true
+                Bridge._pendingMainSlots[#Bridge._pendingMainSlots + 1] = slot
+                n = n + 1
+            end
+        end
+        if n == 0 then
+            for k, v in pairs(updatedSlots) do
+                local slot = tonumber(k)
+                if slot == nil or slot <= 0 then
+                    slot = tonumber(v) or 0
+                end
+                if slot > 0 and Bridge._pendingMainSlotSet[slot] ~= true then
+                    Bridge._pendingMainSlotSet[slot] = true
+                    Bridge._pendingMainSlots[#Bridge._pendingMainSlots + 1] = slot
+                end
+            end
+        end
+    end
+    Bridge._pendingMainApply = true
+    Bridge._pendingMainLearn = true
+end
+
+--- Apply coalesced main-bag slots once per frame (single GetBagTable).
+function Bridge.FlushPendingMainSlots()
+    if Bridge._pendingMainApply ~= true then
+        return false
+    end
+    Bridge._pendingMainApply = false
+    local slots = Bridge._pendingMainSlots
+    Bridge._pendingMainSlots = {}
+    Bridge._pendingMainSlotSet = {}
+    local learn = Bridge._pendingMainLearn == true
+    Bridge._pendingMainLearn = false
     local Perf = StockPiler2.Perf
     if Perf and Perf.Begin then
         Perf.Begin("Inv.ApplySlots")
     end
-    if StockPiler2.LearnBridge and StockPiler2.LearnBridge.OnInventoryUpdated then
+    if learn and StockPiler2.LearnBridge and StockPiler2.LearnBridge.OnInventoryUpdated then
         StockPiler2.LearnBridge.OnInventoryUpdated()
     end
-    if StockPiler2.Inventory and StockPiler2.Inventory.ApplySlotUpdates then
-        StockPiler2.Inventory.ApplySlotUpdates("main", updatedSlots, "engine-inventory")
-    else
-        StockPiler2.Inventory.MarkDirty({ reason = "engine-inventory", full = true })
+    if type(slots) == "table" and #slots > 0 then
+        if StockPiler2.Inventory and StockPiler2.Inventory.ApplySlotUpdates then
+            StockPiler2.Inventory.ApplySlotUpdates("main", slots, "engine-inventory")
+        else
+            StockPiler2.Inventory.MarkDirty({ reason = "engine-inventory", full = true })
+        end
     end
     if Perf and Perf.End then
         Perf.End("Inv.ApplySlots")
     end
+    return true
 end
 
 function Bridge.OnCraftingSlotUpdated(updatedSlots)
-    local Perf = StockPiler2.Perf
-    if Perf and Perf.Begin then
-        Perf.Begin("Inv.ApplySlots")
+    -- 0.4.156: coalesce craft-slot applies to one GetBagTable per UPDATE_PROCESSED.
+    Bridge._pendingCraftSlots = Bridge._pendingCraftSlots or {}
+    Bridge._pendingCraftSlotSet = Bridge._pendingCraftSlotSet or {}
+    if type(updatedSlots) == "table" then
+        local n = 0
+        for _, v in ipairs(updatedSlots) do
+            local slot = tonumber(v) or 0
+            if slot > 0 and Bridge._pendingCraftSlotSet[slot] ~= true then
+                Bridge._pendingCraftSlotSet[slot] = true
+                Bridge._pendingCraftSlots[#Bridge._pendingCraftSlots + 1] = slot
+                n = n + 1
+            end
+        end
+        if n == 0 then
+            for k, v in pairs(updatedSlots) do
+                local slot = tonumber(k)
+                if slot == nil or slot <= 0 then
+                    slot = tonumber(v) or 0
+                end
+                if slot > 0 and Bridge._pendingCraftSlotSet[slot] ~= true then
+                    Bridge._pendingCraftSlotSet[slot] = true
+                    Bridge._pendingCraftSlots[#Bridge._pendingCraftSlots + 1] = slot
+                end
+            end
+        end
     end
-    if StockPiler2.LearnBridge and StockPiler2.LearnBridge.OnInventoryUpdated then
-        StockPiler2.LearnBridge.OnInventoryUpdated()
-    end
-    if StockPiler2.Inventory and StockPiler2.Inventory.ApplySlotUpdates then
-        StockPiler2.Inventory.ApplySlotUpdates("craft", updatedSlots, "engine-crafting-slot")
-    else
-        StockPiler2.Inventory.MarkDirty({ reason = "engine-crafting-slot", full = true })
-    end
-    if Perf and Perf.End then
-        Perf.End("Inv.ApplySlots")
-    end
+    Bridge._pendingCraftApply = true
+    Bridge._pendingCraftLearn = true
     -- Perf: Brew job active → always pass through (ReconcileBoardIntegrity + Tick).
     -- Idle craft-bag rearrange must NOT MarkBrewUiDue (was BrewUi+WatchRows on every
     -- slot shuffle). Apo/crafting state still arms BrewUi via OnCraftingUpdated.
-    -- Do not call OnCraftingUpdated synchronously per craft-slot during loot storms.
     local Brew = StockPiler2.Brew
     local jobActive = Brew and type(Brew._job) == "table"
-    if jobActive and Brew.OnCraftingUpdated then
-        Brew.OnCraftingUpdated()
+    if jobActive then
+        Bridge._pendingCraftBrewUpdate = true
     end
     if StockPiler2.Grow and StockPiler2.Grow.NeedsCurrentStageAdditive
         and StockPiler2.Grow.NeedsCurrentStageAdditive()
@@ -81,6 +138,45 @@ function Bridge.OnCraftingSlotUpdated(updatedSlots)
             StockPiler2.Scheduler.WakeAutoGrow()
         end
     end
+end
+
+--- Apply coalesced craft slots once per frame (single GetBagTable).
+function Bridge.FlushPendingCraftSlots()
+    if Bridge._pendingCraftApply ~= true then
+        return false
+    end
+    Bridge._pendingCraftApply = false
+    local slots = Bridge._pendingCraftSlots
+    Bridge._pendingCraftSlots = {}
+    Bridge._pendingCraftSlotSet = {}
+    local learn = Bridge._pendingCraftLearn == true
+    Bridge._pendingCraftLearn = false
+    local brewUpdate = Bridge._pendingCraftBrewUpdate == true
+    Bridge._pendingCraftBrewUpdate = false
+    local Perf = StockPiler2.Perf
+    if Perf and Perf.Begin then
+        Perf.Begin("Inv.ApplySlots")
+    end
+    if learn and StockPiler2.LearnBridge and StockPiler2.LearnBridge.OnInventoryUpdated then
+        StockPiler2.LearnBridge.OnInventoryUpdated()
+    end
+    if type(slots) == "table" and #slots > 0 then
+        if StockPiler2.Inventory and StockPiler2.Inventory.ApplySlotUpdates then
+            StockPiler2.Inventory.ApplySlotUpdates("craft", slots, "engine-crafting-slot")
+        else
+            StockPiler2.Inventory.MarkDirty({ reason = "engine-crafting-slot", full = true })
+        end
+    end
+    if Perf and Perf.End then
+        Perf.End("Inv.ApplySlots")
+    end
+    if brewUpdate then
+        local Brew = StockPiler2.Brew
+        if Brew and Brew.OnCraftingUpdated then
+            Brew.OnCraftingUpdated()
+        end
+    end
+    return true
 end
 
 function Bridge.OnCraftingUpdated()
@@ -249,6 +345,14 @@ function Bridge.OnUpdateProcessed(timeElapsed)
     -- SyncAll does not call Grow — confirm pending plants after coalesced flush.
     if StockPiler2.Grow and StockPiler2.Grow.OnCultivationUpdated then
         StockPiler2.Grow.OnCultivationUpdated(0)
+    end
+    -- One main-bag ApplySlots for all PLAYER_INVENTORY_SLOT_UPDATED this frame.
+    if Bridge.FlushPendingMainSlots then
+        Bridge.FlushPendingMainSlots()
+    end
+    -- One craft-bag ApplySlots for all PLAYER_CRAFTING_SLOT_UPDATED this frame.
+    if Bridge.FlushPendingCraftSlots then
+        Bridge.FlushPendingCraftSlots()
     end
     -- Publish one snapGen for all L0 AdjustUid this frame before refine/plan.
     if StockPiler2.Inventory and StockPiler2.Inventory.FlushPendingSnapGen then

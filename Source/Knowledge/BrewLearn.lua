@@ -541,21 +541,62 @@ function StockPiler2.BrewLearn.CaptureApothecaryMaterials()
     then
         return BL._apoCaptureSlots
     end
+    -- 0.4.157: skip heavy capture while a load job is issuing adds (board is mid-build).
+    local Brew = StockPiler2.Brew
+    if Brew and type(Brew._job) == "table" then
+        local phase = tostring(Brew._job.phase or "")
+        if phase == "reset" or phase == "open" or phase == "clear" or phase == "load" then
+            return BL._apoCaptureSlots
+        end
+    end
     local Perf = StockPiler2.Perf
     if Perf and Perf.Begin then
         Perf.Begin("ApoCapture")
+    end
+    local bagByType = {}
+    local function BagFor(bp)
+        bp = tonumber(bp) or 0
+        if bp <= 0 then
+            return nil
+        end
+        if bagByType[bp] ~= nil then
+            return bagByType[bp]
+        end
+        local bag = nil
+        if type(EA_Window_Backpack) == "table"
+            and type(EA_Window_Backpack.GetItemsFromBackpack) == "function"
+        then
+            bag = EA_Window_Backpack.GetItemsFromBackpack(bp)
+        end
+        bagByType[bp] = bag
+        return bag
+    end
+    local prevBySlot = {}
+    if type(BL._apoCaptureSlots) == "table" then
+        for i = 1, #BL._apoCaptureSlots do
+            local ps = BL._apoCaptureSlots[i]
+            if type(ps) == "table" then
+                prevBySlot[tonumber(ps.slot) or -1] = ps
+            end
+        end
     end
     local slots = {}
     for slotNum = 0, 4 do
         local cd = ApothecaryWindow.craftingData[slotNum]
         if type(cd) == "table" and tonumber(cd.objectId) and tonumber(cd.objectId) > 0 then
+            local uid = tonumber(cd.objectId) or 0
+            local prev = prevBySlot[slotNum]
             local itemData = nil
-            if type(EA_Window_Backpack) == "table"
-                and type(EA_Window_Backpack.GetItemsFromBackpack) == "function"
+            local reusePrev = type(prev) == "table"
+                and (tonumber(prev.uniqueID) or 0) == uid
+                and type(prev.itemData) == "table"
+            if reusePrev then
+                itemData = prev.itemData
+            elseif type(EA_Window_Backpack) == "table"
                 and cd.sourceBackpack
                 and cd.sourceSlot
             then
-                local bag = EA_Window_Backpack.GetItemsFromBackpack(cd.sourceBackpack)
+                local bag = BagFor(cd.sourceBackpack)
                 if type(bag) == "table" then
                     itemData = bag[cd.sourceSlot]
                 end
@@ -563,7 +604,7 @@ function StockPiler2.BrewLearn.CaptureApothecaryMaterials()
             local resourceType = 0
             local skillReq = 0
             local matKind = nil
-            if type(itemData) == "table" then
+            if type(itemData) == "table" and not reusePrev then
                 if CraftingSystem and type(CraftingSystem.GetCraftingData) == "function" then
                     local ok, _, rt = StockPiler2.TryCallQuiet("CraftingSystem.GetCraftingData", CraftingSystem.GetCraftingData, itemData)
                     if ok then
@@ -573,12 +614,23 @@ function StockPiler2.BrewLearn.CaptureApothecaryMaterials()
                 local _, _, req, kind = ClassifyMat(itemData)
                 skillReq = tonumber(req) or 0
                 matKind = kind
+            elseif reusePrev then
+                resourceType = tonumber(prev.resourceType) or 0
+                skillReq = tonumber(prev.craftingSkillRequirement) or 0
+                matKind = prev.matKind
             end
             local role = MatResourceRole(resourceType, slotNum)
-            local uid = tonumber(cd.objectId) or 0
             local stability = 0
-            if type(itemData) == "table" then
+            if reusePrev then
+                stability = tonumber(prev.stability) or 0
+            elseif type(itemData) == "table" then
                 stability = BL.GetItemStability(itemData)
+            end
+            local copied = nil
+            if reusePrev then
+                copied = prev.itemData
+            else
+                copied = CopyItemData(itemData)
             end
             slots[#slots + 1] = {
                 slot = slotNum,
@@ -588,12 +640,19 @@ function StockPiler2.BrewLearn.CaptureApothecaryMaterials()
                 matKind = matKind,
                 craftingSkillRequirement = skillReq,
                 stability = stability,
-                name = (type(itemData) == "table" and itemData.name) or nil,
-                nameNarrow = (type(itemData) == "table" and ToNarrow(itemData.name)) or "",
-                iconNum = tonumber(cd.iconId) or (type(itemData) == "table" and tonumber(itemData.iconNum)) or 0,
-                itemData = CopyItemData(itemData),
+                name = (type(itemData) == "table" and itemData.name)
+                    or (reusePrev and prev.name)
+                    or nil,
+                nameNarrow = (type(itemData) == "table" and ToNarrow(itemData.name))
+                    or (reusePrev and prev.nameNarrow)
+                    or "",
+                iconNum = tonumber(cd.iconId)
+                    or (type(itemData) == "table" and tonumber(itemData.iconNum))
+                    or (reusePrev and tonumber(prev.iconNum))
+                    or 0,
+                itemData = copied,
             }
-            if itemData and BL.LearnFromItemData then
+            if itemData and not reusePrev and BL.LearnFromItemData then
                 BL.LearnFromItemData(itemData, "craft-slot")
             end
         end

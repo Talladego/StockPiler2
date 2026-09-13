@@ -844,6 +844,7 @@ function StockPiler2.SeedMap.CachedPlantUidForSpec(spec)
         return 0
     end
 
+    --- Fingerprint match only — callers still gate grow vs butcher.
     local function uidMatches(uid)
         uid = tonumber(uid) or 0
         if uid <= 0 then
@@ -865,14 +866,35 @@ function StockPiler2.SeedMap.CachedPlantUidForSpec(spec)
         return false
     end
 
+    --- Grow plant uid: never return butcher substitutes (Bear Tooth vs Beardweed).
+    local function asGrowPlant(uid)
+        uid = tonumber(uid) or 0
+        if uid <= 0 or not uidMatches(uid) then
+            return 0
+        end
+        local asItem = (StockPiler2.Items and StockPiler2.Items.AsItemData and StockPiler2.Items.AsItemData(uid))
+            or Private.LookupItemData(uid)
+        if type(asItem) ~= "table" then
+            return 0
+        end
+        local nameNarrow = asItem.nameNarrow or Private.ToNarrow(asItem.name)
+        if nameNarrow ~= "" and Private.LooksButchering(nameNarrow) then
+            return 0
+        end
+        if Private.IsCultivationLinkedProducer(asItem) or Private.IsGrowProducerItemForSpec(asItem) then
+            return uid
+        end
+        return 0
+    end
+
     local grows = Private.AccountTable("grows")
     for seedKey, plants in pairs(grows) do
         if type(plants) == "table" then
             local seedUid = tonumber(seedKey) or 0
             for plantUidKey, row in pairs(plants) do
-                if type(row) == "table" and uidMatches(plantUidKey) then
-                    local plantUid = tonumber(plantUidKey) or 0
-                    if seedUid > 0 and Private.HarvestPairAllowed(seedUid, plantUid, {}) then
+                if type(row) == "table" then
+                    local plantUid = asGrowPlant(plantUidKey)
+                    if plantUid > 0 and seedUid > 0 and Private.HarvestPairAllowed(seedUid, plantUid, {}) then
                         return plantUid
                     end
                 end
@@ -883,13 +905,15 @@ function StockPiler2.SeedMap.CachedPlantUidForSpec(spec)
     local items = Private.AccountTable("items")
     for uidKey, row in pairs(items) do
         if type(row) == "table" and row.kind ~= "seed" and row.kind ~= "spore" and row.kind ~= "resin" then
-            local uid = tonumber(row.uniqueID) or tonumber(uidKey) or 0
-            if uidMatches(uid) then
+            local uid = asGrowPlant(tonumber(row.uniqueID) or tonumber(uidKey) or 0)
+            if uid > 0 then
                 local asItem = (StockPiler2.Items and StockPiler2.Items.AsItemData and StockPiler2.Items.AsItemData(uid))
                     or Private.LookupItemData(uid)
                     or row
                 -- Prefer cultivatable plants; butcher substitutes are not grow producers.
-                if Private.IsCultivatablePlantItem(asItem) then
+                if Private.IsCultivatablePlantItem(asItem)
+                    or Private.IsCultivationLinkedProducer(asItem)
+                then
                     return uid
                 end
             end
@@ -898,18 +922,26 @@ function StockPiler2.SeedMap.CachedPlantUidForSpec(spec)
 
     local refines = Private.AccountTable("refines")
     for plantKeyUid, entry in pairs(refines) do
-        if type(entry) == "table" and (tonumber(entry.seedUid) or 0) > 0 and uidMatches(plantKeyUid) then
-            return tonumber(plantKeyUid) or 0
+        if type(entry) == "table" and (tonumber(entry.seedUid) or 0) > 0 then
+            local uid = asGrowPlant(plantKeyUid)
+            if uid > 0 then
+                return uid
+            end
         end
     end
 
+    -- Recipe slots may hold butcher substitutes with the same ProductKey — never use those
+    -- as the grow plant uid (Strength main Bear Tooth must not displace Elder Beardweed).
     local recipes = Private.AccountTable("recipes")
     for _, recipe in pairs(recipes) do
         if type(recipe) == "table" and type(recipe.slots) == "table" then
             for i = 1, #recipe.slots do
                 local slot = recipe.slots[i]
-                if type(slot) == "table" and uidMatches(slot.uid) then
-                    return tonumber(slot.uid) or 0
+                if type(slot) == "table" then
+                    local uid = asGrowPlant(slot.uid)
+                    if uid > 0 then
+                        return uid
+                    end
                 end
             end
         end
@@ -1146,16 +1178,31 @@ function Private.SpecLooksButchering(spec)
         return false
     end
     local MS = StockPiler2.MaterialSpec
-    if not MS.ProductMatches then
-        return false
-    end
+    local targetKey = (MS.ProductKey and MS.ProductKey(spec)) or (MS.Key and MS.Key(spec)) or ""
     local sawButcher = false
     local sawGrowPlant = false
     local recipeButcher = false
     local recipeGrow = false
 
-    local function consider(item, fromRecipe)
-        if type(item) ~= "table" or MS.ProductMatches(item, spec) ~= true then
+    --- Items.AsItemData has craftingBonus=nil so ProductMatches alone misses learned plants
+    --- (Elder Beardweed) while bag butcher substitutes (Bear Tooth) still match live bonuses.
+    local function fingerprintMatches(item, uid)
+        uid = tonumber(uid) or (type(item) == "table" and tonumber(item.uniqueID)) or 0
+        if type(item) == "table" and MS.ProductMatches and MS.ProductMatches(item, spec) == true then
+            return true
+        end
+        if uid > 0 and targetKey ~= "" and StockPiler2.Items and StockPiler2.Items.ToSpec then
+            local itemSpec = StockPiler2.Items.ToSpec(uid)
+            if type(itemSpec) == "table" then
+                local itemKey = (MS.ProductKey and MS.ProductKey(itemSpec)) or (MS.Key and MS.Key(itemSpec)) or ""
+                return itemKey ~= "" and itemKey == targetKey
+            end
+        end
+        return false
+    end
+
+    local function consider(item, fromRecipe, uid)
+        if type(item) ~= "table" or not fingerprintMatches(item, uid) then
             return
         end
         local nameNarrow = item.nameNarrow or Private.ToNarrow(item.name)
@@ -1176,7 +1223,7 @@ function Private.SpecLooksButchering(spec)
 
     if StockPiler2.Inventory and StockPiler2.Inventory.ForEachItem then
         StockPiler2.Inventory.ForEachItem(function(item)
-            consider(item, false)
+            consider(item, false, item and item.uniqueID)
         end)
     end
 
@@ -1187,12 +1234,11 @@ function Private.SpecLooksButchering(spec)
             local asItem = (StockPiler2.Items and StockPiler2.Items.AsItemData and StockPiler2.Items.AsItemData(uid))
                 or Private.LookupItemData(uid)
                 or row
-            consider(asItem, false)
+            consider(asItem, false, uid)
         end
     end
 
     local recipes = Private.AccountTable("recipes")
-    local targetKey = (MS.ProductKey and MS.ProductKey(spec)) or (MS.Key and MS.Key(spec)) or ""
     for _, recipe in pairs(recipes) do
         if type(recipe) == "table" and type(recipe.slots) == "table" then
             for i = 1, #recipe.slots do
@@ -1213,17 +1259,24 @@ function Private.SpecLooksButchering(spec)
                             if nameNarrow ~= "" and Private.LooksButchering(nameNarrow) then
                                 sawButcher = true
                                 recipeButcher = true
-                            elseif Private.IsGrowProducerItemForSpec(asItem) then
+                            elseif Private.IsGrowProducerItemForSpec(asItem)
+                                or Private.IsCultivationLinkedProducer(asItem)
+                            then
                                 sawGrowPlant = true
                                 recipeGrow = true
                             end
                         else
-                            consider(asItem, true)
+                            consider(asItem, true, uid)
                         end
                     end
                 end
             end
         end
+    end
+
+    -- Cultivation linkage (grows/refines/bag seeds) wins over butcher substitutes in bags/recipe.
+    if Private.SpecLinkedToGrowOrRefine(spec) then
+        return false
     end
 
     if recipeButcher and not recipeGrow then
@@ -1389,11 +1442,17 @@ function StockPiler2.SeedMap.IsGrowableSpec(spec)
     end
     local role = spec.role or ""
     local result = false
+    -- SpecLinked is authoritative. SpecLooksButchering must not veto when grows/seeds exist:
+    -- brewing Strength with Bear Tooth while Beardweed plants are depleted used to flip
+    -- growable=false (AsItemData has no craftingBonus; bag butcher still ProductMatches).
     if role ~= "container"
         and not (StockPiler2.SeedMap.IsHarvestByproduct and StockPiler2.SeedMap.IsHarvestByproduct(spec))
-        and not Private.SpecLooksButchering(spec)
     then
-        result = Private.SpecLinkedToGrowOrRefine(spec) == true
+        if Private.SpecLinkedToGrowOrRefine(spec) == true then
+            result = true
+        elseif Private.SpecLooksButchering(spec) then
+            result = false
+        end
     end
     Private.PlanCacheSet("growable", cacheKey, result)
     return result

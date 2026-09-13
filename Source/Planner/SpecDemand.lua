@@ -164,6 +164,12 @@ function SpecDemand.CollectAutoGrowSeedLines()
     return lines
 end
 
+--- True when CollectAutoGrowSeedLines cache matches current structural key.
+function SpecDemand.IsSeedLinesCacheWarm()
+    local cacheKey = AutoGrowSeedLinesCacheKey()
+    return HC._autoGrowSeedLinesKey == cacheKey and type(HC._autoGrowSeedLines) == "table"
+end
+
 -- AutoGrow watches still below target, with the largest bottle gap
 -- (Target - Stock - Craftable). Plot assignment prefers these recipes so a
 -- zero-craftable watch is not starved by another watch's shared plants.
@@ -748,6 +754,7 @@ end
 
 Planner.BuildBalancedSpecDemand = SpecDemand.BuildBalancedSpecDemand
 Planner.CollectAutoGrowSeedLines = SpecDemand.CollectAutoGrowSeedLines
+Planner.IsSeedLinesCacheWarm = SpecDemand.IsSeedLinesCacheWarm
 Planner.CollectAutoGrowFocus = SpecDemand.CollectAutoGrowFocus
 Planner.CollectAutoBuyFocus = SpecDemand.CollectAutoBuyFocus
 Planner.FocusSpecKeys = SpecDemand.FocusSpecKeys

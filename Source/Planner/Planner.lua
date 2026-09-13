@@ -499,6 +499,9 @@ function Planner.BuildRecipeSlotTooltipEntries(recipe, craftsNeeded, specDemand)
     if type(recipe) ~= "table" then
         return entries
     end
+    if StockPiler2.Perf and StockPiler2.Perf.Mark then
+        StockPiler2.Perf.Mark("Tips.Slots")
+    end
     craftsNeeded = tonumber(craftsNeeded) or 0
     local slots = recipe.slots or {}
     for i = 1, #slots do
@@ -1090,8 +1093,11 @@ local function SeedBufferTipSpecLabel(spec)
 end
 
 --- Snapshot-only payload for the Watch seed-buffer tooltip.
---- Heavy seed-line / refine intent collection belongs to Planner.Build, never hover.
-local function BuildSeedBufferTipData()
+--- Heavy CollectIntents belongs to Orchestrator/Refine — never call it from Planner.Build.
+--- opts.previous: prior tip to keep intents when PeekCachedIntents misses.
+local function BuildSeedBufferTipData(opts)
+    opts = type(opts) == "table" and opts or {}
+    local previous = type(opts.previous) == "table" and opts.previous or nil
     local RS = StockPiler2.RecipeSpec
     local Refine = StockPiler2.Refine
     local buffer = StockPiler2.Watch and StockPiler2.Watch.GetSeedBufferMin
@@ -1145,38 +1151,51 @@ local function BuildSeedBufferTipData()
     end)
 
     local intentsByKey = {}
-    if Refine and Refine.CollectIntents then
-        local intents = Refine.CollectIntents() or {}
-        for i = 1, #intents do
-            local it = intents[i]
-            local spec = it and it.spec
-            if type(spec) == "table" then
-                local seedUid = tonumber(it.seedUid) or 0
-                local key = tostring((StockPiler2.MaterialSpec
-                    and StockPiler2.MaterialSpec.ProductKey
-                    and StockPiler2.MaterialSpec.ProductKey(spec)) or seedUid or i)
-                local rec = intentsByKey[key]
-                if rec == nil then
-                    rec = {
-                        key = key,
-                        name = SeedBufferTipSpecLabel(spec),
-                        spec = spec,
-                        count = 0,
-                        plantNeed = 0,
-                        seedBuffer = 0,
-                        resinNeed = 0,
-                    }
-                    intentsByKey[key] = rec
-                end
-                local uses = math.max(1, tonumber(it.uses) or 1)
-                rec.count = rec.count + uses
-                if it.reason == "plant-need" then
-                    rec.plantNeed = rec.plantNeed + uses
-                elseif it.reason == "resin-need" then
-                    rec.resinNeed = rec.resinNeed + uses
-                else
-                    rec.seedBuffer = rec.seedBuffer + uses
-                end
+    local intents = nil
+    if Refine and Refine.PeekCachedIntents then
+        intents = Refine.PeekCachedIntents()
+    end
+    if type(intents) ~= "table" then
+        -- Cache miss: keep prior tip intents (0.4.154). Do not CollectIntents here.
+        if previous ~= nil and type(previous.intents) == "table" then
+            return {
+                buffer = tonumber(buffer) or 5,
+                enabled = enabled,
+                watched = rows,
+                intents = previous.intents,
+            }
+        end
+        intents = {}
+    end
+    for i = 1, #intents do
+        local it = intents[i]
+        local spec = it and it.spec
+        if type(spec) == "table" then
+            local seedUid = tonumber(it.seedUid) or 0
+            local key = tostring((StockPiler2.MaterialSpec
+                and StockPiler2.MaterialSpec.ProductKey
+                and StockPiler2.MaterialSpec.ProductKey(spec)) or seedUid or i)
+            local rec = intentsByKey[key]
+            if rec == nil then
+                rec = {
+                    key = key,
+                    name = SeedBufferTipSpecLabel(spec),
+                    spec = spec,
+                    count = 0,
+                    plantNeed = 0,
+                    seedBuffer = 0,
+                    resinNeed = 0,
+                }
+                intentsByKey[key] = rec
+            end
+            local uses = math.max(1, tonumber(it.uses) or 1)
+            rec.count = rec.count + uses
+            if it.reason == "plant-need" then
+                rec.plantNeed = rec.plantNeed + uses
+            elseif it.reason == "resin-need" then
+                rec.resinNeed = rec.resinNeed + uses
+            else
+                rec.seedBuffer = rec.seedBuffer + uses
             end
         end
     end
@@ -1200,7 +1219,10 @@ local function BuildSeedBufferTipData()
     }
 end
 
-function Planner.BuildWatchRows(ctx)
+function Planner.BuildWatchRows(ctx, opts)
+    opts = type(opts) == "table" and opts or {}
+    local deferTips = opts.deferTips == true
+    local deferCraftable = opts.deferCraftable == true
     local rows = {}
     local RS = StockPiler2.RecipeSpec
     local Perf = StockPiler2.Perf
@@ -1214,6 +1236,20 @@ function Planner.BuildWatchRows(ctx)
         demand = SpecDemand.BuildBalancedSpecDemand()
         if Perf and Perf.End then
             Perf.End("Build.Demand")
+        end
+    end
+    local prevPlan = StockPiler2.PlanSnapshot and StockPiler2.PlanSnapshot.Get
+        and StockPiler2.PlanSnapshot.Get()
+    local prevByKey = {}
+    if deferCraftable and type(prevPlan) == "table" and type(prevPlan.rows) == "table" then
+        for i = 1, #prevPlan.rows do
+            local pr = prevPlan.rows[i]
+            if type(pr) == "table" then
+                local k = tostring(pr.potionRecipeKey or pr.id or pr.potionKey or "")
+                if k ~= "" then
+                    prevByKey[k] = pr
+                end
+            end
         end
     end
     if Perf and Perf.Begin then
@@ -1243,25 +1279,130 @@ function Planner.BuildWatchRows(ctx)
             hasRecipe = type(recipe) == "table",
         }
         ApplySpecPlanStatus(row, target, recipe, demand)
-        local craftable = 0
-        local craftsPossible = 0
-        if recipe and RS.CountPotionsCraftable then
-            craftable = RS.CountPotionsCraftable(recipe) or 0
-            craftable = math.max(0, math.floor((tonumber(craftable) or 0) + 0.5))
-            if RS.CountCraftsPossible then
+        if deferCraftable then
+            -- Seed from prior plan so UI stays sane until sliced CountCraftsPossible.
+            local prev = prevByKey[tostring(target.potionKey or "")]
+            local craftable = 0
+            local craftsPossible = 0
+            if type(prev) == "table" then
+                craftable = tonumber(prev.craftable) or 0
+                craftsPossible = tonumber(prev.craftsPossible) or 0
+            end
+            row.craftable = craftable
+            row.craftsPossible = craftsPossible
+            row.craftableShared = false
+            row.craftableText = craftable > 0 and towstring(tostring(craftable))
+                or (recipe and L"0" or L"-")
+            row._craftableDeferred = true
+        else
+            local craftable = 0
+            local craftsPossible = 0
+            if recipe and RS.CountCraftsPossible then
+                if Perf and Perf.Mark then
+                    Perf.Mark("Status.Craftable")
+                end
                 craftsPossible = math.max(0, math.floor((tonumber(RS.CountCraftsPossible(recipe)) or 0) + 0.5))
+                local yield = 1
+                if RS.RecipeOutputYield then
+                    yield = tonumber(RS.RecipeOutputYield(recipe)) or 1
+                    if yield < 1 then
+                        yield = 1
+                    end
+                end
+                craftable = math.max(0, math.floor((craftsPossible * yield) + 0.5))
+            end
+            row.craftable = craftable
+            row.craftsPossible = craftsPossible
+            row.craftableShared = false
+            row.craftableText = craftable > 0 and towstring(tostring(craftable)) or (recipe and L"0" or L"-")
+            local snapGen = tonumber(ctx.snapGen) or 0
+            if snapGen > 0 then
+                row._craftableSnapGen = snapGen
             end
         end
-        row.craftable = craftable
-        row.craftsPossible = craftsPossible
-        row.craftableShared = false
-        row.craftableText = craftable > 0 and towstring(tostring(craftable)) or (recipe and L"0" or L"-")
         if type(recipe) == "table" and RS.HydrateRecipeSlots then
             RS.HydrateRecipeSlots(recipe)
         end
         rows[#rows + 1] = row
     end
-    -- Contested shared mats among deficit watches only (stocked leftover craftable ignored).
+    if not deferCraftable then
+        Planner.PolishWatchRowsStatus(rows)
+    end
+    if Perf and Perf.End then
+        Perf.End("Build.Status")
+    end
+    if not deferTips then
+        if Perf and Perf.Begin then
+            Perf.Begin("Build.Tips")
+        end
+        Planner.FillWatchRowsTips(rows, demand)
+        if Perf and Perf.End then
+            Perf.End("Build.Tips")
+        end
+    end
+    local seedBufferTipData = BuildSeedBufferTipData({
+        previous = type(prevPlan) == "table" and prevPlan.seedBufferTipData or nil,
+    })
+    if not deferCraftable then
+        if Perf and Perf.Begin then
+            Perf.Begin("Build.Notify")
+        end
+        NotifyWatchRedBlocks(rows)
+        NotifyAllWatchesReady(rows)
+        NotifyAutoGrowIdleBlocked(rows)
+        if Perf and Perf.End then
+            Perf.End("Build.Notify")
+        end
+    end
+    return rows, seedBufferTipData, demand
+end
+
+--- CountCraftsPossible for one watch row (Status.Craftable Mark).
+function Planner.FillWatchRowCraftable(row, ctx)
+    if type(row) ~= "table" then
+        return
+    end
+    local RS = StockPiler2.RecipeSpec
+    local recipe = row.recipe
+    local craftable = 0
+    local craftsPossible = 0
+    if recipe and RS and RS.CountCraftsPossible then
+        if StockPiler2.Perf and StockPiler2.Perf.Mark then
+            StockPiler2.Perf.Mark("Status.Craftable")
+        end
+        craftsPossible = math.max(0, math.floor((tonumber(RS.CountCraftsPossible(recipe)) or 0) + 0.5))
+        local yield = 1
+        if RS.RecipeOutputYield then
+            yield = tonumber(RS.RecipeOutputYield(recipe)) or 1
+            if yield < 1 then
+                yield = 1
+            end
+        end
+        craftable = math.max(0, math.floor((craftsPossible * yield) + 0.5))
+    end
+    row.craftable = craftable
+    row.craftsPossible = craftsPossible
+    row.craftableShared = false
+    row.craftableText = craftable > 0 and towstring(tostring(craftable))
+        or (recipe and L"0" or L"-")
+    local snapGen = 0
+    if type(ctx) == "table" then
+        snapGen = tonumber(ctx.snapGen) or 0
+    elseif StockPiler2.Inventory and StockPiler2.Inventory.GetSnapGen then
+        snapGen = tonumber(StockPiler2.Inventory.GetSnapGen()) or 0
+    end
+    if snapGen > 0 then
+        row._craftableSnapGen = snapGen
+    end
+    row._craftableDeferred = nil
+end
+
+--- Contested shared polish after all craftable counts are known.
+function Planner.PolishWatchRowsStatus(rows)
+    if type(rows) ~= "table" then
+        return
+    end
+    local RS = StockPiler2.RecipeSpec
     if RS and RS.ApplyDeficitCraftableShared then
         RS.ApplyDeficitCraftableShared(rows)
     else
@@ -1270,21 +1411,12 @@ function Planner.BuildWatchRows(ctx)
             rows[i].contestedSpecKeys = nil
         end
     end
-    if Perf and Perf.End then
-        Perf.End("Build.Status")
-    end
-    local Grow = StockPiler2.Grow
-    if Perf and Perf.Begin then
-        Perf.Begin("Build.Tips")
-    end
     for i = 1, #rows do
         local row = rows[i]
         if (tonumber(row.craftable) or 0) > 0 or row.hasRecipe then
             row.craftableText = towstring(tostring(row.craftable or 0))
         end
         if row.statusKey == "ready_to_craft" and row.craftableShared == true then
-            -- Red Buy* only when contest is entirely non-growable (flasks / vendor mats).
-            -- Any growable plant or seed-buffer contest → yellow Shared (AutoGrow still works).
             local buy = ContestedBuyOnlyInfo(row)
             if buy ~= nil then
                 row.statusKey = "buy_ingredients"
@@ -1335,52 +1467,53 @@ function Planner.BuildWatchRows(ctx)
         end
         ApplyNeedApothecaryStatus(row)
         ApplyNeedSkillStatus(row)
+    end
+end
 
-        -- Tip-ready full slot entries (stocked + short) so Status hover never rebuilds.
-        local craftsNeeded = tonumber(row.craftsNeeded) or 0
-        local recipe = row.recipe
-        local recipeSlots = type(recipe) == "table" and recipe.slots or nil
-        if type(recipe) == "table" then
-            local tipSlots = {}
-            if type(recipeSlots) == "table" and #recipeSlots > 0 then
-                tipSlots = row.statusTipSlots
-                if type(tipSlots) ~= "table" or #tipSlots == 0 then
-                    tipSlots = Planner.BuildRecipeSlotTooltipEntries(recipe, craftsNeeded, demand)
-                end
-                if Grow and Grow.GrowingNotesForSpec then
-                    for s = 1, #tipSlots do
-                        local entry = tipSlots[s]
-                        if type(entry) == "table"
-                            and entry.kind == "plant"
-                            and (entry.stocked ~= true)
-                            and ((tonumber(entry.deficit) or 0) > 0)
-                        then
-                            if entry.growingNotes == nil then
-                                entry.growingNotes = Grow.GrowingNotesForSpec(entry.spec) or L""
-                            end
+--- Fill tip-ready slot entries for one or all watch rows (Tips.Slots cost).
+function Planner.FillWatchRowTips(row, demand)
+    if type(row) ~= "table" then
+        return
+    end
+    local Grow = StockPiler2.Grow
+    local craftsNeeded = tonumber(row.craftsNeeded) or 0
+    local recipe = row.recipe
+    local recipeSlots = type(recipe) == "table" and recipe.slots or nil
+    if type(recipe) == "table" then
+        local tipSlots = {}
+        if type(recipeSlots) == "table" and #recipeSlots > 0 then
+            tipSlots = row.statusTipSlots
+            if type(tipSlots) ~= "table" or #tipSlots == 0 then
+                tipSlots = Planner.BuildRecipeSlotTooltipEntries(recipe, craftsNeeded, demand)
+            end
+            if Grow and Grow.GrowingNotesForSpec then
+                for s = 1, #tipSlots do
+                    local entry = tipSlots[s]
+                    if type(entry) == "table"
+                        and entry.kind == "plant"
+                        and (entry.stocked ~= true)
+                        and ((tonumber(entry.deficit) or 0) > 0)
+                    then
+                        if entry.growingNotes == nil then
+                            entry.growingNotes = Grow.GrowingNotesForSpec(entry.spec) or L""
                         end
                     end
                 end
             end
-            row.statusTipSlots = tipSlots
-        else
-            row.statusTipSlots = nil
         end
+        row.statusTipSlots = tipSlots
+    else
+        row.statusTipSlots = nil
     end
-    local seedBufferTipData = BuildSeedBufferTipData()
-    if Perf and Perf.End then
-        Perf.End("Build.Tips")
+end
+
+function Planner.FillWatchRowsTips(rows, demand)
+    if type(rows) ~= "table" then
+        return
     end
-    if Perf and Perf.Begin then
-        Perf.Begin("Build.Notify")
+    for i = 1, #rows do
+        Planner.FillWatchRowTips(rows[i], demand)
     end
-    NotifyWatchRedBlocks(rows)
-    NotifyAllWatchesReady(rows)
-    NotifyAutoGrowIdleBlocked(rows)
-    if Perf and Perf.End then
-        Perf.End("Build.Notify")
-    end
-    return rows, seedBufferTipData
 end
 
 local function CacheKey(ctx)
@@ -1405,6 +1538,541 @@ local function NonSnapGensKey(ctx)
         tostring(ctx.knowledgeGen or 0),
         tostring(ctx.settingsHash or 0),
     }, ":")
+end
+
+--- Mid-refine cheap path: garden/watch/knowledge/settings only (excludes refineGen).
+local function StructuralNonRefineGensKey(ctx)
+    ctx = type(ctx) == "table" and ctx or {}
+    return table.concat({
+        tostring(ctx.gardenGen or 0),
+        tostring(ctx.watchGen or 0),
+        tostring(ctx.knowledgeGen or 0),
+        tostring(ctx.settingsHash or 0),
+    }, ":")
+end
+
+local function CurrentStructuralNonRefineGensKey()
+    local Garden = StockPiler2.Garden
+    local Watch = StockPiler2.Watch
+    local Know = StockPiler2.Knowledge
+    return StructuralNonRefineGensKey({
+        gardenGen = Garden and (Garden.GetPlanGen and Garden.GetPlanGen() or Garden.GetGen and Garden.GetGen()) or 0,
+        watchGen = Watch and Watch.GetGen and Watch.GetGen() or 0,
+        knowledgeGen = Know and Know.GetGen and Know.GetGen() or 0,
+        settingsHash = Planner.SettingsHash(),
+    })
+end
+
+--- GardenPatch: watch/knowledge/settings only (garden/snap/refine may differ).
+local function RecipeStructuralGensKey(ctx)
+    ctx = type(ctx) == "table" and ctx or {}
+    return table.concat({
+        tostring(ctx.watchGen or 0),
+        tostring(ctx.knowledgeGen or 0),
+        tostring(ctx.settingsHash or 0),
+    }, ":")
+end
+
+local function CurrentRecipeStructuralGensKey()
+    local Watch = StockPiler2.Watch
+    local Know = StockPiler2.Knowledge
+    return RecipeStructuralGensKey({
+        watchGen = Watch and Watch.GetGen and Watch.GetGen() or 0,
+        knowledgeGen = Know and Know.GetGen and Know.GetGen() or 0,
+        settingsHash = Planner.SettingsHash(),
+    })
+end
+
+--- Cache-only growing notes refresh (never FindPlantUidForSpec / bag walk).
+local function PatchTipGrowingNotesCacheOnly(tipSlots)
+    if type(tipSlots) ~= "table" then
+        return
+    end
+    local Grow = StockPiler2.Grow
+    if not (Grow and Grow.GrowingNotesForSpec) then
+        return
+    end
+    for s = 1, #tipSlots do
+        local entry = tipSlots[s]
+        if type(entry) == "table"
+            and entry.kind == "plant"
+            and type(entry.spec) == "table"
+        then
+            local notes = Grow.GrowingNotesForSpec(entry.spec, { cacheOnly = true })
+            if notes ~= nil then
+                entry.growingNotes = notes
+            end
+            -- nil from cacheOnly miss → keep existing growingNotes
+        end
+    end
+end
+
+--- Overlay live bag counts on plan rows so Stock/Craftable do not lag coalesce.
+--- Safe Status flips (stocked / ready / seed-buffer / demote-on-short) follow live deficit;
+--- buy/shared/plant tip lines stay plan-owned until full Planner.Build.
+local function ApplyLiveWatchStatus(row, recipe, deficit, have, craftable, target)
+    local key = tostring(row.statusKey or "")
+    local potionKey = row.potionRecipeKey or row.id or row.potionKey
+    local RS = StockPiler2.RecipeSpec
+
+    local function SeedBufferShort()
+        if type(recipe) ~= "table" or type(RS) ~= "table" then
+            return false
+        end
+        if not (RS.ShouldAutoGrowPotion and RS.ShouldAutoGrowPotion(potionKey, nil) == true) then
+            return false
+        end
+        if not (StockPiler2.Watch
+            and StockPiler2.Watch.IsSeedBufferEnabled
+            and StockPiler2.Watch.IsSeedBufferEnabled() == true)
+        then
+            return false
+        end
+        return RS.WatchHasSeedBufferShort and RS.WatchHasSeedBufferShort(recipe) == true
+    end
+
+    local function ApplySeedBufferStatus()
+        local buffer = StockPiler2.Watch.GetSeedBufferMin
+            and StockPiler2.Watch.GetSeedBufferMin() or 5
+        row.statusKey = "need_seeds"
+        row.statusText = T("plan.status.seed_buffer")
+        row.statusLines = {
+            T("plan.line.seed_buffer_short", { buffer = tostring(buffer) }),
+            T("plan.line.seed_buffer_grow"),
+        }
+        row.craftableShared = false
+    end
+
+    local function ApplyStockedStatus()
+        row.statusKey = "potion_stocked"
+        row.statusText = T("plan.status.potions_stocked")
+        row.statusLines = { T("plan.line.bag_at_target") }
+        row.craftableShared = false
+    end
+
+    local function ApplyReadyStatus()
+        row.statusKey = "ready_to_craft"
+        row.statusText = T("plan.status.ready_to_craft")
+        row.craftableShared = false
+        if StockPiler2.TradeSkillCaps and StockPiler2.TradeSkillCaps.CanBrewPotions
+            and StockPiler2.TradeSkillCaps.CanBrewPotions() == true
+        then
+            row.statusLines = {
+                T("plan.line.ready_open_apo"),
+                T("plan.line.ready_rarities_note"),
+            }
+        else
+            row.statusLines = {
+                T("plan.line.ready_apo_only_covered"),
+            }
+        end
+    end
+
+    local function DemoteToMaterialsShort()
+        if SeedBufferShort() then
+            ApplySeedBufferStatus()
+            return
+        end
+        -- Prefer buy when no AutoGrow path can help (e.g. Strength/Toughness mains).
+        local growable = false
+        if type(recipe) == "table" and SpecIsAutoGrowProgressable then
+            local slots = recipe.slots or {}
+            for i = 1, #slots do
+                local slot = slots[i]
+                local spec = slot and (slot.spec or (RS and RS.ResolveSlotSpec and RS.ResolveSlotSpec(slot)))
+                if type(spec) == "table"
+                    and SpecIsAutoGrowProgressable(spec, slot and slot.role) == true
+                then
+                    growable = true
+                    break
+                end
+            end
+        end
+        if SetMaterialsShortStatus then
+            SetMaterialsShortStatus(row, growable, nil, nil)
+        else
+            row.statusKey = "restocking"
+            row.statusText = T("plan.status.restocking")
+        end
+        row.craftableShared = false
+        row.statusLines = nil
+    end
+
+    -- 0.4.156: restocking must flip after last seeds plant (else stuck until watch edit).
+    -- 0.4.161: need_seeds must flip to ready when buffer fills (was stuck until /sp2 watchplan).
+    local flippable = key == "ready_to_craft"
+        or key == "ready_to_craft_shared"
+        or key == "potion_stocked"
+        or key == "need_seeds"
+        or key == "restocking"
+    if not flippable then
+        return
+    end
+
+    if deficit <= 0 then
+        if SeedBufferShort() then
+            if key ~= "need_seeds" then
+                ApplySeedBufferStatus()
+            end
+        elseif key ~= "potion_stocked" then
+            ApplyStockedStatus()
+        end
+        return
+    end
+
+    local covered = target > 0
+        and (have + (tonumber(craftable) or 0)) >= target
+
+    if covered then
+        if SeedBufferShort() then
+            if key ~= "need_seeds" then
+                ApplySeedBufferStatus()
+            end
+        elseif key ~= "ready_to_craft" and key ~= "ready_to_craft_shared" then
+            ApplyReadyStatus()
+        end
+        return
+    end
+
+    -- Ready: brewed through shared mats / craftable hit 0 (0.4.162).
+    -- Stocked: vault/mail/bank removed bag potions — Stock already live, Status stuck (0.4.165).
+    if key == "ready_to_craft" or key == "ready_to_craft_shared" or key == "potion_stocked" then
+        DemoteToMaterialsShort()
+        return
+    end
+
+    -- Buffer filled but mats still short of target: leave Seed buffer for restocking.
+    if key == "need_seeds" and not SeedBufferShort() then
+        row.statusKey = "restocking"
+        row.statusText = T("plan.status.restocking")
+        row.craftableShared = false
+        return
+    end
+    if key == "restocking" and SeedBufferShort() then
+        ApplySeedBufferStatus()
+    end
+end
+
+local function PatchPlanSnapshotLiveStatus(row)
+    if type(row) ~= "table" then
+        return
+    end
+    local PS = StockPiler2.PlanSnapshot
+    local plan = PS and PS.Get and PS.Get()
+    if type(plan) ~= "table" or type(plan.rows) ~= "table" then
+        return
+    end
+    local keyStr = tostring(row.potionRecipeKey or row.id or row.potionKey or "")
+    local uid = tonumber(row.uniqueID) or 0
+    if keyStr == "" and uid <= 0 then
+        return
+    end
+    for i = 1, #plan.rows do
+        local snap = plan.rows[i]
+        if type(snap) == "table" then
+            local snapKey = tostring(snap.potionRecipeKey or snap.id or snap.potionKey or "")
+            local snapUid = tonumber(snap.uniqueID) or 0
+            local match = (keyStr ~= "" and snapKey == keyStr)
+                or (uid > 0 and snapUid == uid)
+            if match then
+                snap.potionHave = row.potionHave
+                snap.potionDeficit = row.potionDeficit
+                snap.craftable = row.craftable
+                snap.statusKey = row.statusKey
+                snap.statusText = row.statusText
+                snap.statusLines = row.statusLines
+                snap.craftableShared = row.craftableShared
+                return
+            end
+        end
+    end
+end
+
+--- Shared live Stock/Craftable patch (Watch UI + mid-refine cheap rebuild).
+--- opts.syncSnapshot=false when rows already are plan.rows (cheap rebuild).
+--- opts.allowWarmHave=false — GardenPatch: never sync WarmHave; keep prior craftable.
+--- 0.4.155: skip CountPotionsCraftable when row already counted for this snapGen.
+function Planner.PatchWatchRowsLiveCounts(rows, opts)
+    opts = type(opts) == "table" and opts or {}
+    local syncSnapshot = opts.syncSnapshot ~= false
+    local allowWarmHave = opts.allowWarmHave ~= false
+    if type(rows) ~= "table" or #rows == 0 then
+        return
+    end
+    local Inv = StockPiler2.Inventory
+    local RS = StockPiler2.RecipeSpec
+    if not Inv or not Inv.CountByUid then
+        return
+    end
+    local snapGen = 0
+    if Inv.GetSnapGen then
+        snapGen = tonumber(Inv.GetSnapGen()) or 0
+    end
+    local needCraftable = false
+    for i = 1, #rows do
+        local row = rows[i]
+        if type(row) == "table" then
+            local recipe = row.recipe or row.specRecipe
+            if type(recipe) == "table"
+                and (tonumber(row._craftableSnapGen) or -1) ~= snapGen
+            then
+                needCraftable = true
+                break
+            end
+        end
+    end
+    local SpecHaveCache = Planner.SpecHaveCache
+    local haveWarm = SpecHaveCache and SpecHaveCache.IsHaveCacheWarmForSnap
+        and SpecHaveCache.IsHaveCacheWarmForSnap() == true
+    if needCraftable then
+        if SpecHaveCache and SpecHaveCache.BeginPlanCraftsMemo then
+            SpecHaveCache.BeginPlanCraftsMemo()
+        end
+        if not haveWarm and allowWarmHave and SpecHaveCache and SpecHaveCache.WarmSpecHaveCacheForWatches then
+            SpecHaveCache.WarmSpecHaveCacheForWatches()
+            haveWarm = SpecHaveCache.IsHaveCacheWarmForSnap
+                and SpecHaveCache.IsHaveCacheWarmForSnap() == true
+        end
+    end
+    -- GardenPatch: without warm have-cache, keep prior craftable (no bag walk).
+    local recountCraftable = needCraftable and (haveWarm or allowWarmHave)
+    for i = 1, #rows do
+        local row = rows[i]
+        if type(row) == "table" then
+            local uid = tonumber(row.uniqueID) or 0
+            if uid > 0 then
+                local have = tonumber(Inv.CountByUid(uid)) or 0
+                row.potionHave = have
+                row.stockText = towstring(tostring(have))
+                local min = tonumber(row.potionMin) or tonumber(row.target) or 0
+                local deficit = math.max(0, min - have)
+                row.potionDeficit = deficit
+                local recipe = row.recipe or row.specRecipe
+                local craftable = tonumber(row.craftable) or 0
+                if type(recipe) == "table" and RS then
+                    if RS.CraftsNeededForDeficit then
+                        row.craftsNeeded = RS.CraftsNeededForDeficit(deficit, recipe)
+                    end
+                    if recountCraftable
+                        and (tonumber(row._craftableSnapGen) or -1) ~= snapGen
+                        and RS.CountPotionsCraftable
+                    then
+                        craftable = tonumber(RS.CountPotionsCraftable(recipe)) or 0
+                        craftable = math.max(0, math.floor(craftable + 0.5))
+                        row.craftable = craftable
+                        row._craftableSnapGen = snapGen
+                        if craftable > 0 or row.hasRecipe then
+                            row.craftableText = towstring(tostring(craftable))
+                        end
+                    end
+                end
+                local prevKey = tostring(row.statusKey or "")
+                ApplyLiveWatchStatus(row, recipe, deficit, have, craftable, min)
+                local newKey = tostring(row.statusKey or "")
+                if syncSnapshot and newKey ~= prevKey then
+                    PatchPlanSnapshotLiveStatus(row)
+                end
+                -- Leaving Seed buffer / Ready / Stocked: wake plant job (full Build used to be required).
+                if (prevKey == "need_seeds" or prevKey == "ready_to_craft"
+                        or prevKey == "ready_to_craft_shared"
+                        or prevKey == "potion_stocked")
+                    and newKey ~= prevKey
+                    and (newKey == "restocking" or newKey == "need_seeds"
+                        or newKey == "buy_ingredients" or newKey == "enable_autogrow")
+                    and StockPiler2.Grow and StockPiler2.Grow.MarkPlantJobDirty
+                then
+                    StockPiler2.Grow.MarkPlantJobDirty()
+                end
+            end
+        end
+    end
+end
+
+--- Snap/refine-only PlanRebuild: keep rows/tips, patch live counts, skip Status/Demand/Tips.
+--- Full Build when garden/watch/knowledge/settings change (or force / no stale plan).
+--- 0.4.155: drop HasOutstanding gate — ShouldDeferPlanRebuild only runs Build after
+--- outstanding clears, so requiring outstanding made cheap unreachable.
+function Planner.TryCheapRebuild()
+    local PS = StockPiler2.PlanSnapshot
+    local stale = PS and PS.Get and PS.Get()
+    local function Miss(reason)
+        if StockPiler2.Debug and StockPiler2.Debug.LogOp then
+            StockPiler2.Debug.LogOp("plan", "cheap-miss reason=" .. tostring(reason or "?"))
+        end
+        return nil
+    end
+    if type(stale) ~= "table" then
+        return Miss("no-stale")
+    end
+    if type(stale.rows) ~= "table" or #stale.rows == 0 then
+        return Miss("empty-rows")
+    end
+    if type(stale.ctx) ~= "table" then
+        return Miss("no-ctx")
+    end
+    if StructuralNonRefineGensKey(stale.ctx) ~= CurrentStructuralNonRefineGensKey() then
+        return Miss("structural")
+    end
+    local FW = StockPiler2.FrameWork
+    if FW and FW.Cancel then
+        FW.Cancel("plan-tips")
+        FW.Cancel("plan-build")
+    end
+    Planner._pendingTipsPlan = nil
+    local Perf = StockPiler2.Perf
+    if Perf and Perf.Begin then
+        Perf.Begin("Planner.CheapRebuild")
+    end
+    Planner.PatchWatchRowsLiveCounts(stale.rows, { syncSnapshot = false })
+    stale.seedBufferTipData = BuildSeedBufferTipData({
+        previous = stale.seedBufferTipData,
+    })
+    local Inv = StockPiler2.Inventory
+    local Garden = StockPiler2.Garden
+    local Watch = StockPiler2.Watch
+    local Know = StockPiler2.Knowledge
+    local RP = StockPiler2.RefinePipeline
+    stale.ctx.snapGen = Inv and Inv.GetSnapGen and Inv.GetSnapGen() or 0
+    stale.ctx.gardenGen = Garden and (Garden.GetPlanGen and Garden.GetPlanGen() or Garden.GetGen and Garden.GetGen()) or 0
+    stale.ctx.refineGen = RP and RP.GetGen and RP.GetGen() or 0
+    stale.ctx.watchGen = Watch and Watch.GetGen and Watch.GetGen() or 0
+    stale.ctx.knowledgeGen = Know and Know.GetGen and Know.GetGen() or 0
+    stale.ctx.settingsHash = Planner.SettingsHash()
+    local key = CacheKey(stale.ctx)
+    local planGen = (tonumber(Planner._planGen) or 0) + 1
+    Planner._planGen = planGen
+    stale.planGen = planGen
+    stale.cacheKey = key
+    stale.builtAt = (type(GetGameTime) == "function" and GetGameTime()) or 0
+    if PS and PS.Set then
+        PS.Set(stale, key)
+    end
+    if StockPiler2.Debug and StockPiler2.Debug.LogOp then
+        StockPiler2.Debug.LogOp("plan", string.format("cheap-rebuild gen=%d key=%s", planGen, key))
+    end
+    if StockPiler2Window and StockPiler2Window.RequestFooterRefresh then
+        StockPiler2Window.RequestFooterRefresh()
+    elseif StockPiler2.Brew and StockPiler2.Brew.MaybeNotifyBrewReady then
+        StockPiler2.Brew.MaybeNotifyBrewReady()
+    end
+    local B = StockPiler2.EventBus
+    local E = StockPiler2.Events
+    if B and E and E.PLAN_UPDATED then
+        B.Fire(E.PLAN_UPDATED, { planGen = planGen, cacheKey = key, cheap = true })
+    end
+    if Perf and Perf.End then
+        Perf.End("Planner.CheapRebuild")
+    end
+    return stale
+end
+
+--- True when PlanRebuild can use CheapRebuild or GardenPatch (no cold full Build).
+--- HoldPlanForPrewarm must return false when this is true.
+function Planner.CanCheapOrGardenPatch()
+    local PS = StockPiler2.PlanSnapshot
+    local stale = PS and PS.Get and PS.Get()
+    if type(stale) ~= "table" or type(stale.rows) ~= "table" or #stale.rows == 0 then
+        return false
+    end
+    if type(stale.ctx) ~= "table" then
+        return false
+    end
+    if StructuralNonRefineGensKey(stale.ctx) == CurrentStructuralNonRefineGensKey() then
+        return true
+    end
+    if RecipeStructuralGensKey(stale.ctx) == CurrentRecipeStructuralGensKey() then
+        return true
+    end
+    return false
+end
+
+--- Plant/harvest PlanRebuild: reuse rows/tips, patch live counts + growing notes.
+--- Skips Status.Craftable / Tips.Slots / ApplySpecPlanStatus. Requires recipe-structural match.
+function Planner.TryGardenPatch()
+    local PS = StockPiler2.PlanSnapshot
+    local stale = PS and PS.Get and PS.Get()
+    local function Miss(reason)
+        if StockPiler2.Debug and StockPiler2.Debug.LogOp then
+            StockPiler2.Debug.LogOp("plan", "garden-patch-miss reason=" .. tostring(reason or "?"))
+        end
+        return nil
+    end
+    if type(stale) ~= "table" then
+        return Miss("no-stale")
+    end
+    if type(stale.rows) ~= "table" or #stale.rows == 0 then
+        return Miss("empty-rows")
+    end
+    if type(stale.ctx) ~= "table" then
+        return Miss("no-ctx")
+    end
+    if RecipeStructuralGensKey(stale.ctx) ~= CurrentRecipeStructuralGensKey() then
+        return Miss("recipe-structural")
+    end
+    -- If cheap would also match, prefer cheap (same path, slightly less work on notes).
+    if StructuralNonRefineGensKey(stale.ctx) == CurrentStructuralNonRefineGensKey() then
+        return Miss("use-cheap")
+    end
+    local FW = StockPiler2.FrameWork
+    if FW and FW.Cancel then
+        FW.Cancel("plan-tips")
+        FW.Cancel("plan-build")
+    end
+    Planner._pendingTipsPlan = nil
+    local Perf = StockPiler2.Perf
+    if Perf and Perf.Begin then
+        Perf.Begin("Planner.GardenPatch")
+    end
+    Planner.PatchWatchRowsLiveCounts(stale.rows, {
+        syncSnapshot = false,
+        allowWarmHave = false,
+    })
+    for i = 1, #stale.rows do
+        local row = stale.rows[i]
+        if type(row) == "table" then
+            PatchTipGrowingNotesCacheOnly(row.statusTipSlots)
+        end
+    end
+    stale.seedBufferTipData = BuildSeedBufferTipData({
+        previous = stale.seedBufferTipData,
+    })
+    local Inv = StockPiler2.Inventory
+    local Garden = StockPiler2.Garden
+    local Watch = StockPiler2.Watch
+    local Know = StockPiler2.Knowledge
+    local RP = StockPiler2.RefinePipeline
+    stale.ctx.snapGen = Inv and Inv.GetSnapGen and Inv.GetSnapGen() or 0
+    stale.ctx.gardenGen = Garden and (Garden.GetPlanGen and Garden.GetPlanGen() or Garden.GetGen and Garden.GetGen()) or 0
+    stale.ctx.refineGen = RP and RP.GetGen and RP.GetGen() or 0
+    stale.ctx.watchGen = Watch and Watch.GetGen and Watch.GetGen() or 0
+    stale.ctx.knowledgeGen = Know and Know.GetGen and Know.GetGen() or 0
+    stale.ctx.settingsHash = Planner.SettingsHash()
+    local key = CacheKey(stale.ctx)
+    local planGen = (tonumber(Planner._planGen) or 0) + 1
+    Planner._planGen = planGen
+    stale.planGen = planGen
+    stale.cacheKey = key
+    stale.builtAt = (type(GetGameTime) == "function" and GetGameTime()) or 0
+    if PS and PS.Set then
+        PS.Set(stale, key)
+    end
+    if StockPiler2.Debug and StockPiler2.Debug.LogOp then
+        StockPiler2.Debug.LogOp("plan", string.format("garden-patch gen=%d key=%s", planGen, key))
+    end
+    if StockPiler2Window and StockPiler2Window.RequestFooterRefresh then
+        StockPiler2Window.RequestFooterRefresh()
+    elseif StockPiler2.Brew and StockPiler2.Brew.MaybeNotifyBrewReady then
+        StockPiler2.Brew.MaybeNotifyBrewReady()
+    end
+    local B = StockPiler2.EventBus
+    local E = StockPiler2.Events
+    if B and E and E.PLAN_UPDATED then
+        B.Fire(E.PLAN_UPDATED, { planGen = planGen, cacheKey = key, gardenPatch = true })
+    end
+    if Perf and Perf.End then
+        Perf.End("Planner.GardenPatch")
+    end
+    return stale
 end
 
 function Planner.NonSnapGensKey()
@@ -1462,6 +2130,9 @@ function Planner.CacheKeyFromGens()
 end
 
 function Planner.BuildContext()
+    if StockPiler2.Perf and StockPiler2.Perf.Mark then
+        StockPiler2.Perf.Mark("Build.Ctx")
+    end
     local Inv = StockPiler2.Inventory
     local Garden = StockPiler2.Garden
     local RP = StockPiler2.RefinePipeline
@@ -1543,6 +2214,19 @@ function Planner.Build(opts)
             end
         end
     end
+    -- 0.4.154/156: snap/refine → cheap; plant/harvest gardenGen → GardenPatch.
+    if opts.force ~= true and Planner.TryCheapRebuild then
+        local cheap = Planner.TryCheapRebuild()
+        if type(cheap) == "table" then
+            return cheap
+        end
+    end
+    if opts.force ~= true and Planner.TryGardenPatch then
+        local patched = Planner.TryGardenPatch()
+        if type(patched) == "table" then
+            return patched
+        end
+    end
     local Perf = StockPiler2.Perf
     if Perf and Perf.Begin then
         Perf.Begin("Planner.Build")
@@ -1594,7 +2278,13 @@ function Planner.Build(opts)
     end
     local planGen = (tonumber(Planner._planGen) or 0) + 1
     Planner._planGen = planGen
-    local rows, seedBufferTipData = Planner.BuildWatchRows(ctx)
+    -- 0.4.157: defer Status.Craftable + Tips to FrameWork; keep prior PS.Get() until done().
+    local FW = StockPiler2.FrameWork
+    local deferBuild = FW and FW.Start and opts.force ~= true and opts.syncTips ~= true
+    local rows, seedBufferTipData, demand = Planner.BuildWatchRows(ctx, {
+        deferTips = deferBuild == true,
+        deferCraftable = deferBuild == true,
+    })
     local plan = {
         planGen = planGen,
         cacheKey = key,
@@ -1608,23 +2298,94 @@ function Planner.Build(opts)
         trace = trace,
         builtAt = (type(GetGameTime) == "function" and GetGameTime()) or 0,
     }
-    if PS then
-        PS.Set(plan, key)
+    local function PublishFullPlan(publishPlan)
+        if PS then
+            PS.Set(publishPlan, key)
+        end
+        if StockPiler2.Debug and StockPiler2.Debug.LogOp then
+            StockPiler2.Debug.LogOp("plan", string.format("rebuild gen=%d key=%s", planGen, key))
+        end
+        if StockPiler2Window and StockPiler2Window.RequestFooterRefresh then
+            StockPiler2Window.RequestFooterRefresh()
+        elseif StockPiler2.Brew and StockPiler2.Brew.MaybeNotifyBrewReady then
+            StockPiler2.Brew.MaybeNotifyBrewReady()
+        end
+        local B = StockPiler2.EventBus
+        local E = StockPiler2.Events
+        if B and E and E.PLAN_UPDATED then
+            B.Fire(E.PLAN_UPDATED, { planGen = planGen, cacheKey = key })
+        end
     end
-    if StockPiler2.Debug and StockPiler2.Debug.LogOp then
-        StockPiler2.Debug.LogOp("plan", string.format("rebuild gen=%d key=%s", planGen, key))
+    if deferBuild == true then
+        if FW.Cancel then
+            FW.Cancel("plan-tips")
+            FW.Cancel("plan-build")
+        end
+        Planner._pendingTipsPlan = plan
+        Planner._pendingTipsDemand = demand
+        local state = {
+            phase = "craftable",
+            index = 1,
+            polished = false,
+        }
+        FW.Start({
+            id = "plan-build",
+            gen = tostring(planGen) .. ":" .. key,
+            stepsPerFrame = 1,
+            state = state,
+            resume = function(st)
+                if st.phase == "craftable" then
+                    if st.index <= #rows then
+                        Planner.FillWatchRowCraftable(rows[st.index], ctx)
+                        st.index = st.index + 1
+                        return "continue"
+                    end
+                    st.phase = "polish"
+                    return "continue"
+                end
+                if st.phase == "polish" then
+                    Planner.PolishWatchRowsStatus(rows)
+                    NotifyWatchRedBlocks(rows)
+                    NotifyAllWatchesReady(rows)
+                    NotifyAutoGrowIdleBlocked(rows)
+                    st.phase = "tips"
+                    st.index = 1
+                    return "continue"
+                end
+                if st.phase == "tips" then
+                    if st.index <= #rows then
+                        Planner.FillWatchRowTips(rows[st.index], demand)
+                        st.index = st.index + 1
+                        return "continue"
+                    end
+                    return "done"
+                end
+                return "done"
+            end,
+            done = function()
+                if Planner._pendingTipsPlan == plan then
+                    Planner._pendingTipsPlan = nil
+                    Planner._pendingTipsDemand = nil
+                    PublishFullPlan(plan)
+                end
+            end,
+            cancel = function()
+                if Planner._pendingTipsPlan == plan then
+                    Planner._pendingTipsPlan = nil
+                    Planner._pendingTipsDemand = nil
+                end
+            end,
+        })
+        if Perf and Perf.End then
+            Perf.End("Planner.Build")
+        end
+        local stale = PS and PS.Get and PS.Get()
+        if type(stale) == "table" then
+            return stale
+        end
+        return nil
     end
-    -- Coalesce footer + brew-ready notify; do not run SyncActionReadiness inside Build.
-    if StockPiler2Window and StockPiler2Window.RequestFooterRefresh then
-        StockPiler2Window.RequestFooterRefresh()
-    elseif StockPiler2.Brew and StockPiler2.Brew.MaybeNotifyBrewReady then
-        StockPiler2.Brew.MaybeNotifyBrewReady()
-    end
-    local B = StockPiler2.EventBus
-    local E = StockPiler2.Events
-    if B and E and E.PLAN_UPDATED then
-        B.Fire(E.PLAN_UPDATED, { planGen = planGen, cacheKey = key })
-    end
+    PublishFullPlan(plan)
     if Perf and Perf.End then
         Perf.End("Planner.Build")
     end

@@ -82,14 +82,14 @@ function StockPiler2Window.SyncActionReadiness(opts)
     -- Early-out when nothing changed (craft-slot / cultivation storms).
     -- 0.4.144: do not Perf.Begin on no-ops — continuous Footer Marks glue the trail
     -- (Footer xN000) and drown real hitches in libperf summaries.
-    if not immediate
-        and StockPiler2Window._footerWindowOpen == windowOpen
+    -- 0.4.159: honor early-out even for immediate=true poll paths (ready notify).
+    local appearanceKey = tostring(canHarvest) .. ":" .. tostring(canBrew)
+    local unchanged = StockPiler2Window._footerWindowOpen == windowOpen
         and StockPiler2Window._footerOnWatch == onWatch
         and StockPiler2Window._footerOnPotions == onPotions
         and StockPiler2Window._footerCanHarvest == canHarvest
         and StockPiler2Window._footerCanBrew == canBrew
-    then
-        local appearanceKey = tostring(canHarvest) .. ":" .. tostring(canBrew)
+    if unchanged then
         if StockPiler2.Macro == nil
             or StockPiler2.Macro._lastAppearanceKey == nil
             or StockPiler2.Macro._lastAppearanceKey == appearanceKey

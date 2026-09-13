@@ -1104,6 +1104,7 @@ function RS.StoreLearnedRecipeSpec(materials, outputs, opts)
     local existingKey, existingRecipe = RS.FindRecipeByFingerprint(recipes, fingerprint)
     local recipe = existingRecipe
     local isNew = type(recipe) ~= "table"
+    local structuralChange = isNew
     if isNew then
         recipe = {
             recipeSpecKey = fingerprint,
@@ -1125,6 +1126,7 @@ function RS.StoreLearnedRecipeSpec(materials, outputs, opts)
         recipe.slots = SlimSlotsForStorage(slots)
         if type(existingKey) == "string" and existingKey ~= fingerprint then
             RemapRecipeSpecKey(s, existingKey, fingerprint, recipe)
+            structuralChange = true
         end
     end
 
@@ -1214,7 +1216,10 @@ function RS.StoreLearnedRecipeSpec(materials, outputs, opts)
     end
     -- Link every outcomes[uid] fingerprint onto potions.*.recipeKeys now (not only on init).
     RS.RelinkPotionRecipeKeysFromOutcomes()
-    if StockPiler2.Knowledge and StockPiler2.Knowledge.Touch then
+    -- 0.4.157: only Touch on new/remapped recipe — identical re-learn must not force full Build.
+    if structuralChange == true
+        and StockPiler2.Knowledge and StockPiler2.Knowledge.Touch
+    then
         StockPiler2.Knowledge.Touch()
     end
     return true
@@ -2073,12 +2078,24 @@ function RS.WarmSpecHaveCacheForWatches()
     return StockPiler2.Planner.SpecHaveCache.WarmSpecHaveCacheForWatches()
 end
 
+function RS.StartSlicedWarmHaveForWatches(genKey)
+    return StockPiler2.Planner.SpecHaveCache.StartSlicedWarmHaveForWatches(genKey)
+end
+
 function RS.IsHaveCacheWarmForSnap()
     return StockPiler2.Planner.SpecHaveCache.IsHaveCacheWarmForSnap()
 end
 
 function RS.IsDemandCacheWarm()
     return StockPiler2.Planner.SpecHaveCache.IsDemandCacheWarm()
+end
+
+function RS.IsSeedLinesCacheWarm()
+    local SD = StockPiler2.Planner and StockPiler2.Planner.SpecDemand
+    if SD and SD.IsSeedLinesCacheWarm then
+        return SD.IsSeedLinesCacheWarm()
+    end
+    return false
 end
 
 function RS.BeginOrchTick()

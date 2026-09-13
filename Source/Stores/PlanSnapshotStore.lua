@@ -21,7 +21,19 @@ function PS.GetCacheKey()
     return PS._cacheKey
 end
 
+--- Soft invalidate: clear cacheKey so RebuildPlanIfDue rebuilds, but keep _plan
+--- for Watch / GetOrBuild({refresh=false}) / cheap / GardenPatch reuse.
 function PS.Invalidate()
+    PS._cacheKey = nil
+    local B = StockPiler2.EventBus
+    local E = StockPiler2.Events
+    if B and E and E.PLAN_INVALIDATED then
+        B.Fire(E.PLAN_INVALIDATED, {})
+    end
+end
+
+--- Hard clear: drop plan (session / character change). Do not use on Window OnShow.
+function PS.Clear()
     PS._plan = nil
     PS._cacheKey = nil
     local B = StockPiler2.EventBus

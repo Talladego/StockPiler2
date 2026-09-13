@@ -767,6 +767,17 @@ Private.SeedMatchesGrowSpec = function(seedItem, spec, expectedPlantUid)
             if type(plantData) == "table" and MS.ProductMatches(plantData, spec) then
                 return true, plantUid
             end
+            -- Learned Items fingerprint (AsItemData has no craftingBonus for ProductMatches).
+            if StockPiler2.Items and StockPiler2.Items.ToSpec then
+                local plantSpec = StockPiler2.Items.ToSpec(plantUid)
+                if type(plantSpec) == "table" then
+                    local a = (MS.ProductKey and MS.ProductKey(plantSpec)) or MS.Key(plantSpec)
+                    local b = (MS.ProductKey and MS.ProductKey(spec)) or MS.Key(spec)
+                    if a ~= "" and a == b then
+                        return true, plantUid
+                    end
+                end
+            end
             -- Mapped plant missing or wrong: Liniment seeds still ProductMatch the apo spec.
             if (type(plantData) ~= "table" or expectedPlantUid <= 0)
                 and Private.IsBagSeedOrSpore(seedItem)
