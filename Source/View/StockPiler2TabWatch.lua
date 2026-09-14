@@ -1124,8 +1124,23 @@ local function CollectSeedBufferTooltipData()
 
     -- Bag snapshots may advance while the planner rebuild is coalesced. Patch only
     -- live seed Have/SHORT fields; ground, outstanding, intents and demand stay planned.
+    -- Issue #6: shallow-copy watched (+ rows) before live patch + sort — never mutate
+    -- plan.seedBufferTipData (Planner reuses previous.seedBufferTipData on cheap rebuilds).
     local Inv = StockPiler2.Inventory
-    local watched = type(data.watched) == "table" and data.watched or {}
+    local watchedSrc = type(data.watched) == "table" and data.watched or {}
+    local watched = {}
+    for i = 1, #watchedSrc do
+        local src = watchedSrc[i]
+        if type(src) == "table" then
+            local copy = {}
+            for k, v in pairs(src) do
+                copy[k] = v
+            end
+            watched[i] = copy
+        else
+            watched[i] = src
+        end
+    end
     if Inv and Inv.CountByUid then
         for i = 1, #watched do
             local row = watched[i]
@@ -1147,9 +1162,13 @@ local function CollectSeedBufferTooltipData()
             return tostring(a.key) < tostring(b.key)
         end)
     end
-    data.watched = watched
-    data.intents = type(data.intents) == "table" and data.intents or {}
-    return data
+    return {
+        pending = data.pending,
+        buffer = data.buffer,
+        enabled = data.enabled,
+        watched = watched,
+        intents = type(data.intents) == "table" and data.intents or {},
+    }
 end
 
 local function BuildSeedBufferTooltipRows(data)
@@ -1774,19 +1793,22 @@ local function BuildStatusTooltipRows(data)
                 end
 
                 -- Live bag Have (plan Need / craftsNeeded stay from row until rebuild).
+                -- Issue #5: copy tip-slot fields locally — never write have/deficit/stocked
+                -- back into row.statusTipSlots; cacheOnly Have (no ForEachItem on miss).
+                local tipHave = tonumber(entry.have) or 0
+                local tipNeed = tonumber(entry.need) or 0
+                local tipDeficit = tonumber(entry.deficit) or math.max(0, tipNeed - tipHave)
+                local tipStocked = entry.stocked == true or tipDeficit <= 0
                 local RS = StockPiler2.RecipeSpec
                 if RS and RS.CountItemsMatchingSpec and type(entry.spec) == "table" then
-                    local liveHave = tonumber(RS.CountItemsMatchingSpec(entry.spec)) or 0
-                    entry.have = liveHave
-                    local need = tonumber(entry.need) or 0
-                    entry.deficit = math.max(0, need - liveHave)
-                    entry.stocked = entry.deficit <= 0
-                    local perCraft = tonumber(entry.perCraft) or 1
-                    if perCraft > 0 then
-                        entry.craftsHave = math.floor(liveHave / perCraft)
+                    local liveHave = RS.CountItemsMatchingSpec(entry.spec, { cacheOnly = true })
+                    if liveHave ~= nil then
+                        tipHave = tonumber(liveHave) or tipHave
+                        tipDeficit = math.max(0, tipNeed - tipHave)
+                        tipStocked = tipDeficit <= 0
                     end
                 end
-                local stocked = entry.stocked == true or (tonumber(entry.deficit) or 0) <= 0
+                local stocked = tipStocked
                 local agProgressable = SpecIsAutoGrowProgressableTip(entry)
                 -- Red = player buy / blocked; yellow = AutoGrow (grow/refine) can still progress.
                 -- Do not use entry.kind alone: growable shorts become kind=buy when seedCredit is 0.
@@ -1819,11 +1841,11 @@ local function BuildStatusTooltipRows(data)
                 if (entry.kind == "plant" or (agProgressable and entry.kind ~= "convert"))
                     and not stocked
                 then
-                    -- Prefer live plot notes over plan-time growingNotes (plot scan only —
+                    -- Prefer cacheOnly plot notes / plan-time growingNotes (Issue #5 —
                     -- never ResolveSeed / GetSeedBudget / BuildBalanced on this path).
-                    local notes = L""
+                    local notes = nil
                     if Grow and Grow.GrowingNotesForSpec then
-                        notes = Grow.GrowingNotesForSpec(entry.spec) or L""
+                        notes = Grow.GrowingNotesForSpec(entry.spec, { cacheOnly = true })
                     end
                     if notes == nil or notes == L"" then
                         notes = entry.growingNotes
@@ -1916,14 +1938,14 @@ local function BuildStatusTooltipRows(data)
                 local haveText
                 if statusNote and statusNote ~= L"" then
                     haveText = T("tip.watch.have_need_note", {
-                        have = tostring(entry.have or 0),
-                        need = tostring(entry.need or 0),
+                        have = tostring(tipHave),
+                        need = tostring(tipNeed),
                         note = statusNote,
                     })
                 else
                     haveText = T("tip.watch.have_need", {
-                        have = tostring(entry.have or 0),
-                        need = tostring(entry.need or 0),
+                        have = tostring(tipHave),
+                        need = tostring(tipNeed),
                     })
                 end
                 rows[#rows + 1] = {

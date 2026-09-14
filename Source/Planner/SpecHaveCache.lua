@@ -613,13 +613,17 @@ function SpecHaveCache.BeginOrchTick()
     SpecHaveCache._orchTickFocusTick = nil
 end
 
-function SpecHaveCache.CountItemsMatchingSpec(spec)
+--- opts.cacheOnly=true — warm cache / CountByUid / last-complete only; never ForEachItem.
+--- Miss returns nil so tip hover can keep plan-time have (Issue #5).
+function SpecHaveCache.CountItemsMatchingSpec(spec, opts)
     if type(spec) ~= "table" or not MS then
         return 0
     end
     if not MS.ProductMatches and not MS.Matches then
         return 0
     end
+    opts = type(opts) == "table" and opts or {}
+    local cacheOnly = opts.cacheOnly == true
     local specKey = MS.Key and MS.Key(spec) or nil
     local cache = EnsureSpecHaveCacheForSnap()
     local FW = StockPiler2.FrameWork
@@ -627,7 +631,7 @@ function SpecHaveCache.CountItemsMatchingSpec(spec)
         or (FW and FW.IsActive and FW.IsActive("prewarm-warm-have") == true)
     -- While sliced WarmHave is in flight: never trust live cache for unfilled keys,
     -- and never ForEachItem (Status.Craftable storm). Use last-complete / boundUid.
-    if slicing then
+    if slicing or cacheOnly then
         if specKey ~= nil and cache[specKey] ~= nil then
             -- Only trust keys already filled by this slice (or boundUid path).
             return cache[specKey]
@@ -645,6 +649,9 @@ function SpecHaveCache.CountItemsMatchingSpec(spec)
         local plantUid = SpecHavePlantUid(spec)
         if plantUid > 0 and StockPiler2.Inventory and StockPiler2.Inventory.CountByUid then
             return tonumber(StockPiler2.Inventory.CountByUid(plantUid)) or 0
+        end
+        if cacheOnly then
+            return nil
         end
         return 0
     end

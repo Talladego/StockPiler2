@@ -2,7 +2,7 @@
 
 Greenfield rewrite of StockPiler using an **Orchestrator + Stores + Planner + Executors** architecture. Runs as a **separate addon** alongside v1 — does not modify the original StockPiler folder.
 
-**Version:** 0.4.165
+**Version:** 0.4.167
 
 Repository: [Talladego/StockPiler2](https://github.com/Talladego/StockPiler2)
 
@@ -155,6 +155,10 @@ On each user-facing ship, bump together:
 | **Major** (`N+1.0.0`) | Breaking saved-var / architecture break (rare in 0.x) |
 
 ## Changelog
+
+**0.4.167:** Fix — Watch Status / Seed-buffer tip hover no longer ResolveSeed/bag-walks or mutates plan tip payloads (#5/#6): Status tip uses `GrowingNotesForSpec(..., { cacheOnly = true })` + plan `growingNotes`, `CountItemsMatchingSpec(..., { cacheOnly = true })` (no cold ForEachItem), and local tip-slot copies; Seed-buffer tip shallow-copies `watched` before live patch/sort and never writes back to `plan.seedBufferTipData`.
+
+**0.4.166:** Fix — Seed buffer stuck after a failed Goldweed (etc.) refine: `expire-stuck` armed a 45s cooldown and `CollectIntents` cached an empty list; IntentCacheKey ignored cooldown expiry so intents stayed `(none)` and AutoGrow looped `no-job` / `fillBlocked` with plots empty and headroom>0. Cache key now includes active seed-buffer cooldowns and expiry invalidates the cache.
 
 **0.4.165:** Fix — Watch Status stayed Potions stocked after vault/mail/bank removed bag potions (Stock already live-patched to 0; `ApplyLiveWatchStatus` never demoted `potion_stocked`). Same cheap live patch path as Ready demotion — no full `/sp2 watchplan` rebuild.
 

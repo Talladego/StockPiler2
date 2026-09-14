@@ -88,9 +88,43 @@ local function IsSeedBufferOnCooldown(seedUid)
     local now = NowSec()
     if now >= untilT then
         Refine._seedBufferCooldownUntil[seedUid] = nil
+        -- Cooldown expiry must bust CollectIntents: empty lists cached while this
+        -- seed was skipped would otherwise stick until watch/RP/garden gen moves.
+        if Refine.InvalidateIntentCache then
+            Refine.InvalidateIntentCache()
+        end
         return false
     end
     return true
+end
+
+--- Active seed-buffer fail cooldowns (and prune expired). Included in IntentCacheKey
+--- so expiry cannot leave a stale empty CollectIntents cache (0.4.166).
+local function SeedBufferCooldownCacheToken()
+    local map = Refine._seedBufferCooldownUntil
+    if type(map) ~= "table" then
+        return "0"
+    end
+    local now = NowSec()
+    local parts = {}
+    local expired = false
+    for uidKey, untilT in pairs(map) do
+        untilT = tonumber(untilT) or 0
+        if untilT <= now then
+            map[uidKey] = nil
+            expired = true
+        else
+            parts[#parts + 1] = tostring(uidKey) .. "@" .. tostring(math.floor(untilT))
+        end
+    end
+    if expired and Refine.InvalidateIntentCache then
+        Refine.InvalidateIntentCache()
+    end
+    if #parts == 0 then
+        return "0"
+    end
+    table.sort(parts)
+    return table.concat(parts, ",")
 end
 
 --- Drop pending throttle when outstanding was wiped without a successful
@@ -286,6 +320,8 @@ local function IntentCacheKey()
     -- 0.4.125: drop snapGen — every refine delivery used to bust CollectIntents /
     -- BuildBalancedSpecDemand on the next Orch Tick. Issue/reconcile bump RP.GetGen
     -- and InvalidateIntentCache already.
+    -- 0.4.166: include seed-buffer fail cooldown token — empty intents cached while
+    -- a seed was on cooldown must rebuild when that cooldown ends.
     local gardenGen = 0
     if Garden then
         if Garden.GetPlanGen then
@@ -298,6 +334,7 @@ local function IntentCacheKey()
         tostring(Watch and Watch.GetGen and Watch.GetGen() or 0),
         tostring(RP and RP.GetGen and RP.GetGen() or 0),
         tostring(gardenGen),
+        SeedBufferCooldownCacheToken(),
     }, ":")
 end
 

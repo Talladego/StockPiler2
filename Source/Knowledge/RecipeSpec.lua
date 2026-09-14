@@ -2102,8 +2102,8 @@ function RS.BeginOrchTick()
     return StockPiler2.Planner.SpecHaveCache.BeginOrchTick()
 end
 
-function RS.CountItemsMatchingSpec(spec)
-    return StockPiler2.Planner.SpecHaveCache.CountItemsMatchingSpec(spec)
+function RS.CountItemsMatchingSpec(spec, opts)
+    return StockPiler2.Planner.SpecHaveCache.CountItemsMatchingSpec(spec, opts)
 end
 
 function RS.CollectAutoGrowSeedLines()
